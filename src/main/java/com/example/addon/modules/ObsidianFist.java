@@ -179,25 +179,32 @@ public class ObsidianFist extends Module {
 
     private enum BreakMode { Safe, Instant, Custom }
 
-    private enum State { Idle, Placing, MiningStart, MiningHold, WaitingBreak, SpeedMining }
+    private enum State { Idle, Placing, PlacingConfirm, MiningStart, MiningHold, WaitingBreak, SpeedMining }
 
     // ── State ─────────────────────────────────────────────────────────────────
 
-    private State mode       = State.Idle;
-    private BlockPos currentPos;
+    private State     mode             = State.Idle;
+    private BlockPos  currentPos;
     private Direction currentDir;
-    private int timer;
-    private int restorationCount;
-    private BlockPos placeTarget;
+    private int       timer;
+    private int       restorationCount;
+    private BlockPos  placeTarget;
     private Direction placeSide;
-    // FIX: prevSlot captured once in handleIdle, never overwritten mid-burst
-    private int prevSlot     = -1;
-    // FIX: unified counter – incremented exactly once per completed cycle
-    private int burstCyclesDone = 0;
+    private int       prevSlot         = -1;
+    private int       burstCyclesDone  = 0;
+
+    /**
+     * Set to true by onPacket() when a break is confirmed in Safe mode.
+     * Read and cleared at the top of the next onTick() so the advance runs
+     * inside the state machine loop rather than mid-packet-handler.
+     * This is what allows zero-tick chaining from packet confirmation to the
+     * next place within the same tick's loop iteration.
+     */
+    private volatile boolean pendingAdvance = false;
 
     // Auto-repair
     private boolean isRepairing = false;
-    private int repairTimer     = 0;
+    private int     repairTimer = 0;
 
     public ObsidianFist() {
         super(HuntingUtilities.CATEGORY, "obsidian-fist",
@@ -209,10 +216,6 @@ public class ObsidianFist extends Module {
 
     // ── Reset ─────────────────────────────────────────────────────────────────
 
-    /**
-     * Full reset. swapBack is only applied here – never mid-burst – so the
-     * pickaxe slot reference survives across all cycles within a burst.
-     */
     private void reset() {
         if (swapBack.get() && prevSlot != -1) {
             InvUtils.swap(prevSlot, false);
@@ -228,6 +231,7 @@ public class ObsidianFist extends Module {
         burstCyclesDone  = 0;
         isRepairing      = false;
         repairTimer      = 0;
+        pendingAdvance   = false;
     }
 
     // ── Tick ──────────────────────────────────────────────────────────────────
@@ -235,6 +239,19 @@ public class ObsidianFist extends Module {
     @EventHandler
     private void onTick(TickEvent.Pre event) {
         if (mc.player == null || mc.world == null) return;
+
+        // ── Drain any packet-triggered advance first ──────────────────────────
+        // onPacket() sets pendingAdvance instead of calling advanceBurst() directly.
+        // By draining it here at the top of the tick, the resulting state change
+        // (mode = Placing, timer = delay) feeds straight into the state machine
+        // loop below — eliminating the mandatory 1-tick gap between break
+        // confirmation and the next place.
+        if (pendingAdvance) {
+            pendingAdvance = false;
+            advanceBurst();
+            // If advanceBurst() reset the module (burst complete), stop here.
+            if (mode == State.Idle) return;
+        }
 
         // ── Auto-repair gate ──────────────────────────────────────────────────
         if (autoRepair.get()) {
@@ -245,15 +262,10 @@ public class ObsidianFist extends Module {
                     - mc.player.getInventory().getStack(pickaxe.slot()).getDamage()
                     <= repairThreshold.get());
 
-            if (needsRepair && !isRepairing) {
-                isRepairing = true;
-            } else if (!needsRepair && isRepairing) {
-                isRepairing = false;
-                info("Pickaxe repaired.");
-            }
+            if (needsRepair && !isRepairing)       isRepairing = true;
+            else if (!needsRepair && isRepairing) { isRepairing = false; info("Pickaxe repaired."); }
 
             if (isRepairing) {
-                // FIX: pause without resetting burst state
                 handleRepair(pickaxe);
                 return;
             }
@@ -264,22 +276,24 @@ public class ObsidianFist extends Module {
             timer--;
             if (timer > 0) return;
 
-            // Timer just expired while waiting for Safe-mode confirmation
+            // Timer expired — handle states that use it as a timeout
             if (mode == State.WaitingBreak) {
-                // Timed out – treat as a restoration failure and retry
                 handleRestoration();
                 if (timer > 0) return;
+            } else if (mode == State.PlacingConfirm) {
+                // Place confirmation never arrived — server likely rejected the place.
+                // Fall back to MiningStart; if the block isn't there the mine will fail
+                // and handleRestoration will catch it.
+                mode = State.MiningStart;
             }
         }
 
         // ── State-machine loop ────────────────────────────────────────────────
-        // Allows instant chaining when all delays are 0.
-        // Cap at 10 steps to prevent an infinite loop on logic bugs.
+        // Chains states within a single tick when all delays are 0.
         for (int steps = 0; steps < 10; steps++) {
             if (timer > 0) break;
             State before = mode;
             runStateMachine();
-            // If nothing changed and we're not Idle, we're waiting for a packet
             if (mode == before && mode != State.Idle) break;
             if (mode == State.Idle && before == State.Idle) break;
         }
@@ -287,13 +301,13 @@ public class ObsidianFist extends Module {
 
     private void runStateMachine() {
         switch (mode) {
-            case Idle        -> handleIdle();
-            case Placing     -> handlePlacing();
-            case MiningStart -> handleMiningStart();
-            // FIX: MiningHold does nothing – it waits for onPacket to fire
-            case MiningHold  -> { /* waiting for BlockUpdateS2CPacket */ }
-            case WaitingBreak-> { /* waiting for packet or tick timeout  */ }
-            case SpeedMining -> handleSpeedMining();
+            case Idle            -> handleIdle();
+            case Placing         -> handlePlacing();
+            case PlacingConfirm  -> { /* waiting for server's non-air packet at currentPos */ }
+            case MiningStart     -> handleMiningStart();
+            case MiningHold      -> { /* waiting for BlockUpdateS2CPacket */ }
+            case WaitingBreak    -> { /* waiting for packet or tick timeout  */ }
+            case SpeedMining     -> handleSpeedMining();
         }
     }
 
@@ -309,18 +323,17 @@ public class ObsidianFist extends Module {
         BlockPos pos = hit.getBlockPos();
         if (mc.player.squaredDistanceTo(pos.toCenterPos()) > range.get() * range.get()) return;
 
-        // FIX: capture prevSlot exactly once, before any swaps occur
         if (prevSlot == -1) prevSlot = mc.player.getInventory().selectedSlot;
 
-        // Case 1: existing ender chest – mine it directly, then burst
+        // Case 1: existing ender chest – mine it directly
         if (mc.world.getBlockState(pos).getBlock() == Blocks.ENDER_CHEST) {
-            currentPos      = pos;
-            currentDir      = hit.getSide();
-            placeTarget     = pos.offset(hit.getSide().getOpposite());
-            placeSide       = hit.getSide();
-            mode            = State.MiningStart;
-            restorationCount= 0;
-            burstCyclesDone = 0;
+            currentPos       = pos;
+            currentDir       = hit.getSide();
+            placeTarget      = pos.offset(hit.getSide().getOpposite());
+            placeSide        = hit.getSide();
+            mode             = State.MiningStart;
+            restorationCount = 0;
+            burstCyclesDone  = 0;
             return;
         }
 
@@ -331,13 +344,13 @@ public class ObsidianFist extends Module {
         BlockPos placePos = pos.offset(hit.getSide());
         if (!canPlace(placePos)) return;
 
-        currentPos      = placePos;
-        currentDir      = getBreakDirection(placePos);
-        mode            = State.Placing;
-        restorationCount= 0;
-        burstCyclesDone = 0;
-        placeTarget     = pos;
-        placeSide       = hit.getSide();
+        currentPos       = placePos;
+        currentDir       = getBreakDirection(placePos);
+        mode             = State.Placing;
+        restorationCount = 0;
+        burstCyclesDone  = 0;
+        placeTarget      = pos;
+        placeSide        = hit.getSide();
     }
 
     private void handlePlacing() {
@@ -367,8 +380,13 @@ public class ObsidianFist extends Module {
             if (sneaking) mc.player.networkHandler.sendPacket(
                 new ClientCommandC2SPacket(mc.player, ClientCommandC2SPacket.Mode.RELEASE_SHIFT_KEY));
 
-            mode  = State.MiningStart;
-            timer = placeActionDelay.get();
+            // Wait for the server's non-air confirmation before arming mining.
+            // This prevents the place-confirmation packet from being mistaken
+            // for a restoration and triggering an instant break.
+            // We use max(placeActionDelay, 1) so PlacingConfirm always has at
+            // least one tick to receive the server packet before timing out.
+            mode  = State.PlacingConfirm;
+            timer = Math.max(placeActionDelay.get(), 1);
         };
 
         if (rotate.get()) Rotations.rotate(Rotations.getYaw(placeTarget), Rotations.getPitch(placeTarget), placeLogic);
@@ -379,10 +397,12 @@ public class ObsidianFist extends Module {
         FindItemResult pickaxe = findPickaxe();
         if (!pickaxe.found()) { reset(); return; }
 
+        // Swap to pickaxe before the rotation callback so the slot is correct
+        // even if the rotation fires asynchronously.
+        InvUtils.swap(pickaxe.slot(), false);
+
         Runnable mineLogic = () -> {
             if (currentPos == null || currentDir == null) return;
-
-            InvUtils.swap(pickaxe.slot(), false);
 
             if (mc.interactionManager.isBreakingBlock()) {
                 mc.interactionManager.updateBlockBreakingProgress(currentPos, currentDir);
@@ -395,16 +415,19 @@ public class ObsidianFist extends Module {
                 case Instant -> {
                     mc.player.networkHandler.sendPacket(new PlayerActionC2SPacket(
                         PlayerActionC2SPacket.Action.STOP_DESTROY_BLOCK, currentPos, currentDir));
-                    advanceBurst();
+                    // Use pendingAdvance so advanceBurst() runs at the top of the
+                    // next tick inside the state-machine loop, not inside this callback.
+                    // This keeps Instant mode consistent with Safe mode's packet path.
+                    pendingAdvance = true;
+                    mode = State.WaitingBreak;
                 }
                 case Custom -> {
                     mode  = State.SpeedMining;
                     timer = customBreakDelay.get();
                 }
-                // FIX: Safe mode waits for packet confirmation via MiningHold
                 case Safe -> {
                     mode  = State.MiningHold;
-                    timer = 40; // Safety timeout – handleBlockUpdate fires first on success
+                    timer = 40; // Safety timeout; onPacket fires first on success
                 }
             }
         };
@@ -414,18 +437,19 @@ public class ObsidianFist extends Module {
     }
 
     private void handleSpeedMining() {
-        // Timer expired – send stop-break and advance
         mc.player.networkHandler.sendPacket(new PlayerActionC2SPacket(
             PlayerActionC2SPacket.Action.STOP_DESTROY_BLOCK, currentPos, currentDir));
-        advanceBurst();
+        // Same pattern: queue the advance rather than calling directly
+        pendingAdvance = true;
+        mode = State.WaitingBreak;
     }
 
     // ── Core burst logic ──────────────────────────────────────────────────────
 
     /**
-     * Called exactly once per completed place-break cycle.
-     * FIX: single increment, unified check – no dual-branch off-by-one.
-     * FIX: swapBack only happens in reset(), not here, so prevSlot survives.
+     * Called at the top of onTick() after draining pendingAdvance, OR directly
+     * from handleRestoration(). Never called from inside a packet handler or
+     * rotation callback — this keeps all state mutations on the tick thread.
      */
     private void advanceBurst() {
         mc.player.swingHand(Hand.MAIN_HAND);
@@ -434,9 +458,8 @@ public class ObsidianFist extends Module {
         burstCyclesDone++;
 
         if (burstCyclesDone >= burstCount.get()) {
-            reset(); // burst complete – swapBack happens here
+            reset(); // swapBack happens here
         } else {
-            // Continue burst
             restorationCount = 0;
             mode  = State.Placing;
             timer = delay.get();
@@ -461,25 +484,43 @@ public class ObsidianFist extends Module {
         }
     }
 
+    /**
+     * Called from the packet thread. Must NOT call advanceBurst() directly —
+     * instead sets pendingAdvance so the tick thread picks it up immediately
+     * at the start of the next onTick(), before the timer tick-down, feeding
+     * it into the state machine loop with zero added latency.
+     */
     private void handleBlockUpdate(BlockPos pos, boolean isAir) {
         if (currentPos == null || !pos.equals(currentPos)) return;
 
         if (isAir) {
-            // Block broke – confirmed regardless of which mode we're in
             switch (mode) {
-                case MiningStart, MiningHold, WaitingBreak -> advanceBurst();
-                // Ignore stale air packets in other states
+                case MiningStart, MiningHold, WaitingBreak -> {
+                    // Break confirmed by server
+                    pendingAdvance = true;
+                    timer = 0;
+                }
                 default -> {}
             }
         } else {
-            // Block restored (server rejected break or desync)
+            // Non-air packet: either a place confirmation or a restoration.
             switch (mode) {
-                case WaitingBreak, MiningHold -> handleRestoration();
-                // In Instant/Custom: if block is still present while we're about
-                // to place, our previous break failed – retry
+                case PlacingConfirm -> {
+                    // This is the expected server confirmation of our place.
+                    // Now safe to arm mining — the block is definitely there.
+                    mode  = State.MiningStart;
+                    // timer was already set by handlePlacing; only override if
+                    // the confirmation arrived before the timer expired.
+                    if (timer == 0) timer = 0; // no-op, mining starts next loop
+                }
+                case WaitingBreak, MiningHold -> {
+                    // Server pushed the block back — genuine restoration, retry.
+                    handleRestoration();
+                }
                 case Placing -> {
-                    if (breakMode.get() == BreakMode.Instant || breakMode.get() == BreakMode.Custom)
-                        handleRestoration();
+                    // Stale packet from a previous cycle arriving late — ignore.
+                    // (handlePlacing transitions to PlacingConfirm immediately,
+                    //  so Placing + non-air means we haven't placed yet — safe to ignore.)
                 }
                 default -> {}
             }
@@ -499,18 +540,11 @@ public class ObsidianFist extends Module {
 
     // ── Auto repair ───────────────────────────────────────────────────────────
 
-    /**
-     * FIX: no longer calls reset() – we just pause the burst without wiping state.
-     */
     private void handleRepair(FindItemResult pickaxe) {
         if (repairTimer > 0) { repairTimer--; return; }
 
-        // Ensure pickaxe in main hand
-        if (!pickaxe.isMainHand()) {
-            InvUtils.swap(pickaxe.slot(), false);
-        }
+        if (!pickaxe.isMainHand()) InvUtils.swap(pickaxe.slot(), false);
 
-        // Move XP bottles to offhand if needed
         if (!mc.player.getOffHandStack().isOf(Items.EXPERIENCE_BOTTLE)) {
             FindItemResult xp = InvUtils.find(Items.EXPERIENCE_BOTTLE);
             if (!xp.found()) {
@@ -524,7 +558,6 @@ public class ObsidianFist extends Module {
             return;
         }
 
-        // Throw XP bottles while looking down
         Rotations.rotate(mc.player.getYaw(), 90, () -> {
             for (int i = 0; i < repairPacketsPerBurst.get(); i++) {
                 mc.interactionManager.interactItem(mc.player, Hand.OFF_HAND);
