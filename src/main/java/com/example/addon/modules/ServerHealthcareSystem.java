@@ -21,6 +21,7 @@ import meteordevelopment.meteorclient.systems.modules.Modules;
 import meteordevelopment.meteorclient.utils.player.FindItemResult;
 import meteordevelopment.meteorclient.utils.player.InvUtils;
 import meteordevelopment.orbit.EventHandler;
+import net.minecraft.client.gui.screen.DeathScreen;
 import net.minecraft.component.DataComponentTypes;
 import net.minecraft.component.type.AttributeModifiersComponent;
 import net.minecraft.entity.EquipmentSlot;
@@ -43,6 +44,13 @@ public class ServerHealthcareSystem extends Module {
     private final SettingGroup sgTracking   = settings.createGroup("Player Tracking");
 
     // ── General ──────────────────────────────────────────────────────────────
+
+    private final Setting<Boolean> autoRespawn = sgGeneral.add(new BoolSetting.Builder()
+        .name("auto-respawn")
+        .description("Automatically respawns after death.")
+        .defaultValue(false)
+        .build()
+    );
 
     private final Setting<Boolean> autoTotem = sgGeneral.add(new BoolSetting.Builder()
         .name("auto-totem")
@@ -314,6 +322,12 @@ public class ServerHealthcareSystem extends Module {
                     return;
                 }
             }
+        }
+
+        // Auto Respawn
+        if (autoRespawn.get() && mc.currentScreen instanceof DeathScreen) {
+            mc.player.requestRespawn();
+            mc.setScreen(null);
         }
 
         // Auto Totem

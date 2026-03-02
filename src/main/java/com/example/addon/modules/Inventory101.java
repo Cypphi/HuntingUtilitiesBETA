@@ -25,6 +25,7 @@ import meteordevelopment.meteorclient.utils.misc.input.Input;
 import meteordevelopment.meteorclient.utils.player.InvUtils;
 import meteordevelopment.orbit.EventHandler;
 import net.minecraft.block.ShulkerBoxBlock;
+import net.minecraft.block.BlockState;
 import net.minecraft.client.gui.screen.ingame.GenericContainerScreen;
 import net.minecraft.client.gui.screen.ingame.HandledScreen;
 import net.minecraft.client.gui.screen.ingame.ShulkerBoxScreen;
@@ -45,12 +46,15 @@ import net.minecraft.screen.slot.Slot;
 import net.minecraft.screen.slot.SlotActionType;
 import net.minecraft.sound.SoundEvents;
 import net.minecraft.util.DyeColor;
+import net.minecraft.util.hit.BlockHitResult;
+import net.minecraft.util.hit.HitResult;
 
 public class Inventory101 extends Module {
     private final SettingGroup sgRegearing = settings.createGroup("Regearing 101");
     private final SettingGroup sgCleaner   = settings.createGroup("Inventory Cleaner");
     private final SettingGroup sgRefill    = settings.createGroup("Refill");
     private final SettingGroup sgOrganizer = settings.createGroup("Shulker Organizer");
+    private final SettingGroup sgAutoTool  = settings.createGroup("Auto Tool");
 
     // ── Regearing ──
     private final Setting<Integer> regearDelay = sgRegearing.add(new IntSetting.Builder()
@@ -145,6 +149,22 @@ public class Inventory101 extends Module {
         .build()
     );
 
+    // ── Auto Tool ──
+    private final Setting<Boolean> autoTool = sgAutoTool.add(new BoolSetting.Builder()
+        .name("auto-tool")
+        .description("Automatically swaps to the best tool when breaking blocks.")
+        .defaultValue(false)
+        .build()
+    );
+
+    private final Setting<Boolean> silentAutoTool = sgAutoTool.add(new BoolSetting.Builder()
+        .name("silent-swap")
+        .description("Swaps to the tool silently.")
+        .defaultValue(true)
+        .visible(autoTool::get)
+        .build()
+    );
+
     // ── State ──
     private boolean isRegearing = false;
     private int     regearTimer = 0;
@@ -162,6 +182,8 @@ public class Inventory101 extends Module {
     private double lastMouseX = -1, lastMouseY = -1;
     private final Set<Integer> processedInDrag = new HashSet<>();
     private boolean moveAllActionTaken = false;
+    private boolean wasBreaking = false;
+    private int     prevSlotAutoTool = -1;
 
     public Inventory101() {
         super(HuntingUtilities.CATEGORY, "inventory-101", "Manages inventory layouts with shulker boxes.");
@@ -180,6 +202,8 @@ public class Inventory101 extends Module {
         lastMouseY = -1;
         processedInDrag.clear();
         moveAllActionTaken = false;
+        wasBreaking = false;
+        prevSlotAutoTool = -1;
     }
 
     // ─────────────────────── Public API for HandledScreenMixin ───────────────────────
@@ -266,6 +290,32 @@ public class Inventory101 extends Module {
     @EventHandler
     private void onTick(TickEvent.Pre event) {
         if (mc.player == null || mc.world == null) return;
+
+        // Auto Tool
+        if (autoTool.get()) {
+            if (mc.interactionManager.isBreakingBlock()) {
+                HitResult hit = mc.crosshairTarget;
+                if (hit instanceof BlockHitResult bhr && hit.getType() == HitResult.Type.BLOCK) {
+                    BlockState state = mc.world.getBlockState(bhr.getBlockPos());
+                    if (!state.isAir()) {
+                        int bestSlot = findBestTool(state);
+                        if (bestSlot != -1 && bestSlot != mc.player.getInventory().selectedSlot) {
+                            if (!wasBreaking) {
+                                prevSlotAutoTool = mc.player.getInventory().selectedSlot;
+                                wasBreaking = true;
+                            }
+                            InvUtils.swap(bestSlot, silentAutoTool.get());
+                        }
+                    }
+                }
+            } else if (wasBreaking) {
+                if (silentAutoTool.get() && prevSlotAutoTool != -1) {
+                    InvUtils.swap(prevSlotAutoTool, true);
+                }
+                wasBreaking = false;
+                prevSlotAutoTool = -1;
+            }
+        }
 
         // High-priority blocking tasks
         if (isRefilling) {
@@ -874,6 +924,21 @@ public class Inventory101 extends Module {
     private int findItemInShulker(ShulkerBoxScreenHandler handler, ItemStack target) {
         for (int i = 0; i < 27; i++) if (isItemEqual(handler.getSlot(i).getStack(), target)) return i;
         return -1;
+    }
+
+    private int findBestTool(BlockState state) {
+        int bestSlot = -1;
+        float bestSpeed = 1.0f;
+
+        for (int i = 0; i < 9; i++) {
+            ItemStack stack = mc.player.getInventory().getStack(i);
+            float speed = stack.getMiningSpeedMultiplier(state);
+            if (speed > bestSpeed) {
+                bestSpeed = speed;
+                bestSlot = i;
+            }
+        }
+        return bestSlot;
     }
 
     private boolean isItemEqual(ItemStack a, ItemStack b) {
