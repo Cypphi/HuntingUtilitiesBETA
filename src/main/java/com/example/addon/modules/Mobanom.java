@@ -2,7 +2,6 @@ package com.example.addon.modules;
 
 import com.example.addon.HuntingUtilities;
 import meteordevelopment.meteorclient.events.render.Render3DEvent;
-import meteordevelopment.meteorclient.events.world.TickEvent;
 import meteordevelopment.meteorclient.renderer.ShapeMode;
 import meteordevelopment.meteorclient.settings.BoolSetting;
 import meteordevelopment.meteorclient.settings.ColorSetting;
@@ -27,10 +26,12 @@ import net.minecraft.item.Item;
 import net.minecraft.item.ItemStack;
 import net.minecraft.item.Items;
 import net.minecraft.registry.entry.RegistryEntry;
+import net.minecraft.scoreboard.Scoreboard;
+import net.minecraft.scoreboard.Team;
+import net.minecraft.util.Formatting;
 import net.minecraft.util.math.Box;
 
 import java.util.HashSet;
-import java.util.Map;
 import java.util.Set;
 
 public class Mobanom extends Module {
@@ -154,6 +155,7 @@ public class Mobanom extends Module {
     );
 
     private final Set<Integer> notifiedEntities = new HashSet<>();
+    private final Set<Integer> highlightedEntities = new HashSet<>();
 
     public Mobanom() {
         super(HuntingUtilities.CATEGORY, "mobanom", "Detects and highlights mobs in the wrong dimension or with unnatural items.");
@@ -162,19 +164,30 @@ public class Mobanom extends Module {
     @Override
     public void onActivate() {
         notifiedEntities.clear();
+        highlightedEntities.clear();
     }
 
-    @EventHandler
-    private void onTick(TickEvent.Pre event) {
-        if (mc.world == null) return;
-        notifiedEntities.removeIf(id -> mc.world.getEntityById(id) == null);
+    @Override
+    public void onDeactivate() {
+        if (mc.world != null) {
+            for (int id : highlightedEntities) {
+                Entity entity = mc.world.getEntityById(id);
+                if (entity != null) {
+                    entity.setGlowing(false);
+                    clearEntityTeam(entity);
+                }
+            }
+        }
+        highlightedEntities.clear();
     }
 
     @EventHandler
     private void onRender(Render3DEvent event) {
         if (mc.world == null || mc.player == null) return;
+        notifiedEntities.removeIf(id -> mc.world.getEntityById(id) == null);
 
         String dim = mc.world.getRegistryKey().getValue().toString();
+        Set<Integer> currentAnomalies = new HashSet<>();
 
         for (Entity entity : mc.world.getEntities()) {
             if (!(entity instanceof MobEntity mob)) continue;
@@ -185,16 +198,40 @@ public class Mobanom extends Module {
             boolean isItemAnomaly = detectUnnaturalItems.get() && hasUnnaturalItems(mob);
 
             if (isDimensionAnomaly || isItemAnomaly) {
-                renderAnomaly(event, mob);
+                currentAnomalies.add(mob.getId());
+                highlightedEntities.add(mob.getId());
+
+                SettingColor sideColor = getSideColorForAnomaly(mob, isItemAnomaly);
+                SettingColor lineColor = getColorForAnomaly(mob, isItemAnomaly);
+
+                // Draw the bounding box around the mob
+                event.renderer.box(mob.getBoundingBox(), sideColor, lineColor, shapeMode.get(), 0);
+
+                // Glowing outline (best-effort client-side)
+                mob.setGlowing(true);
+                setEntityTeam(mob, getNearestColor(lineColor));
+
                 if (chatNotification.get() && notifiedEntities.add(mob.getId())) {
                     if (isItemAnomaly) {
                         info("Item anomaly detected: " + mob.getType().getName().getString());
-                    } else { // isDimensionAnomaly must be true
+                    } else {
                         info("Dimension anomaly detected: " + mob.getType().getName().getString());
                     }
                 }
             }
         }
+
+        highlightedEntities.removeIf(id -> {
+            if (!currentAnomalies.contains(id)) {
+                Entity entity = mc.world.getEntityById(id);
+                if (entity != null) {
+                    entity.setGlowing(false);
+                    clearEntityTeam(entity);
+                }
+                return true;
+            }
+            return false;
+        });
     }
 
     private boolean isAnomaly(EntityType<?> type, String dimension) {
@@ -243,7 +280,7 @@ public class Mobanom extends Module {
             int level = enchants.getLevel(enchantmentEntry);
 
             // Mending is a strong indicator of player gear
-            if (enchantment.equals(Enchantments.MENDING)) return true;
+            if (enchantmentEntry.matchesKey(Enchantments.MENDING)) return true;
 
             // Enchantment level is higher than vanilla max
             if (level > enchantment.getMaxLevel()) return true;
@@ -252,35 +289,57 @@ public class Mobanom extends Module {
         return false;
     }
 
-    private void renderAnomaly(Render3DEvent event, MobEntity entity) {
-        double x = entity.prevX + (entity.getX() - entity.prevX) * event.tickDelta;
-        double y = entity.prevY + (entity.getY() - entity.prevY) * event.tickDelta;
-        double z = entity.prevZ + (entity.getZ() - entity.prevZ) * event.tickDelta;
+    private SettingColor getSideColorForAnomaly(MobEntity mob, boolean isItemAnomaly) {
+        if (isItemAnomaly) return itemAnomalySideColor.get();
+        if (END_NATIVES.contains(mob.getType())) return endSideColor.get();
+        if (NETHER_NATIVES.contains(mob.getType())) return netherSideColor.get();
+        return overworldSideColor.get();
+    }
 
-        double w = entity.getWidth() / 2.0;
-        Box box = new Box(x - w, y, z - w, x + w, y + entity.getHeight(), z + w);
+    private SettingColor getColorForAnomaly(MobEntity mob, boolean isItemAnomaly) {
+        if (isItemAnomaly) return itemAnomalyLineColor.get();
+        if (END_NATIVES.contains(mob.getType())) return endLineColor.get();
+        if (NETHER_NATIVES.contains(mob.getType())) return netherLineColor.get();
+        return overworldLineColor.get();
+    }
 
-        SettingColor side;
-        SettingColor line;
-
-        // Item anomalies take precedence in coloring
-        if (detectUnnaturalItems.get() && hasUnnaturalItems(entity)) {
-            side = itemAnomalySideColor.get();
-            line = itemAnomalyLineColor.get();
-        } else {
-            // Fallback to dimension-based coloring
-            if (END_NATIVES.contains(entity.getType())) {
-                side = endSideColor.get();
-                line = endLineColor.get();
-            } else if (NETHER_NATIVES.contains(entity.getType())) {
-                side = netherSideColor.get();
-                line = netherLineColor.get();
-            } else {
-                side = overworldSideColor.get();
-                line = overworldLineColor.get();
+    private Formatting getNearestColor(SettingColor color) {
+        Formatting best = Formatting.WHITE;
+        double minDistance = Double.MAX_VALUE;
+        for (Formatting f : Formatting.values()) {
+            if (!f.isColor()) continue;
+            Integer rgb = f.getColorValue();
+            if (rgb == null) continue;
+            int r = (rgb >> 16) & 0xFF;
+            int g = (rgb >> 8) & 0xFF;
+            int b = rgb & 0xFF;
+            double dist = Math.pow(r - color.r, 2) + Math.pow(g - color.g, 2) + Math.pow(b - color.b, 2);
+            if (dist < minDistance) {
+                minDistance = dist;
+                best = f;
             }
         }
+        return best;
+    }
 
-        event.renderer.box(box, side, line, shapeMode.get(), 0);
+    private void setEntityTeam(Entity entity, Formatting color) {
+        Scoreboard scoreboard = mc.world.getScoreboard();
+        String teamName = "mobanom_" + color.getName();
+        Team team = scoreboard.getTeam(teamName);
+        if (team == null) {
+            team = scoreboard.addTeam(teamName);
+            team.setColor(color);
+        }
+        if (entity.getScoreboardTeam() == null || !entity.getScoreboardTeam().getName().equals(teamName)) {
+            scoreboard.addScoreHolderToTeam(entity.getNameForScoreboard(), team);
+        }
+    }
+
+    private void clearEntityTeam(Entity entity) {
+        Scoreboard scoreboard = mc.world.getScoreboard();
+        Team currentTeam = entity.getScoreboardTeam();
+        if (currentTeam != null && currentTeam.getName().startsWith("mobanom_")) {
+            scoreboard.removeScoreHolderFromTeam(entity.getNameForScoreboard(), currentTeam);
+        }
     }
 }
