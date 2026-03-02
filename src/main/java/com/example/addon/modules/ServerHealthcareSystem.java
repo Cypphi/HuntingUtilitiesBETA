@@ -2,6 +2,7 @@ package com.example.addon.modules;
 
 import com.example.addon.HuntingUtilities;
 
+import meteordevelopment.meteorclient.events.render.Render3DEvent;
 import meteordevelopment.meteorclient.events.game.ReceiveMessageEvent;
 import meteordevelopment.meteorclient.events.game.GameJoinedEvent;
 import meteordevelopment.meteorclient.events.world.TickEvent;
@@ -11,6 +12,10 @@ import meteordevelopment.meteorclient.settings.IntSetting;
 import meteordevelopment.meteorclient.settings.Setting;
 import meteordevelopment.meteorclient.settings.SettingGroup;
 import meteordevelopment.meteorclient.settings.StringListSetting;
+import meteordevelopment.meteorclient.settings.ColorSetting;
+import meteordevelopment.meteorclient.settings.StringSetting;
+import meteordevelopment.meteorclient.renderer.ShapeMode;
+import meteordevelopment.meteorclient.utils.render.color.SettingColor;
 import meteordevelopment.meteorclient.systems.modules.Module;
 import meteordevelopment.meteorclient.systems.modules.Modules;
 import meteordevelopment.meteorclient.utils.player.FindItemResult;
@@ -35,6 +40,7 @@ public class ServerHealthcareSystem extends Module {
     private final SettingGroup sgGeneral    = settings.getDefaultGroup();
     private final SettingGroup sgSafety     = settings.createGroup("Safety");
     private final SettingGroup sgAutoIgnore = settings.createGroup("Auto Ignore");
+    private final SettingGroup sgTracking   = settings.createGroup("Player Tracking");
 
     // ── General ──────────────────────────────────────────────────────────────
 
@@ -154,10 +160,70 @@ public class ServerHealthcareSystem extends Module {
         .build()
     );
 
+    // ── Player Tracking ───────────────────────────────────────────────────────
+
+    private final Setting<Boolean> trackPlayers = sgTracking.add(new BoolSetting.Builder()
+        .name("track-players")
+        .description("Tracks players entering visual range.")
+        .defaultValue(false)
+        .build()
+    );
+
+    private final Setting<Integer> trackRange = sgTracking.add(new IntSetting.Builder()
+        .name("track-range")
+        .description("Distance to track players.")
+        .defaultValue(128)
+        .min(1)
+        .sliderMax(256)
+        .visible(trackPlayers::get)
+        .build()
+    );
+
+    private final Setting<ShapeMode> shapeMode = sgTracking.add(new EnumSetting.Builder<ShapeMode>()
+        .name("shape-mode")
+        .description("How the shapes are rendered.")
+        .defaultValue(ShapeMode.Lines)
+        .visible(trackPlayers::get)
+        .build()
+    );
+
+    private final Setting<SettingColor> highlightColor = sgTracking.add(new ColorSetting.Builder()
+        .name("highlight-color")
+        .description("Color for the player highlight.")
+        .defaultValue(new SettingColor(139, 0, 0, 255))
+        .visible(trackPlayers::get)
+        .build()
+    );
+
+    private final Setting<Boolean> notifyChat = sgTracking.add(new BoolSetting.Builder()
+        .name("notify-chat")
+        .description("Send a chat message when a player is detected.")
+        .defaultValue(true)
+        .visible(trackPlayers::get)
+        .build()
+    );
+
+    private final Setting<Boolean> playSound = sgTracking.add(new BoolSetting.Builder()
+        .name("play-sound")
+        .description("Play a sound when a player is detected.")
+        .defaultValue(false)
+        .visible(trackPlayers::get)
+        .build()
+    );
+
+    private final Setting<String> customMessage = sgTracking.add(new StringSetting.Builder()
+        .name("custom-message")
+        .description("Message to send. Use {player} for player name.")
+        .defaultValue("Warning: {player} is in visual range!")
+        .visible(() -> trackPlayers.get() && notifyChat.get())
+        .build()
+    );
+
     // ── State ─────────────────────────────────────────────────────────────────
 
     /** Players ignored this session. Cleared on toggle or server join. */
     private final Set<String> ignoredThisSession = new HashSet<>();
+    private final Set<Integer> notifiedPlayers = new HashSet<>();
 
     private int totemPops = 0;
     private boolean isEating = false;
@@ -186,6 +252,7 @@ public class ServerHealthcareSystem extends Module {
         eatHotbarSlot = -1;
         swapTimer = 0;
         ignoredThisSession.clear();
+        notifiedPlayers.clear();
     }
 
     @Override
@@ -196,12 +263,14 @@ public class ServerHealthcareSystem extends Module {
             eatHotbarSlot = -1;
         }
         ignoredThisSession.clear();
+        notifiedPlayers.clear();
     }
 
     /** Clear the ignored-set when joining a new server so old names don't carry over. */
     @EventHandler
     private void onGameJoined(GameJoinedEvent event) {
         ignoredThisSession.clear();
+        notifiedPlayers.clear();
         if (mc.player != null) {
             totemPops = mc.player.getStatHandler().getStat(Stats.USED, Items.TOTEM_OF_UNDYING);
         }
@@ -329,6 +398,26 @@ public class ServerHealthcareSystem extends Module {
                 eatHotbarSlot = -1;
             }
         }
+
+        // Player Tracking
+        if (trackPlayers.get()) {
+            for (PlayerEntity player : mc.world.getPlayers()) {
+                if (player == mc.player || player.isSpectator()) continue;
+                
+                if (mc.player.distanceTo(player) <= trackRange.get()) {
+                    if (notifiedPlayers.add(player.getId())) {
+                        if (notifyChat.get()) {
+                            String msg = customMessage.get().replace("{player}", player.getName().getString());
+                            info(msg);
+                        }
+                        if (playSound.get()) {
+                            mc.player.playSound(net.minecraft.sound.SoundEvents.BLOCK_NOTE_BLOCK_BELL.value(), 1.0f, 1.0f);
+                        }
+                    }
+                }
+            }
+            notifiedPlayers.removeIf(id -> mc.world.getEntityById(id) == null);
+        }
     }
 
     // ── Auto Ignore ───────────────────────────────────────────────────────────
@@ -395,6 +484,18 @@ public class ServerHealthcareSystem extends Module {
             mc.player.sendMessage(
                 Text.literal("[SHS] Auto-ignored " + sender + " (keyword match)."), false
             );
+        }
+    }
+
+    @EventHandler
+    private void onRender(Render3DEvent event) {
+        if (!trackPlayers.get() || mc.world == null) return;
+
+        for (PlayerEntity player : mc.world.getPlayers()) {
+            if (player == mc.player || player.isSpectator()) continue;
+            if (mc.player.distanceTo(player) <= trackRange.get()) {
+                event.renderer.box(player.getBoundingBox(), highlightColor.get(), highlightColor.get(), shapeMode.get(), 0);
+            }
         }
     }
 
