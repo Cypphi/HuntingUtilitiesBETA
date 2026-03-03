@@ -7,8 +7,8 @@ import java.util.Set;
 import com.example.addon.HuntingUtilities;
 
 import meteordevelopment.meteorclient.events.game.GameJoinedEvent;
-import meteordevelopment.meteorclient.events.packets.PacketEvent;
 import meteordevelopment.meteorclient.events.game.ReceiveMessageEvent;
+import meteordevelopment.meteorclient.events.packets.PacketEvent;
 import meteordevelopment.meteorclient.events.render.Render3DEvent;
 import meteordevelopment.meteorclient.events.world.TickEvent;
 import meteordevelopment.meteorclient.renderer.ShapeMode;
@@ -38,10 +38,10 @@ import net.minecraft.entity.player.PlayerEntity;
 import net.minecraft.item.Item;
 import net.minecraft.item.ItemStack;
 import net.minecraft.item.Items;
+import net.minecraft.network.packet.s2c.play.PlayerListS2CPacket;
 import net.minecraft.registry.RegistryKey;
 import net.minecraft.registry.entry.RegistryEntry;
 import net.minecraft.stat.Stats;
-import net.minecraft.network.packet.s2c.play.PlayerListS2CPacket;
 import net.minecraft.text.Text;
 
 public class ServerHealthcareSystem extends Module {
@@ -312,6 +312,36 @@ public class ServerHealthcareSystem extends Module {
         .description("Color for enemies in Player Tracking.")
         .defaultValue(new SettingColor(255, 0, 0, 255))
         .visible(trackPlayers::get)
+        .build()
+    );
+
+    private final Setting<Boolean> colorFriendInTab = sgFriends.add(new BoolSetting.Builder()
+        .name("color-friend-in-tab")
+        .description("Highlights friends in the tab list with a specific color.")
+        .defaultValue(true)
+        .build()
+    );
+
+    private final Setting<SettingColor> friendTabColor = sgFriends.add(new ColorSetting.Builder()
+        .name("friend-tab-color")
+        .description("The color to use for friends in the tab list.")
+        .defaultValue(new SettingColor(0, 255, 0, 255))
+        .visible(colorFriendInTab::get)
+        .build()
+    );
+
+    private final Setting<Boolean> colorEnemyInTab = sgFriends.add(new BoolSetting.Builder()
+        .name("color-enemy-in-tab")
+        .description("Highlights enemies in the tab list with a specific color.")
+        .defaultValue(true)
+        .build()
+    );
+
+    private final Setting<SettingColor> enemyTabColor = sgFriends.add(new ColorSetting.Builder()
+        .name("enemy-tab-color")
+        .description("The color to use for enemies in the tab list.")
+        .defaultValue(new SettingColor(255, 0, 0, 255))
+        .visible(colorEnemyInTab::get)
         .build()
     );
 
@@ -784,11 +814,11 @@ public class ServerHealthcareSystem extends Module {
         return false;
     }
 
-    private boolean isFriend(String name) {
+    public boolean isFriend(String name) {
         return friends.get().stream().anyMatch(friend -> friend.equalsIgnoreCase(name));
     }
 
-    private boolean isEnemy(String name) {
+    public boolean isEnemy(String name) {
         return enemies.get().stream().anyMatch(enemy -> enemy.equalsIgnoreCase(name));
     }
 
@@ -796,6 +826,22 @@ public class ServerHealthcareSystem extends Module {
         if (isFriend(name)) return PlayerStatus.Friend;
         if (isEnemy(name)) return PlayerStatus.Enemy;
         return PlayerStatus.Other;
+    }
+
+    public boolean shouldColorFriendInTab() {
+        return colorFriendInTab.get();
+    }
+
+    public SettingColor getFriendTabColor() {
+        return friendTabColor.get();
+    }
+
+    public boolean shouldColorEnemyInTab() {
+        return colorEnemyInTab.get();
+    }
+
+    public SettingColor getEnemyTabColor() {
+        return enemyTabColor.get();
     }
 
     /**
