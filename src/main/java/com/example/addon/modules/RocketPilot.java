@@ -412,6 +412,14 @@ public class RocketPilot extends Module {
         .build()
     );
 
+    private final Setting<Keybind> panicKey = sgFlightSafety.add(new KeybindSetting.Builder()
+        .name("panic-key")
+        .description("Initiates or cancels a safe landing, overriding other patterns.")
+        .defaultValue(Keybind.none())
+        .action(this::togglePanicLanding)
+        .build()
+    );
+
     // ─── Player Safety Settings ───────────────────────────────────────────────────
     private final Setting<Boolean> autoDisableOnLowHealth = sgPlayerSafety.add(new BoolSetting.Builder()
         .name("auto-disable-on-low-health")
@@ -461,6 +469,7 @@ public class RocketPilot extends Module {
     private int     totemPops                = 0;
     private boolean emergencyLanding         = false;
     private int     takeoffTimer             = 0;
+    private boolean panicLanding             = false;
 
     // Pattern flight state
     private boolean paused         = false;
@@ -497,6 +506,21 @@ public class RocketPilot extends Module {
         info("Pattern flight %s.", paused ? "paused" : "resumed");
     }
 
+    private void togglePanicLanding() {
+        if (panicLanding) {
+            panicLanding = false;
+            info("Panic landing cancelled. Resuming normal flight.");
+            return;
+        }
+
+        if (mc.player == null || !mc.player.isGliding()) {
+            info("Not flying, cannot panic land.");
+            return;
+        }
+        panicLanding = true;
+        info("Panic landing initiated!");
+    }
+
     private void resetPatternState() {
         paused         = false;
         origin         = null;
@@ -525,6 +549,7 @@ public class RocketPilot extends Module {
         rocketsWarningSent       = false;
         emergencyLanding         = false;
         takeoffTimer             = 0;
+        panicLanding             = false;
 
         resetPatternState();
 
@@ -566,6 +591,7 @@ public class RocketPilot extends Module {
     @Override
     public void onDeactivate() {
         needsTakeoffRocket = false;
+        panicLanding = false;
         resetPatternState();
     }
 
@@ -573,6 +599,8 @@ public class RocketPilot extends Module {
     @EventHandler
     private void onTick(TickEvent.Pre event) {
         if (mc.player == null || mc.world == null) return;
+
+        replenishRockets();
 
         // ── Safety: totem pop disconnect ──
         if (disconnectOnTotemPop.get()) {
@@ -612,8 +640,6 @@ public class RocketPilot extends Module {
             return;
         }
 
-        replenishRockets();
-
         // ── Re-takeoff if on ground and below target ──
         if (isNearGround() && !mc.player.isGliding()
                 && (!useTargetY.get() || mc.player.getY() < targetY.get())
@@ -649,6 +675,16 @@ public class RocketPilot extends Module {
 
         // ── Determine desired pitch (priority order) ──
         Float desiredPitch = null;
+
+        // Priority 0: Panic landing
+        if (panicLanding) {
+            desiredPitch = handlePanicLanding();
+            if (mc.player.isOnGround() && takeoffTimer == 0) {
+                info("Panic landing complete.");
+                toggle();
+                return;
+            }
+        }
 
         // Priority 1: auto-land on low rockets
         if (autoLandOnLowRockets.get() && rockets <= autoLandThreshold.get()) {
@@ -797,6 +833,17 @@ public class RocketPilot extends Module {
             }
         }
         return MathHelper.lerp(0.3f, currentPitch, -pullUpStr);
+    }
+
+    private Float handlePanicLanding() {
+        // When far from ground, pitch down to descend
+        if (getDistanceToGround() > landingHeight.get()) {
+            return MathHelper.lerp(0.05f, mc.player.getPitch(), 20.0f);
+        }
+        // When close to ground, level out to land softly
+        else {
+            return MathHelper.lerp(0.1f, mc.player.getPitch(), -10.0f);
+        }
     }
 
     // ─── Normal Mode ─────────────────────────────────────────────────────────────

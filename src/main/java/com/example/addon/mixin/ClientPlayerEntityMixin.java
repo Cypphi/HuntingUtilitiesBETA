@@ -27,7 +27,7 @@ public class ClientPlayerEntityMixin {
     private void onTickNausea(boolean fromPortalEffect, CallbackInfo ci) {
         if (!fromPortalEffect) return;
         PortalTracker portalTracker = Modules.get().get(PortalTracker.class);
-        if (portalTracker != null && portalTracker.portalGui.get()) {
+        if (portalTracker != null && portalTracker.isPortalGuiEnabled()) {
             this.prevNauseaIntensity = this.nauseaIntensity;
             this.nauseaIntensity = 0.0f;
             ci.cancel();

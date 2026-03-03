@@ -27,7 +27,6 @@ import meteordevelopment.meteorclient.utils.render.color.Color;
 import meteordevelopment.meteorclient.utils.render.color.SettingColor;
 import meteordevelopment.orbit.EventHandler;
 import net.minecraft.block.Block;
-import net.minecraft.block.BlockState;
 import net.minecraft.block.Blocks;
 import net.minecraft.block.entity.BlockEntity;
 import net.minecraft.block.entity.EndGatewayBlockEntity;
@@ -102,13 +101,6 @@ public class PortalTracker extends Module {
         .name("only-show-created")
         .description("Only highlight portals you've created.")
         .defaultValue(false)
-        .build()
-    );
-
-    public final Setting<Boolean> portalGui = sgGeneral.add(new BoolSetting.Builder()
-        .name("portal-gui")
-        .description("Allow opening screens while inside a portal. Read by the PortalGuiMixin.")
-        .defaultValue(true)
         .build()
     );
 
@@ -717,7 +709,7 @@ public class PortalTracker extends Module {
     // ───────────────────────────────────────────────────────────────
 
     /** Used by PortalGuiMixin to check whether screen-opening in portals is allowed. */
-    public boolean isPortalGuiEnabled() { return portalGui.get(); }
+    public boolean isPortalGuiEnabled() { return isActive(); }
 
     public int getTotalPortals()         { return portalStructures.size(); }
     public int getTotalCreated()         { return totalCreated; }

@@ -1,40 +1,48 @@
 package com.example.addon.modules;
 
+import java.util.HashSet;
+import java.util.List;
+import java.util.Set;
+
 import com.example.addon.HuntingUtilities;
 
-import meteordevelopment.meteorclient.events.render.Render3DEvent;
-import meteordevelopment.meteorclient.events.game.ReceiveMessageEvent;
 import meteordevelopment.meteorclient.events.game.GameJoinedEvent;
+import meteordevelopment.meteorclient.events.packets.PacketEvent;
+import meteordevelopment.meteorclient.events.game.ReceiveMessageEvent;
+import meteordevelopment.meteorclient.events.render.Render3DEvent;
 import meteordevelopment.meteorclient.events.world.TickEvent;
+import meteordevelopment.meteorclient.renderer.ShapeMode;
 import meteordevelopment.meteorclient.settings.BoolSetting;
+import meteordevelopment.meteorclient.settings.ColorSetting;
+import meteordevelopment.meteorclient.settings.EnchantmentListSetting;
 import meteordevelopment.meteorclient.settings.EnumSetting;
 import meteordevelopment.meteorclient.settings.IntSetting;
 import meteordevelopment.meteorclient.settings.Setting;
 import meteordevelopment.meteorclient.settings.SettingGroup;
 import meteordevelopment.meteorclient.settings.StringListSetting;
-import meteordevelopment.meteorclient.settings.ColorSetting;
 import meteordevelopment.meteorclient.settings.StringSetting;
-import meteordevelopment.meteorclient.renderer.ShapeMode;
-import meteordevelopment.meteorclient.utils.render.color.SettingColor;
 import meteordevelopment.meteorclient.systems.modules.Module;
 import meteordevelopment.meteorclient.systems.modules.Modules;
 import meteordevelopment.meteorclient.utils.player.FindItemResult;
 import meteordevelopment.meteorclient.utils.player.InvUtils;
+import meteordevelopment.meteorclient.utils.render.color.SettingColor;
 import meteordevelopment.orbit.EventHandler;
 import net.minecraft.client.gui.screen.DeathScreen;
 import net.minecraft.component.DataComponentTypes;
 import net.minecraft.component.type.AttributeModifiersComponent;
+import net.minecraft.component.type.ItemEnchantmentsComponent;
+import net.minecraft.enchantment.Enchantment;
+import net.minecraft.enchantment.Enchantments;
 import net.minecraft.entity.EquipmentSlot;
 import net.minecraft.entity.player.PlayerEntity;
 import net.minecraft.item.Item;
 import net.minecraft.item.ItemStack;
 import net.minecraft.item.Items;
+import net.minecraft.registry.RegistryKey;
+import net.minecraft.registry.entry.RegistryEntry;
 import net.minecraft.stat.Stats;
+import net.minecraft.network.packet.s2c.play.PlayerListS2CPacket;
 import net.minecraft.text.Text;
-
-import java.util.HashSet;
-import java.util.List;
-import java.util.Set;
 
 public class ServerHealthcareSystem extends Module {
 
@@ -44,6 +52,8 @@ public class ServerHealthcareSystem extends Module {
     private final SettingGroup sgSafety     = settings.createGroup("Safety");
     private final SettingGroup sgAutoIgnore = settings.createGroup("Auto Ignore");
     private final SettingGroup sgTracking   = settings.createGroup("Player Tracking");
+    private final SettingGroup sgFriends    = settings.createGroup("Friends & Enemies");
+    private final SettingGroup sgTabList    = settings.createGroup("Tab List Monitoring");
 
     // ── General ──────────────────────────────────────────────────────────────
 
@@ -95,6 +105,14 @@ public class ServerHealthcareSystem extends Module {
         .build()
     );
 
+    private final Setting<Set<RegistryKey<Enchantment>>> ignoredEnchantments = sgAutoArmor.add(new EnchantmentListSetting.Builder()
+        .name("ignored-enchantments")
+        .description("Armor with these enchantments will be ignored by Auto Armor.")
+        .defaultValue(Enchantments.BINDING_CURSE)
+        .visible(autoArmor::get)
+        .build()
+    );
+
     // ── Auto Eat ──────────────────────────────────────────────────────────────
 
     private final Setting<Boolean> autoEat = sgAutoEat.add(new BoolSetting.Builder()
@@ -130,6 +148,14 @@ public class ServerHealthcareSystem extends Module {
         .defaultValue(32)
         .min(1)
         .sliderMax(128)
+        .visible(disconnectOnPlayer::get)
+        .build()
+    );
+
+    private final Setting<Boolean> ignoreFriendsOnDisconnect = sgSafety.add(new BoolSetting.Builder()
+        .name("ignore-friends-on-disconnect")
+        .description("Prevents disconnecting if the nearby player is a friend.")
+        .defaultValue(true)
         .visible(disconnectOnPlayer::get)
         .build()
     );
@@ -193,7 +219,31 @@ public class ServerHealthcareSystem extends Module {
         .build()
     );
 
-    private final Setting<ShapeMode> shapeMode = sgTracking.add(new EnumSetting.Builder<ShapeMode>()
+    private final Setting<Boolean> trackFriends = sgTracking.add(new BoolSetting.Builder()
+        .name("track-friends")
+        .description("Highlight friends.")
+        .defaultValue(true)
+        .visible(trackPlayers::get)
+        .build()
+    );
+
+    private final Setting<Boolean> trackEnemies = sgTracking.add(new BoolSetting.Builder()
+        .name("track-enemies")
+        .description("Highlight enemies.")
+        .defaultValue(true)
+        .visible(trackPlayers::get)
+        .build()
+    );
+
+    private final Setting<Boolean> trackOthers = sgTracking.add(new BoolSetting.Builder()
+        .name("track-others")
+        .description("Highlight other players (not friends or enemies).")
+        .defaultValue(true)
+        .visible(trackPlayers::get)
+        .build()
+    );
+
+    private final Setting<ShapeMode> trackingShapeMode = sgTracking.add(new EnumSetting.Builder<ShapeMode>()
         .name("shape-mode")
         .description("How the shapes are rendered.")
         .defaultValue(ShapeMode.Lines)
@@ -201,9 +251,9 @@ public class ServerHealthcareSystem extends Module {
         .build()
     );
 
-    private final Setting<SettingColor> highlightColor = sgTracking.add(new ColorSetting.Builder()
-        .name("highlight-color")
-        .description("Color for the player highlight.")
+    private final Setting<SettingColor> otherColor = sgTracking.add(new ColorSetting.Builder()
+        .name("other-color")
+        .description("Color for other players (not friends or enemies).")
         .defaultValue(new SettingColor(139, 0, 0, 255))
         .visible(trackPlayers::get)
         .build()
@@ -227,9 +277,90 @@ public class ServerHealthcareSystem extends Module {
 
     private final Setting<String> customMessage = sgTracking.add(new StringSetting.Builder()
         .name("custom-message")
-        .description("Message to send. Use {player} for player name.")
-        .defaultValue("Warning: {player} is in visual range!")
+        .description("Message to send. Use {player} for name and {status} for relation.")
+        .defaultValue("Warning: {status} {player} is in visual range!")
         .visible(() -> trackPlayers.get() && notifyChat.get())
+        .build()
+    );
+
+    // ── Friends & Enemies ─────────────────────────────────────────────────────
+
+    private final Setting<List<String>> friends = sgFriends.add(new StringListSetting.Builder()
+        .name("friends")
+        .description("Players to be treated as friends. Case-insensitive.")
+        .defaultValue(List.of())
+        .build()
+    );
+
+    private final Setting<List<String>> enemies = sgFriends.add(new StringListSetting.Builder()
+        .name("enemies")
+        .description("Players to be treated as enemies. Case-insensitive.")
+        .defaultValue(List.of())
+        .build()
+    );
+
+    private final Setting<SettingColor> friendColor = sgFriends.add(new ColorSetting.Builder()
+        .name("friend-color")
+        .description("Color for friends in Player Tracking.")
+        .defaultValue(new SettingColor(0, 255, 0, 255))
+        .visible(trackPlayers::get)
+        .build()
+    );
+
+    private final Setting<SettingColor> enemyColor = sgFriends.add(new ColorSetting.Builder()
+        .name("enemy-color")
+        .description("Color for enemies in Player Tracking.")
+        .defaultValue(new SettingColor(255, 0, 0, 255))
+        .visible(trackPlayers::get)
+        .build()
+    );
+
+    // ── Tab List Monitoring ───────────────────────────────────────────────────
+
+    private final Setting<Boolean> monitorTabList = sgTabList.add(new BoolSetting.Builder()
+        .name("monitor-tab-list")
+        .description("Tracks player joins/leaves from the tab list (beyond visual range).")
+        .defaultValue(false)
+        .build()
+    );
+
+    private final Setting<Boolean> notifyOnJoin = sgTabList.add(new BoolSetting.Builder()
+        .name("notify-on-join")
+        .description("Notifies when a player joins the server.")
+        .defaultValue(true)
+        .visible(monitorTabList::get)
+        .build()
+    );
+
+    private final Setting<Boolean> notifyOnLeave = sgTabList.add(new BoolSetting.Builder()
+        .name("notify-on-leave")
+        .description("Notifies when a player leaves the server.")
+        .defaultValue(true)
+        .visible(monitorTabList::get)
+        .build()
+    );
+
+    private final Setting<Boolean> tabNotifyFriends = sgTabList.add(new BoolSetting.Builder()
+        .name("notify-friends")
+        .description("Notify when friends join/leave.")
+        .defaultValue(true)
+        .visible(monitorTabList::get)
+        .build()
+    );
+
+    private final Setting<Boolean> tabNotifyEnemies = sgTabList.add(new BoolSetting.Builder()
+        .name("notify-enemies")
+        .description("Notify when enemies join/leave.")
+        .defaultValue(true)
+        .visible(monitorTabList::get)
+        .build()
+    );
+
+    private final Setting<Boolean> tabNotifyOthers = sgTabList.add(new BoolSetting.Builder()
+        .name("notify-others")
+        .description("Notify when other players join/leave.")
+        .defaultValue(false)
+        .visible(monitorTabList::get)
         .build()
     );
 
@@ -238,15 +369,20 @@ public class ServerHealthcareSystem extends Module {
     /** Players ignored this session. Cleared on toggle or server join. */
     private final Set<String> ignoredThisSession = new HashSet<>();
     private final Set<Integer> notifiedPlayers = new HashSet<>();
+    private final Set<String> playersInTab = new HashSet<>();
 
     private int totemPops = 0;
     private boolean isEating = false;
+    private boolean ateForFire = false;
     /**
      * The hotbar slot (0-8) we committed to eating from.
      * Always a valid hotbar index while isEating == true. -1 otherwise.
      */
     private int eatHotbarSlot = -1;
     private int swapTimer = 0;
+
+    private float lastHealth = -1;
+    private boolean tookDamageWhileOnFire = false;
 
     // ── Constructor ───────────────────────────────────────────────────────────
 
@@ -261,12 +397,16 @@ public class ServerHealthcareSystem extends Module {
     public void onActivate() {
         if (mc.player != null) {
             totemPops = mc.player.getStatHandler().getStat(Stats.USED, Items.TOTEM_OF_UNDYING);
+            lastHealth = mc.player.getHealth();
         }
         isEating = false;
+        ateForFire = false;
+        tookDamageWhileOnFire = false;
         eatHotbarSlot = -1;
         swapTimer = 0;
         ignoredThisSession.clear();
         notifiedPlayers.clear();
+        playersInTab.clear();
     }
 
     @Override
@@ -276,8 +416,12 @@ public class ServerHealthcareSystem extends Module {
             isEating = false;
             eatHotbarSlot = -1;
         }
+        ateForFire = false;
+        tookDamageWhileOnFire = false;
+        lastHealth = -1;
         ignoredThisSession.clear();
         notifiedPlayers.clear();
+        playersInTab.clear();
     }
 
     /** Clear the ignored-set when joining a new server so old names don't carry over. */
@@ -285,9 +429,12 @@ public class ServerHealthcareSystem extends Module {
     private void onGameJoined(GameJoinedEvent event) {
         ignoredThisSession.clear();
         notifiedPlayers.clear();
+        playersInTab.clear();
         if (mc.player != null) {
             totemPops = mc.player.getStatHandler().getStat(Stats.USED, Items.TOTEM_OF_UNDYING);
+            lastHealth = mc.player.getHealth();
         }
+        tookDamageWhileOnFire = false;
     }
 
     // ── Tick ──────────────────────────────────────────────────────────────────
@@ -297,6 +444,20 @@ public class ServerHealthcareSystem extends Module {
         if (mc.player == null || mc.world == null) return;
 
         if (swapTimer > 0) swapTimer--;
+
+        // Damage detection for Auto Eat
+        if (lastHealth == -1) lastHealth = mc.player.getHealth();
+        float health = mc.player.getHealth();
+
+        if (mc.player.isOnFire()) {
+            if (health < lastHealth) {
+                tookDamageWhileOnFire = true;
+            }
+        } else {
+            ateForFire = false;
+            tookDamageWhileOnFire = false;
+        }
+        lastHealth = health;
 
         int currentPops = mc.player.getStatHandler().getStat(Stats.USED, Items.TOTEM_OF_UNDYING);
 
@@ -319,6 +480,7 @@ public class ServerHealthcareSystem extends Module {
         if (disconnectOnPlayer.get()) {
             for (PlayerEntity player : mc.world.getPlayers()) {
                 if (player == mc.player || player.isCreative() || player.isSpectator()) continue;
+                if (ignoreFriendsOnDisconnect.get() && isFriend(player.getName().getString())) continue;
                 if (mc.player.distanceTo(player) <= playerDetectionRange.get()) {
                     if (mc.player.networkHandler != null) {
                         mc.player.networkHandler.getConnection().disconnect(
@@ -367,6 +529,7 @@ public class ServerHealthcareSystem extends Module {
                 for (int j = 0; j < 36; j++) {
                     ItemStack stack = mc.player.getInventory().getStack(j);
                     if (stack.isEmpty()) continue;
+                    if (hasIgnoredEnchantment(stack)) continue;
                     var equippable = stack.get(DataComponentTypes.EQUIPPABLE);
                     if (equippable == null || equippable.slot() != slot) continue;
 
@@ -389,34 +552,57 @@ public class ServerHealthcareSystem extends Module {
 
         // Auto Eat
         if (autoEat.get()) {
-            float health = mc.player.getHealth();
+            boolean shouldEatForHealth = health <= healthThreshold.get();
+            boolean shouldEatForFire = mc.player.isOnFire() && tookDamageWhileOnFire && !ateForFire;
 
-            if (health <= healthThreshold.get()) {
-                if (!isEating && !mc.player.isUsingItem()) {
-                    int found = findGapple();
+            // Start eating if conditions are met and we aren't already eating/using an item
+            if ((shouldEatForHealth || shouldEatForFire) && !isEating && !mc.player.isUsingItem()) {
+                    int found = -1;
+                    boolean isForFire = false;
+
+                    if (shouldEatForFire) {
+                        found = findEnchantedGapple();
+                        if (found != -1) isForFire = true;
+                    }
+
+                    if (found == -1 && shouldEatForHealth) {
+                        found = findGapple();
+                        isForFire = false;
+                    }
+
                     if (found != -1) {
                         if (found < 9) {
-                            // Already in hotbar — select directly
                             eatHotbarSlot = found;
                         } else {
-                            // In main inventory — move to current hotbar slot, eat from there
                             eatHotbarSlot = mc.player.getInventory().selectedSlot;
                             InvUtils.move().from(found).toHotbar(eatHotbarSlot);
                         }
                         mc.player.getInventory().selectedSlot = eatHotbarSlot;
                         mc.options.useKey.setPressed(true);
                         isEating = true;
+                        if (isForFire) {
+                            ateForFire = true;
+                            tookDamageWhileOnFire = false;
+                        }
                     }
-                } else if (isEating && eatHotbarSlot != -1) {
-                    // Pin the hotbar slot for the duration of the eat animation
+            }
+
+            // Manage eating state (continue or stop)
+            if (isEating) {
+                ItemStack activeItem = mc.player.getActiveItem();
+                boolean isHoldingGapple = activeItem.isOf(Items.GOLDEN_APPLE) || activeItem.isOf(Items.ENCHANTED_GOLDEN_APPLE);
+
+                // Stop eating if we are no longer using an item, or if the item is not a gapple
+                if (!mc.player.isUsingItem() || !isHoldingGapple) {
+                    mc.options.useKey.setPressed(false);
+                    isEating = false;
+                    eatHotbarSlot = -1;
+                } else {
+                    // Continue eating: ensure correct slot is selected
                     if (mc.player.getInventory().selectedSlot != eatHotbarSlot) {
                         mc.player.getInventory().selectedSlot = eatHotbarSlot;
                     }
                 }
-            } else if (isEating) {
-                mc.options.useKey.setPressed(false);
-                isEating = false;
-                eatHotbarSlot = -1;
             }
         }
 
@@ -484,6 +670,7 @@ public class ServerHealthcareSystem extends Module {
         }
 
         if (sender.equalsIgnoreCase(mc.player.getName().getString())) return;
+        if (isFriend(sender)) return;
         if (ignoredThisSession.contains(sender.toLowerCase())) return;
 
         boolean matched = false;
@@ -510,17 +697,116 @@ public class ServerHealthcareSystem extends Module {
 
     @EventHandler
     private void onRender(Render3DEvent event) {
-        if (!trackPlayers.get() || mc.world == null) return;
+        if (!trackPlayers.get() || mc.world == null || mc.player == null) return;
 
         for (PlayerEntity player : mc.world.getPlayers()) {
             if (player == mc.player || player.isSpectator()) continue;
-            if (mc.player.distanceTo(player) <= trackRange.get()) {
-                event.renderer.box(player.getBoundingBox(), highlightColor.get(), highlightColor.get(), shapeMode.get(), 0);
+            if (mc.player.distanceTo(player) > trackRange.get()) continue;
+
+            PlayerStatus status = getPlayerStatus(player.getName().getString());
+            SettingColor color = null;
+
+            switch (status) {
+                case Friend:
+                    if (trackFriends.get()) color = friendColor.get();
+                    break;
+                case Enemy:
+                    if (trackEnemies.get()) color = enemyColor.get();
+                    break;
+                case Other:
+                    if (trackOthers.get()) color = otherColor.get();
+                    break;
+            }
+
+            if (color != null) {
+                event.renderer.box(player.getBoundingBox(), color, color, trackingShapeMode.get(), 0);
+            }
+        }
+    }
+
+    @EventHandler
+    private void onPacketReceive(PacketEvent.Receive event) {
+        if (!monitorTabList.get() || !(event.packet instanceof PlayerListS2CPacket packet)) return;
+
+        for (PlayerListS2CPacket.Entry entry : packet.getEntries()) {
+            if (entry.profile() == null || entry.profile().getName() == null || entry.profile().getName().isEmpty()) continue;
+
+            String name = entry.profile().getName();
+
+            if (packet.getActions().contains(PlayerListS2CPacket.Action.ADD_PLAYER)) {
+                if (playersInTab.add(name)) {
+                    handleTabListChange(name, "joined");
+                }
+            } else if (packet.getActions().contains(PlayerListS2CPacket.Action.UPDATE_LISTED) && !entry.listed()) {
+                if (playersInTab.remove(name)) {
+                    handleTabListChange(name, "left");
+                }
             }
         }
     }
 
     // ── Helpers ───────────────────────────────────────────────────────────────
+
+    private void handleTabListChange(String playerName, String action) {
+        PlayerStatus status = getPlayerStatus(playerName);
+
+        boolean shouldNotify = switch (status) {
+            case Friend -> tabNotifyFriends.get();
+            case Enemy -> tabNotifyEnemies.get();
+            case Other -> tabNotifyOthers.get();
+        };
+
+        if (!shouldNotify) return;
+        if (action.equals("joined") && !notifyOnJoin.get()) return;
+        if (action.equals("left") && !notifyOnLeave.get()) return;
+
+        String statusText = switch (status) {
+            case Friend -> "§aFriend";
+            case Enemy -> "§cEnemy";
+            case Other -> "Player";
+        };
+
+        info("%s %s has %s the server.", statusText, playerName, action);
+    }
+
+    private boolean hasIgnoredEnchantment(ItemStack stack) {
+        if (ignoredEnchantments.get().isEmpty()) return false;
+
+        ItemEnchantmentsComponent enchants = stack.get(DataComponentTypes.ENCHANTMENTS);
+        if (enchants == null) return false;
+
+        for (RegistryEntry<Enchantment> enchantmentEntry : enchants.getEnchantments()) {
+            if (enchantmentEntry.getKey().isPresent() && ignoredEnchantments.get().contains(enchantmentEntry.getKey().get())) {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    private boolean isFriend(String name) {
+        return friends.get().stream().anyMatch(friend -> friend.equalsIgnoreCase(name));
+    }
+
+    private boolean isEnemy(String name) {
+        return enemies.get().stream().anyMatch(enemy -> enemy.equalsIgnoreCase(name));
+    }
+
+    private PlayerStatus getPlayerStatus(String name) {
+        if (isFriend(name)) return PlayerStatus.Friend;
+        if (isEnemy(name)) return PlayerStatus.Enemy;
+        return PlayerStatus.Other;
+    }
+
+    /**
+     * Searches for an enchanted golden apple in the inventory.
+     */
+    private int findEnchantedGapple() {
+        for (int i = 0; i < 36; i++) {
+            if (mc.player.getInventory().getStack(i).isOf(Items.ENCHANTED_GOLDEN_APPLE)) return i;
+        }
+        return -1;
+    }
 
     /**
      * Searches hotbar first (no item move needed), then main inventory.
@@ -652,5 +938,11 @@ public class ServerHealthcareSystem extends Module {
     public enum ChestplatePreference {
         Chestplate,
         Elytra
+    }
+
+    public enum PlayerStatus {
+        Friend,
+        Enemy,
+        Other
     }
 }
