@@ -10,12 +10,14 @@ import meteordevelopment.meteorclient.settings.BoolSetting;
 import meteordevelopment.meteorclient.settings.EnchantmentListSetting;
 import meteordevelopment.meteorclient.settings.EnumSetting;
 import meteordevelopment.meteorclient.settings.IntSetting;
+import meteordevelopment.meteorclient.settings.KeybindSetting;
 import meteordevelopment.meteorclient.settings.Setting;
 import meteordevelopment.meteorclient.settings.SettingGroup;
 import meteordevelopment.meteorclient.systems.modules.Module;
 import meteordevelopment.meteorclient.systems.modules.Modules;
 import meteordevelopment.meteorclient.utils.player.FindItemResult;
 import meteordevelopment.meteorclient.utils.player.InvUtils;
+import meteordevelopment.meteorclient.utils.misc.Keybind;
 import meteordevelopment.orbit.EventHandler;
 import net.minecraft.client.gui.screen.DeathScreen;
 import net.minecraft.component.DataComponentTypes;
@@ -69,7 +71,23 @@ public class ServerHealthcareSystem extends Module {
     private final Setting<ChestplatePreference> chestplatePreference = sgAutoArmor.add(new EnumSetting.Builder<ChestplatePreference>()
         .name("chestplate-preference")
         .description("Which item to prefer for the chest slot.")
-        .defaultValue(ChestplatePreference.Chestplate)
+        .defaultValue(ChestplatePreference.Elytra)
+        .visible(autoArmor::get)
+        .build()
+    );
+
+    private final Setting<Keybind> switchPreference = sgAutoArmor.add(new KeybindSetting.Builder()
+        .name("switch-preference-key")
+        .description("Switches between preferring Chestplate or Elytra.")
+        .defaultValue(Keybind.none())
+        .action(() -> {
+            if (chestplatePreference.get() == ChestplatePreference.Chestplate) {
+                chestplatePreference.set(ChestplatePreference.Elytra);
+            } else {
+                chestplatePreference.set(ChestplatePreference.Chestplate);
+            }
+            info("Chestplate preference set to: %s", chestplatePreference.get().name());
+        })
         .visible(autoArmor::get)
         .build()
     );
