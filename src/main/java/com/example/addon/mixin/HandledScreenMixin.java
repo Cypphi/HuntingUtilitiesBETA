@@ -32,12 +32,30 @@ public abstract class HandledScreenMixin extends Screen {
 
     @Inject(method = "init", at = @At("TAIL"))
     private void onInit(CallbackInfo ci) {
-        if ((Object) this instanceof InventoryScreen) return;
+        Inventory101 inv101       = Modules.get().get(Inventory101.class);
+        boolean      inv101Active = inv101 != null && inv101.isActive();
+
+        // ── InventoryScreen: S1 / S2 sort-to-preset buttons ──────────────────────────
+        if ((Object) this instanceof InventoryScreen) {
+            if (inv101Active) {
+                int bx = this.x - 25; // same left-rail position as shulker buttons
+                int by = this.y;
+
+                this.addDrawableChild(mouseOnly(Text.literal("S1"),
+                    btn -> inv101.startInvSort(1), bx, by, 20, 20,
+                    net.minecraft.client.gui.tooltip.Tooltip.of(Text.literal("Sort inventory to Preset 1")),
+                    () -> !inv101.isPresetEmpty(1)));
+
+                this.addDrawableChild(mouseOnly(Text.literal("S2"),
+                    btn -> inv101.startInvSort(2), bx, by + 25, 20, 20,
+                    net.minecraft.client.gui.tooltip.Tooltip.of(Text.literal("Sort inventory to Preset 2")),
+                    () -> !inv101.isPresetEmpty(2)));
+            }
+            return;
+        }
 
         HandledScreen<?> screen         = (HandledScreen<?>) (Object) this;
         int              containerSlots = screen.getScreenHandler().slots.size() - 36;
-        Inventory101     inv101         = Modules.get().get(Inventory101.class);
-        boolean          inv101Active   = inv101 != null && inv101.isActive();
 
         // ── Inventory101 buttons (LEFT side) ──────────────────────────────────────────
         if (inv101Active) {

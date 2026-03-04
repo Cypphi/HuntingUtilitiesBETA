@@ -4,10 +4,8 @@
   "compatibilityLevel": "JAVA_17",
   "mixins": [
     "LavaMarkerMixin",
-    "MixinSignBlockEntityRenderer",
     "PortalMakerMixin",
     "PortalTrackerMixin"
-
   ],
   "client": [
     "ClientPlayerEntityMixin",
@@ -17,10 +15,10 @@
     "GraveyardMixin",
     "HandledScreenAccessor",
     "HandledScreenMixin",
+    "MixinSignBlockEntityRenderer",
     "LootLensMixin",
     "ObsidianFistMixin",
     "RocketPilotMixin",
-    "ServerHealthCareMixin",
     "ServerHealthcareSystemMixin"
   ],
   "injectors": {

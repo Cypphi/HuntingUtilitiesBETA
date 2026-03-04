@@ -46,6 +46,7 @@ import net.minecraft.screen.slot.Slot;
 import net.minecraft.screen.slot.SlotActionType;
 import net.minecraft.sound.SoundEvents;
 import net.minecraft.util.DyeColor;
+import net.minecraft.entity.EquipmentSlot;
 import net.minecraft.util.hit.BlockHitResult;
 import net.minecraft.util.hit.HitResult;
 
@@ -96,7 +97,6 @@ public class Inventory101 extends Module {
         .defaultValue(15)
         .min(1)
         .sliderMax(100)
-        .visible(enableRefill::get)
         .build()
     );
 
@@ -166,12 +166,17 @@ public class Inventory101 extends Module {
     );
 
     // ── State ──
-    private boolean isRegearing = false;
-    private int     regearTimer = 0;
+    private boolean isRegearing  = false;
+    private int     regearTimer  = 0;
+    private boolean isEquipping  = false;
+    private int     equipTimer   = 0;
     private boolean isRefilling = false;
     private int     refillTimer = 0;
     private boolean isSorting   = false;
     private int     sortTimer   = 0;
+    private boolean isInvSorting  = false;
+    private int     invSortTimer  = 0;
+    private int     invSortPreset = 0;
     private int     cleanerTimer = 0;
     private boolean isTrashing  = false;
     private int     trashTimer  = 0;
@@ -191,11 +196,15 @@ public class Inventory101 extends Module {
 
     @Override
     public void onDeactivate() {
-        isRegearing = false;
-        saveMode    = false;
+        isRegearing  = false;
+        isEquipping  = false;
+        equipTimer   = 0;
+        saveMode     = false;
         isRefilling = false;
         refillTimer = 0;
         isSorting   = false;
+        isInvSorting = false;
+        invSortTimer = 0;
         isTrashing  = false;
         wasClicking = false;
         lastMouseX = -1;
@@ -204,28 +213,22 @@ public class Inventory101 extends Module {
         moveAllActionTaken = false;
         wasBreaking = false;
         prevSlotAutoTool = -1;
+        trashTimer = 0;
+        cleanerTimer = 0;
     }
 
     // ─────────────────────── Public API for HandledScreenMixin ───────────────────────
 
-    /** @return true when the Sort button should be shown in generic container screens. */
-    public boolean isSortButtonEnabled() {
-        return showSortButton.get();
-    }
+    public boolean isSortButtonEnabled() { return showSortButton.get(); }
 
-    /** Called by the Sort button click handler. */
     public void startSorting() {
         if (isBusy()) return;
         isSorting = true;
         sortTimer = 0;
     }
 
-    /** @return true when the Refill button should be shown. */
-    public boolean isRefillEnabled() {
-        return enableRefill.get();
-    }
+    public boolean isRefillEnabled() { return enableRefill.get(); }
 
-    /** Called by the Refill button click handler. */
     public void startRefilling(int presetIndex) {
         if (isBusy()) return;
         List<ItemStack> target = getPreset(presetIndex);
@@ -239,25 +242,19 @@ public class Inventory101 extends Module {
         info("Refilling from preset " + presetIndex + "...");
     }
 
-    /** Called by the S (save-mode toggle) button. */
     public void toggleSaveMode() {
         if (isBusy()) return;
         saveMode = !saveMode;
         info(saveMode ? "Select a preset slot (1 or 2) to SAVE." : "Save mode cancelled.");
     }
 
-    /** @return whether save-mode is currently active. */
-    public boolean isSaveMode() {
-        return saveMode;
-    }
+    public boolean isSaveMode() { return saveMode; }
 
-    /** @return true if the given preset slot (1 or 2) has no saved data yet. */
     public boolean isPresetEmpty(int index) {
         String data = (index == 1) ? preset1Data.get() : preset2Data.get();
         return data == null || data.isEmpty();
     }
 
-    /** Called by the preset buttons (1 / 2). */
     public void handlePreset(int index) {
         if (isBusy() && !saveMode) return;
         if (saveMode) {
@@ -277,13 +274,28 @@ public class Inventory101 extends Module {
         }
     }
 
-    /** Called by the C (clear) button. */
     public void clearPresets() {
         preset1Data.set("");
         preset2Data.set("");
         saveMode = false;
         info("Presets cleared.");
     }
+
+    /** Called by PlayerInventoryScreenMixin when S1/S2 button is clicked. */
+    public void startInvSort(int presetIndex) {
+        if (isBusy()) return;
+        if (isPresetEmpty(presetIndex)) {
+            warning("Preset " + presetIndex + " is empty. Cannot sort.");
+            return;
+        }
+        invSortPreset = presetIndex;
+        isInvSorting  = true;
+        invSortTimer  = 0;
+        info("Sorting inventory from preset " + presetIndex + "...");
+    }
+
+    /** True while an inventory sort triggered by S1/S2 is running. */
+    public boolean isInvSorting() { return isInvSorting; }
 
     // ─────────────────────── Tick Handler ───────────────────────
 
@@ -332,17 +344,35 @@ public class Inventory101 extends Module {
             return;
         }
 
-        // High-priority blocking tasks
         if (isRegearing) {
-            if (!(mc.currentScreen instanceof ShulkerBoxScreen)) { isRegearing = false; return; }
+            if (!(mc.currentScreen instanceof ShulkerBoxScreen)) {
+                // Shulker closed externally — move to phase 2
+                isRegearing = false;
+                isEquipping = true;
+                equipTimer  = 0;
+                return;
+            }
             if (regearTimer > 0) { regearTimer--; return; }
             if (performRegearStep()) {
                 regearTimer = regearDelay.get();
             } else {
+                // Phase 1 complete — auto-close shulker and begin equipping
+                isRegearing = false;
+                isEquipping = true;
+                equipTimer  = 0;
                 mc.player.closeHandledScreen();
+            }
+            return;
+        }
+
+        if (isEquipping) {
+            if (equipTimer > 0) { equipTimer--; return; }
+            if (performEquipStep()) {
+                equipTimer = regearDelay.get();
+            } else {
                 info("Regearing complete.");
                 mc.player.playSound(SoundEvents.ENTITY_EXPERIENCE_ORB_PICKUP, 1.0f, 1.0f);
-                isRegearing = false;
+                isEquipping = false;
             }
             return;
         }
@@ -354,7 +384,24 @@ public class Inventory101 extends Module {
             return;
         }
 
-        // Mouse Drag / Click-All Item Move (user interaction, high priority)
+        if (isInvSorting) {
+            // Cancel if any screen OTHER than the player's own inventory is open
+            if (mc.currentScreen != null && !(mc.currentScreen instanceof net.minecraft.client.gui.screen.ingame.InventoryScreen)) {
+                isInvSorting = false;
+                return;
+            }
+            if (invSortTimer > 0) { invSortTimer--; return; }
+            if (performInvSortStep()) {
+                invSortTimer = sortDelay.get();
+            } else {
+                isInvSorting = false;
+                info("Inventory sort complete.");
+                mc.player.playSound(SoundEvents.ENTITY_EXPERIENCE_ORB_PICKUP, 1.0f, 1.0f);
+            }
+            return;
+        }
+
+        // Mouse Drag / Click-All Item Move
         if (mc.currentScreen instanceof HandledScreen) {
             HandledScreen<?> screen = (HandledScreen<?>) mc.currentScreen;
             boolean isClicking = Input.isButtonPressed(GLFW.GLFW_MOUSE_BUTTON_LEFT);
@@ -362,12 +409,11 @@ public class Inventory101 extends Module {
 
             if (isClicking) {
                 if (isShift) {
-                if (!wasClicking) { // First tick of the click
-                    // This is a new click. Decide if it's a "move all" or the start of a drag.
+                if (!wasClicking) {
                     if (shiftClickAll.get()) {
                         Slot focused = getFocusedSlot(screen);
                         if (focused != null && focused.hasStack()) {
-                            moveAllActionTaken = true; // Mark that we are doing a move-all
+                            moveAllActionTaken = true;
                             Item targetItem = focused.getStack().getItem();
                             boolean clickedInPlayerInventory = focused.inventory == mc.player.getInventory();
 
@@ -381,35 +427,31 @@ public class Inventory101 extends Module {
                             }
                         }
                     }
-                    // If not a move-all action, it's the start of a drag.
                     if (!moveAllActionTaken) {
                         processedInDrag.clear();
                         lastMouseX = mc.mouse.getX();
                         lastMouseY = mc.mouse.getY();
-                        // Also process the first slot immediately
                         Slot focused = getFocusedSlot(screen);
                         if (focused != null && focused.hasStack() && !processedInDrag.contains(focused.id)) {
                             mc.interactionManager.clickSlot(screen.getScreenHandler().syncId, focused.id, 0, SlotActionType.QUICK_MOVE, mc.player);
                             processedInDrag.add(focused.id);
                         }
                     }
-                } else if (!moveAllActionTaken) { // Continued click, and not a move-all action -> it's a drag
+                } else if (!moveAllActionTaken) {
                     double mouseX = mc.mouse.getX();
                     double mouseY = mc.mouse.getY();
 
-                    if (lastMouseX != -1) { // Drag continue - interpolate
+                    if (lastMouseX != -1) {
                         double deltaX = mouseX - lastMouseX;
                         double deltaY = mouseY - lastMouseY;
                         double dist = Math.sqrt(deltaX * deltaX + deltaY * deltaY);
 
                         if (dist > 1) {
-                            int steps = (int) Math.ceil(dist / 2.0); // Check every 2 pixels
+                            int steps = (int) Math.ceil(dist / 2.0);
                             for (int i = 0; i <= steps; i++) {
                                 double currentX = lastMouseX + (deltaX * i / steps);
                                 double currentY = lastMouseY + (deltaY * i / steps);
-
                                 Slot slot = getSlotAt(screen, currentX, currentY);
-
                                 if (slot != null && slot.hasStack() && !processedInDrag.contains(slot.id)) {
                                     mc.interactionManager.clickSlot(screen.getScreenHandler().syncId, slot.id, 0, SlotActionType.QUICK_MOVE, mc.player);
                                     processedInDrag.add(slot.id);
@@ -418,7 +460,6 @@ public class Inventory101 extends Module {
                         }
                     }
 
-                    // Always process current slot in case interpolation missed it
                     Slot focused = getFocusedSlot(screen);
                     if (focused != null && focused.hasStack() && !processedInDrag.contains(focused.id)) {
                         mc.interactionManager.clickSlot(screen.getScreenHandler().syncId, focused.id, 0, SlotActionType.QUICK_MOVE, mc.player);
@@ -429,28 +470,28 @@ public class Inventory101 extends Module {
                     lastMouseY = mouseY;
                 }
                 }
-                
+
                 wasClicking = true;
-                return; // Done for this tick
+                return;
             } else {
-                if (wasClicking) { // Drag ended
+                if (wasClicking) {
                     processedInDrag.clear();
                     lastMouseX = -1;
-                    moveAllActionTaken = false; // Reset the flag
+                    moveAllActionTaken = false;
                 }
                 wasClicking = false;
             }
         } else {
-            if (wasClicking) { // Screen closed during drag
+            if (wasClicking) {
                 processedInDrag.clear();
                 lastMouseX = -1;
-                moveAllActionTaken = false; // Reset the flag
+                moveAllActionTaken = false;
             }
             wasClicking = false;
         }
 
         // Auto-trash
-        if (autoTrash.get()) {
+        if (autoTrash.get() && !isBusy()) {
             if (mc.currentScreen instanceof GenericContainerScreen || mc.currentScreen instanceof ShulkerBoxScreen) {
                 if (!trashedForCurrentScreen) { isTrashing = true; trashedForCurrentScreen = true; }
             } else {
@@ -462,7 +503,7 @@ public class Inventory101 extends Module {
                     trashTimer--;
                 } else if (performTrashStep()) {
                     trashTimer = trashDelay.get();
-                    return; // Action performed, end tick
+                    return;
                 } else {
                     isTrashing = false;
                 }
@@ -478,7 +519,7 @@ public class Inventory101 extends Module {
                     if (!stack.isEmpty() && itemsToDrop.get().contains(stack.getItem())) {
                         InvUtils.drop().slot(i);
                         cleanerTimer = dropDelay.get();
-                        return; // Action performed, end tick
+                        return;
                     }
                 }
             }
@@ -490,27 +531,53 @@ public class Inventory101 extends Module {
     private void saveInventory(int index) {
         NbtCompound nbt  = new NbtCompound();
         NbtList     list = new NbtList();
+
+        // Main inventory + hotbar (slots 0-35)
         for (int i = 0; i < 36; i++) {
             ItemStack stack = mc.player.getInventory().getStack(i);
-            if (!stack.isEmpty()) {
-                NbtCompound itemTag = new NbtCompound();
-                itemTag.putByte("Slot", (byte) i);
-                NbtElement encodedItem = ItemStack.CODEC
-                    .encodeStart(RegistryOps.of(NbtOps.INSTANCE, mc.world.getRegistryManager()), stack)
-                    .getOrThrow();
-                itemTag.put("item", encodedItem);
-                list.add(itemTag);
-            }
+            encodeSlot(list, stack, i, mc);
         }
+
+        // Offhand (slot 36)
+        encodeSlot(list, mc.player.getOffHandStack(), 36, mc);
+
+        // Armor slots: feet=37, legs=38, chest=39, head=40
+        encodeSlot(list, mc.player.getEquippedStack(EquipmentSlot.FEET),  37, mc);
+        encodeSlot(list, mc.player.getEquippedStack(EquipmentSlot.LEGS),  38, mc);
+        encodeSlot(list, mc.player.getEquippedStack(EquipmentSlot.CHEST), 39, mc);
+        encodeSlot(list, mc.player.getEquippedStack(EquipmentSlot.HEAD),  40, mc);
+
         nbt.put("Items", list);
         if (index == 1) preset1Data.set(nbt.toString());
         else            preset2Data.set(nbt.toString());
     }
 
+    private void encodeSlot(NbtList list, ItemStack stack, int slot, net.minecraft.client.MinecraftClient mc) {
+        if (stack.isEmpty()) return;
+        NbtCompound itemTag = new NbtCompound();
+        itemTag.putInt("Slot", slot);
+        NbtElement encodedItem = ItemStack.CODEC
+            .encodeStart(RegistryOps.of(NbtOps.INSTANCE, mc.world.getRegistryManager()), stack)
+            .getOrThrow();
+        itemTag.put("item", encodedItem);
+        list.add(itemTag);
+    }
+
+    // Preset slot indices:
+    //   0-35  = main inventory + hotbar
+    //   36    = offhand
+    //   37-40 = armor (feet, legs, chest, head)
+    private static final int PRESET_OFFHAND = 36;
+    private static final int PRESET_FEET    = 37;
+    private static final int PRESET_LEGS    = 38;
+    private static final int PRESET_CHEST   = 39;
+    private static final int PRESET_HEAD    = 40;
+    private static final int PRESET_SIZE    = 41;
+
     private List<ItemStack> getPreset(int index) {
         String nbtString = (index == 1) ? preset1Data.get() : preset2Data.get();
         List<ItemStack> items = new ArrayList<>();
-        for (int i = 0; i < 36; i++) items.add(ItemStack.EMPTY);
+        for (int i = 0; i < PRESET_SIZE; i++) items.add(ItemStack.EMPTY);
         if (nbtString == null || nbtString.isEmpty()) return items;
         try {
             NbtCompound nbt = StringNbtReader.parse(nbtString);
@@ -518,10 +585,11 @@ public class Inventory101 extends Module {
                 NbtList list = nbt.getList("Items", NbtElement.COMPOUND_TYPE);
                 for (int i = 0; i < list.size(); i++) {
                     NbtCompound itemTag = list.getCompound(i);
-                    int slot = itemTag.getByte("Slot") & 255;
+                    int slot = itemTag.contains("Slot", NbtElement.INT_TYPE)
+                        ? itemTag.getInt("Slot")
+                        : (itemTag.getByte("Slot") & 255);
                     NbtElement itemNbt = itemTag.get("item");
-                    if (slot < 36 && itemNbt != null) {
-                        // Must decode with the same CODEC used during save (1.21 component format)
+                    if (slot < PRESET_SIZE && itemNbt != null) {
                         ItemStack.CODEC
                             .parse(RegistryOps.of(NbtOps.INSTANCE, mc.world.getRegistryManager()), itemNbt)
                             .result()
@@ -535,61 +603,90 @@ public class Inventory101 extends Module {
         return items;
     }
 
+    /**
+     * Phase 1 of regear: QUICK_MOVE every item from the shulker (slots 0-26) into the
+     * player inventory, one item per tick. Returns true while there is still something
+     * to move, false when the shulker is empty → triggers auto-close + phase 2.
+     */
     private boolean performRegearStep() {
-        List<ItemStack> preset = getPreset(targetPresetIndex);
-        if (preset.stream().allMatch(ItemStack::isEmpty)) return false;
         if (!(mc.player.currentScreenHandler instanceof ShulkerBoxScreenHandler handler)) return false;
 
-        // Only pull items FROM the shulker INTO the player inventory.
-        // We never dump player items back into the shulker — the user just wants
-        // their saved items loaded into the correct inventory slots.
-        for (int i = 0; i < 36; i++) {
-            ItemStack desired = preset.get(i);
+        for (int i = 0; i < 27; i++) {
+            if (!handler.getSlot(i).getStack().isEmpty()) {
+                mc.interactionManager.clickSlot(handler.syncId, i, 0, SlotActionType.QUICK_MOVE, mc.player);
+                return true; // one action per tick
+            }
+        }
 
-            int slotId = mapInventoryToSlotId(i);
-            if (slotId < 0) continue;
+        return false; // shulker empty — close GUI and move to phase 2
+    }
 
-            ItemStack current = handler.getSlot(slotId).getStack();
-            boolean typeMismatch = !isItemEqual(current, desired);
-            boolean countMismatch = !desired.isEmpty() && isItemEqual(current, desired) && current.getCount() < desired.getCount();
+    /**
+     * Phase 2 of regear: equip items in strict order — armor first (feet→legs→chest→head),
+     * then elytra (chest slot), then totem/offhand last.
+     * One action per tick. Returns true while work remains, false when done.
+     */
+    private boolean performEquipStep() {
+        List<ItemStack> preset = getPreset(targetPresetIndex);
 
-            if (typeMismatch || countMismatch) {
-                // 1. If desired is empty (Air), dump current item to Shulker
-                if (desired.isEmpty()) {
-                    if (!current.isEmpty()) {
-                        int dumpSlot = findEmptyShulkerSlot(handler);
-                        if (dumpSlot != -1) {
-                            move(slotId, dumpSlot);
-                            return true;
-                        }
-                    }
-                    continue;
+        // 1. Armor — feet, legs, chest, head (excluding elytra which is handled separately)
+        int[][] armorMap = {
+            { PRESET_FEET,  0 },
+            { PRESET_LEGS,  1 },
+            { PRESET_CHEST, 2 },
+            { PRESET_HEAD,  3 },
+        };
+        EquipmentSlot[] equipSlots = {
+            EquipmentSlot.FEET, EquipmentSlot.LEGS, EquipmentSlot.CHEST, EquipmentSlot.HEAD
+        };
+
+        for (int a = 0; a < armorMap.length; a++) {
+            int presetIdx = armorMap[a][0];
+            int armorIdx  = armorMap[a][1];
+            ItemStack desired = preset.get(presetIdx);
+            if (desired.isEmpty() || desired.isOf(Items.ELYTRA)) continue;
+
+            ItemStack current = mc.player.getEquippedStack(equipSlots[a]);
+            if (isSameItemType(current, desired)) continue;
+
+            for (int i = 0; i < 36; i++) {
+                if (isSameItemType(mc.player.getInventory().getStack(i), desired)) {
+                    InvUtils.move().from(i).toArmor(armorIdx);
+                    return true;
                 }
+            }
+        }
 
-                // 2. Try to find desired item in Shulker
-                int sourceSlot = findItemInShulker(handler, desired);
-                
-                // 3. If not in Shulker, try to find in Player Inventory (but not the current slot)
-                if (sourceSlot == -1) {
-                    sourceSlot = findItemInPlayerInv(handler, desired, slotId);
-                }
-
-                if (sourceSlot != -1) {
-                    move(sourceSlot, slotId);
-                    return true; // one action per tick
-                }
-
-                // 4. If we can't find the desired item, but the slot is occupied by something else, dump it to shulker
-                if (typeMismatch && !current.isEmpty()) {
-                    int dumpSlot = findEmptyShulkerSlot(handler);
-                    if (dumpSlot != -1) {
-                        move(slotId, dumpSlot);
+        // 2. Elytra — goes into chest slot
+        ItemStack desiredChest = preset.get(PRESET_CHEST);
+        if (desiredChest.isOf(Items.ELYTRA)) {
+            ItemStack currentChest = mc.player.getEquippedStack(EquipmentSlot.CHEST);
+            if (!currentChest.isOf(Items.ELYTRA) || isLowDurability(currentChest)) {
+                for (int i = 0; i < 36; i++) {
+                    ItemStack inv = mc.player.getInventory().getStack(i);
+                    if (inv.isOf(Items.ELYTRA) && !isLowDurability(inv)) {
+                        InvUtils.move().from(i).toArmor(2);
                         return true;
                     }
                 }
             }
         }
-        return false; // nothing left to move → regearing complete
+
+        // 3. Offhand (totem or any other saved offhand item) — last
+        ItemStack desiredOffhand = preset.get(PRESET_OFFHAND);
+        if (!desiredOffhand.isEmpty()) {
+            ItemStack currentOffhand = mc.player.getOffHandStack();
+            if (!isSameItemType(currentOffhand, desiredOffhand)) {
+                for (int i = 0; i < 36; i++) {
+                    if (isSameItemType(mc.player.getInventory().getStack(i), desiredOffhand)) {
+                        InvUtils.move().from(i).toOffhand();
+                        return true;
+                    }
+                }
+            }
+        }
+
+        return false;
     }
 
     private boolean performRefillStep() {
@@ -597,14 +694,13 @@ public class Inventory101 extends Module {
         if (preset.stream().allMatch(ItemStack::isEmpty)) return false;
         if (!(mc.player.currentScreenHandler instanceof ShulkerBoxScreenHandler handler)) return false;
 
-        // 0. Consolidate player inventory (Merge partial stacks)
+        // 0. Consolidate player inventory (merge partial stacks of stackable items only)
         for (int i = 27; i < 63; i++) {
             ItemStack s1 = handler.getSlot(i).getStack();
-            if (s1.isEmpty() || s1.getCount() >= s1.getMaxCount()) continue;
-
+            if (s1.isEmpty() || s1.getMaxCount() <= 1 || s1.getCount() >= s1.getMaxCount()) continue;
             for (int j = i + 1; j < 63; j++) {
                 ItemStack s2 = handler.getSlot(j).getStack();
-                if (!s2.isEmpty() && isItemEqual(s1, s2)) {
+                if (!s2.isEmpty() && s2.getMaxCount() > 1 && isSameItemType(s1, s2)) {
                     move(j, i);
                     return true;
                 }
@@ -619,41 +715,31 @@ public class Inventory101 extends Module {
             }
         }
 
-        // 2. Aggregate current item counts from player inventory
+        // 2. Aggregate current item counts from player inventory (slots 0-35 only)
         Map<Item, Integer> currentCounts = new HashMap<>();
         boolean hasLowDuraElytra = false;
-        for (int i = 0; i < mc.player.getInventory().size(); i++) {
+
+        for (int i = 0; i < 36; i++) {
             ItemStack stack = mc.player.getInventory().getStack(i);
             if (!stack.isEmpty()) {
                 if (isLowDurability(stack)) {
-                    if (i < 36) {
-                        hasLowDuraElytra = true;
-                    }
+                    hasLowDuraElytra = true;
                     continue;
                 }
                 currentCounts.put(stack.getItem(), currentCounts.getOrDefault(stack.getItem(), 0) + stack.getCount());
             }
         }
-        
-        int goodElytraCount = currentCounts.getOrDefault(Items.ELYTRA, 0);
+
+        int goodElytraCount    = currentCounts.getOrDefault(Items.ELYTRA, 0);
         int desiredElytraCount = desiredCounts.getOrDefault(Items.ELYTRA, 0);
 
-        // If we have a low durability elytra, pretend we have a full one for calculation purposes to prevent pulling an extra.
-        if (hasLowDuraElytra && desiredCounts.containsKey(Items.ELYTRA)) {
-            currentCounts.put(Items.ELYTRA, currentCounts.getOrDefault(Items.ELYTRA, 0) + 1);
-        }
-
-        // 3. Determine what is needed
+        // 3. Determine what is needed / excess
         Map<Item, Integer> neededCounts = new HashMap<>();
         Map<Item, Integer> excessCounts = new HashMap<>();
         for (Item item : desiredCounts.keySet()) {
             int needed = desiredCounts.get(item) - currentCounts.getOrDefault(item, 0);
-            if (needed > 0) {
-                neededCounts.put(item, needed);
-            }
+            if (needed > 0) neededCounts.put(item, needed);
         }
-
-        // Calculate excess for items that are in the preset but we have too many of
         for (Item item : currentCounts.keySet()) {
             if (desiredCounts.containsKey(item)) {
                 int diff = currentCounts.get(item) - desiredCounts.get(item);
@@ -661,90 +747,49 @@ public class Inventory101 extends Module {
             }
         }
 
-        // Calculate excess for items that are in the preset but we have too many of
-        for (Item item : currentCounts.keySet()) {
-            if (desiredCounts.containsKey(item)) {
-                int diff = currentCounts.get(item) - desiredCounts.get(item);
-                if (diff > 0) excessCounts.put(item, diff);
-            }
-        }
-
-        // 4. Prioritize swapping a low-durability elytra if one exists and a replacement is available.
+        // 4. Swap low-durability elytra
         if (hasLowDuraElytra) {
-            int brokenIdx = -1;
-            for (int j = 0; j < 36; j++) {
-                if (isLowDurability(mc.player.getInventory().getStack(j))) {
-                    brokenIdx = j;
-                    break;
-                }
+            int replacementSlot = findGoodElytraInShulker(handler);
+            if (replacementSlot != -1) {
+                mc.interactionManager.clickSlot(handler.syncId, replacementSlot, 0, SlotActionType.QUICK_MOVE, mc.player);
+                return true;
             }
-
-            if (brokenIdx != -1) {
-                // If we already have enough good elytras, just deposit the broken one (if space allows).
-                if (goodElytraCount >= desiredElytraCount) {
-                    if (findEmptyShulkerSlot(handler) != -1) {
-                        int playerSlotId = mapInventoryToSlotId(brokenIdx);
-                        if (playerSlotId != -1) {
+            if (goodElytraCount >= desiredElytraCount) {
+                for (int j = 0; j < 36; j++) {
+                    if (isLowDurability(mc.player.getInventory().getStack(j))) {
+                        int playerSlotId = mapInventoryToSlotId(j);
+                        if (playerSlotId != -1 && findEmptyShulkerSlot(handler) != -1) {
                             mc.interactionManager.clickSlot(handler.syncId, playerSlotId, 0, SlotActionType.QUICK_MOVE, mc.player);
                             return true;
                         }
-                    }
-                } else {
-                // Find a GOOD replacement in the shulker before swapping.
-                int replacementSlot = -1;
-                for (int i = 0; i < 27; i++) {
-                    ItemStack s = handler.getSlot(i).getStack();
-                    if (s.isOf(Items.ELYTRA) && !isLowDurability(s)) {
-                        replacementSlot = i;
                         break;
                     }
-                }
-
-                if (replacementSlot != -1) {
-                    int playerSlotId = mapInventoryToSlotId(brokenIdx);
-                    if (playerSlotId != -1) {
-                        // If shulker has space, quick move. If full, manual swap.
-                        if (findEmptyShulkerSlot(handler) != -1) {
-                            mc.interactionManager.clickSlot(handler.syncId, playerSlotId, 0, SlotActionType.QUICK_MOVE, mc.player);
-                        } else {
-                            mc.interactionManager.clickSlot(handler.syncId, playerSlotId, 0, SlotActionType.PICKUP, mc.player);
-                            mc.interactionManager.clickSlot(handler.syncId, replacementSlot, 0, SlotActionType.PICKUP, mc.player);
-                            mc.interactionManager.clickSlot(handler.syncId, playerSlotId, 0, SlotActionType.PICKUP, mc.player);
-                        }
-                        return true;
-                    }
-                }
                 }
             }
         }
 
-        // 5. Find a needed item in the shulker and quick-move it
+        // 5. Pull needed items from shulker
         if (!neededCounts.isEmpty()) {
-            for (int i = 0; i < 27; i++) { // Shulker slots are 0-26
+            for (int i = 0; i < 27; i++) {
                 ItemStack shulkerStack = handler.getSlot(i).getStack();
                 if (!shulkerStack.isEmpty() && neededCounts.containsKey(shulkerStack.getItem())) {
                     if (isLowDurability(shulkerStack)) continue;
                     mc.interactionManager.clickSlot(handler.syncId, i, 0, SlotActionType.QUICK_MOVE, mc.player);
-                    return true; // One move per tick.
+                    return true;
                 }
             }
         }
 
-        // 6. Handle Excess Items (Dump leftovers)
+        // 6. Dump excess items
         if (!excessCounts.isEmpty()) {
             for (Map.Entry<Item, Integer> entry : excessCounts.entrySet()) {
                 Item item = entry.getKey();
                 int excess = entry.getValue();
 
-                // Find all slots with this item
                 List<Integer> slots = new ArrayList<>();
                 for (int i = 27; i < 63; i++) {
-                    if (handler.getSlot(i).getStack().getItem() == item) {
-                        slots.add(i);
-                    }
+                    if (handler.getSlot(i).getStack().getItem() == item) slots.add(i);
                 }
-
-                // Sort slots by stack size ascending (prefer removing small stacks first)
                 slots.sort(Comparator.comparingInt(s -> handler.getSlot(s).getStack().getCount()));
 
                 for (int i : slots) {
@@ -752,38 +797,24 @@ public class Inventory101 extends Module {
                     int count = stack.getCount();
 
                     if (count <= excess) {
-                        // Move whole stack
                         mc.interactionManager.clickSlot(handler.syncId, i, 0, SlotActionType.QUICK_MOVE, mc.player);
                         return true;
                     } else {
-                        // Split stack: we have more than we want to dump
                         int keep = count - excess;
                         int shulkerTarget = findSlotForDeposit(handler, item);
-
                         if (shulkerTarget != -1) {
-                            // Pickup stack
                             mc.interactionManager.clickSlot(handler.syncId, i, 0, SlotActionType.PICKUP, mc.player);
-
                             if (keep < excess) {
-                                // Place `keep` back (Right click places 1)
-                                for (int k = 0; k < keep; k++) {
+                                for (int k = 0; k < keep; k++)
                                     mc.interactionManager.clickSlot(handler.syncId, i, 1, SlotActionType.PICKUP, mc.player);
-                                }
-                                // Deposit rest (`excess`) to shulker
                                 mc.interactionManager.clickSlot(handler.syncId, shulkerTarget, 0, SlotActionType.PICKUP, mc.player);
                             } else {
-                                // Deposit `excess` to shulker (Right click places 1)
-                                for (int k = 0; k < excess; k++) {
+                                for (int k = 0; k < excess; k++)
                                     mc.interactionManager.clickSlot(handler.syncId, shulkerTarget, 1, SlotActionType.PICKUP, mc.player);
-                                }
-                                // Place rest (`keep`) back
                                 mc.interactionManager.clickSlot(handler.syncId, i, 0, SlotActionType.PICKUP, mc.player);
                             }
-
-                            // If cursor still has items (e.g. shulker slot was full), put back in inventory
-                            if (!handler.getCursorStack().isEmpty()) {
+                            if (!handler.getCursorStack().isEmpty())
                                 mc.interactionManager.clickSlot(handler.syncId, i, 0, SlotActionType.PICKUP, mc.player);
-                            }
                             return true;
                         }
                     }
@@ -791,7 +822,7 @@ public class Inventory101 extends Module {
             }
         }
 
-        return false; // No more needed items found in shulker.
+        return false;
     }
 
     private boolean performSortStep() {
@@ -814,12 +845,89 @@ public class Inventory101 extends Module {
         return false;
     }
 
+    /**
+     * Sorts the full player inventory (slots 0-35) to match the saved preset layout.
+     * One action per tick. Returns true while work remains.
+     *
+     * Uses an empty-slot-as-buffer strategy to avoid swap cascades:
+     *   1. If the target slot is empty, move directly into it.
+     *   2. If no direct empty-target move exists, move a misplaced item into any
+     *      empty slot to free up space — never swap two occupied slots directly.
+     * This means items only ever move INTO empty slots, so nothing ever gets
+     * accidentally displaced into the wrong position.
+     */
+    private boolean performInvSortStep() {
+        List<ItemStack> preset = getPreset(invSortPreset);
+
+        // Build satisfied set: slot i is satisfied if the correct item type is already there.
+        // Use a claim system so duplicate item types each satisfy exactly one slot.
+        boolean[] satisfied = new boolean[36];
+        boolean[] claimed   = new boolean[36];
+
+        for (int i = 0; i < 36; i++) {
+            ItemStack desired = preset.get(i);
+            if (desired.isEmpty()) {
+                if (mc.player.getInventory().getStack(i).isEmpty()) {
+                    satisfied[i] = true;
+                    claimed[i]   = true;
+                }
+                continue;
+            }
+            if (!claimed[i] && isSameItemType(mc.player.getInventory().getStack(i), desired)) {
+                satisfied[i] = true;
+                claimed[i]   = true;
+                continue;
+            }
+            for (int j = 0; j < 36; j++) {
+                if (!claimed[j] && isSameItemType(mc.player.getInventory().getStack(j), desired)) {
+                    claimed[j] = true;
+                    break;
+                }
+            }
+        }
+
+        // Pass 1: move an item directly into its correct slot IF that slot is currently empty
+        for (int i = 0; i < 36; i++) {
+            if (satisfied[i]) continue;
+            ItemStack desired = preset.get(i);
+            if (desired.isEmpty()) continue; // handled in pass 2
+            if (!mc.player.getInventory().getStack(i).isEmpty()) continue; // slot not empty, skip
+
+            // Target slot is empty — find the item somewhere else (not already satisfied)
+            for (int j = 0; j < 36; j++) {
+                if (j == i) continue;
+                if (!isSameItemType(mc.player.getInventory().getStack(j), desired)) continue;
+                if (satisfied[j]) continue; // don't steal a correctly placed item
+                InvUtils.move().from(j).to(i);
+                return true;
+            }
+        }
+
+        // Pass 2: no direct-to-empty move found — displace a misplaced item into an empty slot
+        // to create room. Find any unsatisfied occupied slot whose item doesn't belong there,
+        // and move it to any empty slot that the preset wants empty OR that is unclaimed.
+        for (int i = 0; i < 36; i++) {
+            if (satisfied[i]) continue;
+            ItemStack current = mc.player.getInventory().getStack(i);
+            if (current.isEmpty()) continue; // already empty, nothing to displace
+
+            // Find an empty slot to park this item temporarily
+            for (int j = 0; j < 36; j++) {
+                if (j == i) continue;
+                if (!mc.player.getInventory().getStack(j).isEmpty()) continue;
+                InvUtils.move().from(i).to(j);
+                return true;
+            }
+        }
+
+        return false; // all slots satisfied
+    }
+
     private void move(int from, int to) {
         if (mc.interactionManager == null || mc.player == null) return;
         int syncId = mc.player.currentScreenHandler.syncId;
-        // Perform a standard 3-click swap: Pickup A -> Pickup B (swaps) -> Pickup A (puts back if B was occupied)
         mc.interactionManager.clickSlot(syncId, from, 0, SlotActionType.PICKUP, mc.player);
-        mc.interactionManager.clickSlot(syncId, to, 0, SlotActionType.PICKUP, mc.player);
+        mc.interactionManager.clickSlot(syncId, to,   0, SlotActionType.PICKUP, mc.player);
         mc.interactionManager.clickSlot(syncId, from, 0, SlotActionType.PICKUP, mc.player);
     }
 
@@ -837,17 +945,15 @@ public class Inventory101 extends Module {
         return false;
     }
 
-    private Slot getSlotAt(HandledScreen<?> screen, double mouseX, double mouseY) {
-        double scaledMouseX = mouseX * mc.getWindow().getScaledWidth() / (double)mc.getWindow().getWidth();
-        double scaledMouseY = mouseY * mc.getWindow().getScaledHeight() / (double)mc.getWindow().getHeight();
+    // ─────────────────────── Slot / Item Helpers ───────────────────────
 
+    private Slot getSlotAt(HandledScreen<?> screen, double mouseX, double mouseY) {
+        double scaledMouseX = mouseX * mc.getWindow().getScaledWidth() / (double) mc.getWindow().getWidth();
+        double scaledMouseY = mouseY * mc.getWindow().getScaledHeight() / (double) mc.getWindow().getHeight();
         int[] pos = getGuiPos(screen);
         if (pos == null) return null;
-        int guiLeft = pos[0];
-        int guiTop = pos[1];
-
         for (Slot slot : screen.getScreenHandler().slots) {
-            int x = guiLeft + slot.x; int y = guiTop + slot.y;
+            int x = pos[0] + slot.x, y = pos[1] + slot.y;
             if (scaledMouseX >= x && scaledMouseX < x + 16 && scaledMouseY >= y && scaledMouseY < y + 16) return slot;
         }
         return null;
@@ -865,9 +971,8 @@ public class Inventory101 extends Module {
                 Field fY = HandledScreen.class.getDeclaredField("field_2777"); fY.setAccessible(true);
                 guiLeft = fX.getInt(screen); guiTop = fY.getInt(screen);
             } catch (Exception e2) {
-                // Fallback
                 guiLeft = (screen.width - 176) / 2;
-                guiTop = (screen.height - 166) / 2;
+                guiTop  = (screen.height - 166) / 2;
             }
         }
         return new int[]{guiLeft, guiTop};
@@ -880,7 +985,7 @@ public class Inventory101 extends Module {
             return (Slot) f.get(screen);
         } catch (Exception e) {
             try {
-                Field f = HandledScreen.class.getDeclaredField("field_2787"); // Intermediary fallback
+                Field f = HandledScreen.class.getDeclaredField("field_2787");
                 f.setAccessible(true);
                 return (Slot) f.get(screen);
             } catch (Exception e2) {
@@ -899,11 +1004,10 @@ public class Inventory101 extends Module {
         return -1;
     }
 
-    private int findItemInPlayerInv(ShulkerBoxScreenHandler handler, ItemStack target, int excludeSlotId) {
-        // Player inventory slots in ShulkerBoxScreenHandler are 27 to 62 (27 + 36 = 63 slots total, indices 0-62)
-        for (int i = 27; i < 63; i++) {
-            if (i == excludeSlotId) continue;
-            if (isItemEqual(handler.getSlot(i).getStack(), target)) return i;
+    private int findGoodElytraInShulker(ShulkerBoxScreenHandler handler) {
+        for (int i = 0; i < 27; i++) {
+            ItemStack s = handler.getSlot(i).getStack();
+            if (s.isOf(Items.ELYTRA) && !isLowDurability(s)) return i;
         }
         return -1;
     }
@@ -921,22 +1025,13 @@ public class Inventory101 extends Module {
         return -1;
     }
 
-    private int findItemInShulker(ShulkerBoxScreenHandler handler, ItemStack target) {
-        for (int i = 0; i < 27; i++) if (isItemEqual(handler.getSlot(i).getStack(), target)) return i;
-        return -1;
-    }
-
     private int findBestTool(BlockState state) {
         int bestSlot = -1;
         float bestSpeed = 1.0f;
-
         for (int i = 0; i < 9; i++) {
             ItemStack stack = mc.player.getInventory().getStack(i);
             float speed = stack.getMiningSpeedMultiplier(state);
-            if (speed > bestSpeed) {
-                bestSpeed = speed;
-                bestSlot = i;
-            }
+            if (speed > bestSpeed) { bestSpeed = speed; bestSlot = i; }
         }
         return bestSlot;
     }
@@ -945,12 +1040,17 @@ public class Inventory101 extends Module {
         return ItemStack.areItemsAndComponentsEqual(a, b);
     }
 
+    private boolean isSameItemType(ItemStack a, ItemStack b) {
+        if (a.isEmpty() || b.isEmpty()) return false;
+        return a.getItem() == b.getItem();
+    }
+
     private boolean isLowDurability(ItemStack stack) {
         return stack.isOf(Items.ELYTRA) && (stack.getMaxDamage() - stack.getDamage() < elytraThreshold.get());
     }
 
     private boolean isBusy() {
-        return isRegearing || isSorting || isTrashing || isRefilling;
+        return isRegearing || isEquipping || isSorting || isInvSorting || isTrashing || isRefilling;
     }
 
     private static class ShulkerColorComparator implements Comparator<ItemStack> {
