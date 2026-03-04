@@ -6,6 +6,7 @@ import com.example.addon.modules.Graveyard;
 import com.example.addon.modules.Inventory101;
 import com.example.addon.modules.LavaMarker;
 import com.example.addon.modules.LootLens;
+import com.example.addon.modules.NeighbourhoodWatch;
 import com.example.addon.modules.Mobanom;
 import com.example.addon.modules.ObsidianFist;
 import com.example.addon.modules.PortalMaker;
@@ -44,8 +45,9 @@ public class HuntingUtilities extends MeteorAddon {
         modules.add(new RocketPilot());
         modules.add(new ServerHealthcareSystem());
         modules.add(new SignScanner());
-        Modules.get().add(new Timethrottle());
-        Modules.get().add(new Mobanom());
+        modules.add(new Timethrottle());
+        modules.add(new Mobanom());
+        modules.add(new NeighbourhoodWatch());
     }
 
     @Override

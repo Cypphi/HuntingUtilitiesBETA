@@ -1,31 +1,21 @@
 package com.example.addon.modules;
 
-import java.util.HashSet;
-import java.util.List;
 import java.util.Set;
 
 import com.example.addon.HuntingUtilities;
 
 import meteordevelopment.meteorclient.events.game.GameJoinedEvent;
-import meteordevelopment.meteorclient.events.game.ReceiveMessageEvent;
-import meteordevelopment.meteorclient.events.packets.PacketEvent;
-import meteordevelopment.meteorclient.events.render.Render3DEvent;
 import meteordevelopment.meteorclient.events.world.TickEvent;
-import meteordevelopment.meteorclient.renderer.ShapeMode;
 import meteordevelopment.meteorclient.settings.BoolSetting;
-import meteordevelopment.meteorclient.settings.ColorSetting;
 import meteordevelopment.meteorclient.settings.EnchantmentListSetting;
 import meteordevelopment.meteorclient.settings.EnumSetting;
 import meteordevelopment.meteorclient.settings.IntSetting;
 import meteordevelopment.meteorclient.settings.Setting;
 import meteordevelopment.meteorclient.settings.SettingGroup;
-import meteordevelopment.meteorclient.settings.StringListSetting;
-import meteordevelopment.meteorclient.settings.StringSetting;
 import meteordevelopment.meteorclient.systems.modules.Module;
 import meteordevelopment.meteorclient.systems.modules.Modules;
 import meteordevelopment.meteorclient.utils.player.FindItemResult;
 import meteordevelopment.meteorclient.utils.player.InvUtils;
-import meteordevelopment.meteorclient.utils.render.color.SettingColor;
 import meteordevelopment.orbit.EventHandler;
 import net.minecraft.client.gui.screen.DeathScreen;
 import net.minecraft.component.DataComponentTypes;
@@ -34,14 +24,11 @@ import net.minecraft.component.type.ItemEnchantmentsComponent;
 import net.minecraft.enchantment.Enchantment;
 import net.minecraft.enchantment.Enchantments;
 import net.minecraft.entity.EquipmentSlot;
-import net.minecraft.entity.player.PlayerEntity;
 import net.minecraft.item.Item;
 import net.minecraft.item.ItemStack;
 import net.minecraft.item.Items;
-import net.minecraft.network.packet.s2c.play.PlayerListS2CPacket;
 import net.minecraft.registry.RegistryKey;
 import net.minecraft.registry.entry.RegistryEntry;
-import net.minecraft.sound.SoundEvents;
 import net.minecraft.stat.Stats;
 import net.minecraft.text.Text;
 
@@ -53,10 +40,6 @@ public class ServerHealthcareSystem extends Module {
     private final SettingGroup sgAutoArmor  = settings.createGroup("Auto Armor");
     private final SettingGroup sgAutoEat    = settings.createGroup("Auto Eat");
     private final SettingGroup sgSafety     = settings.createGroup("Safety");
-    private final SettingGroup sgAutoIgnore = settings.createGroup("Auto Ignore");
-    private final SettingGroup sgTracking   = settings.createGroup("Player Tracking");
-    private final SettingGroup sgFriends    = settings.createGroup("Friends & Enemies");
-    private final SettingGroup sgTabList    = settings.createGroup("Tab List Monitoring");
 
     // ── General ───────────────────────────────────────────────────────────────
 
@@ -138,232 +121,10 @@ public class ServerHealthcareSystem extends Module {
 
     // ── Safety ────────────────────────────────────────────────────────────────
 
-    private final Setting<Boolean> disconnectOnPlayer = sgSafety.add(new BoolSetting.Builder()
-        .name("disconnect-on-player")
-        .description("Disconnects when another player is detected nearby.")
-        .defaultValue(false)
-        .build()
-    );
-
-    private final Setting<Integer> playerDetectionRange = sgSafety.add(new IntSetting.Builder()
-        .name("player-detection-range")
-        .description("Distance within which a player triggers a disconnect.")
-        .defaultValue(32)
-        .min(1)
-        .sliderMax(128)
-        .visible(disconnectOnPlayer::get)
-        .build()
-    );
-
-    private final Setting<Boolean> ignoreFriendsOnDisconnect = sgSafety.add(new BoolSetting.Builder()
-        .name("ignore-friends-on-disconnect")
-        .description("Does not disconnect if the nearby player is a friend.")
-        .defaultValue(true)
-        .visible(disconnectOnPlayer::get)
-        .build()
-    );
-
     private final Setting<Boolean> disconnectOnTotemPop = sgSafety.add(new BoolSetting.Builder()
         .name("disconnect-on-totem-pop")
         .description("Disconnects when a totem of undying is consumed.")
         .defaultValue(false)
-        .build()
-    );
-
-    // ── Auto Ignore ───────────────────────────────────────────────────────────
-
-    private final Setting<Boolean> autoIgnore = sgAutoIgnore.add(new BoolSetting.Builder()
-        .name("auto-ignore")
-        .description("Runs /ignorehard on players who say certain keywords in chat.")
-        .defaultValue(false)
-        .build()
-    );
-
-    private final Setting<List<String>> ignoreKeywords = sgAutoIgnore.add(new StringListSetting.Builder()
-        .name("keywords")
-        .description("Players who use any of these words in their message will be /ignorehard'd.")
-        .defaultValue(List.of())
-        .visible(autoIgnore::get)
-        .build()
-    );
-
-    private final Setting<Boolean> ignoreCaseSensitive = sgAutoIgnore.add(new BoolSetting.Builder()
-        .name("case-sensitive")
-        .description("Match keywords with case sensitivity.")
-        .defaultValue(false)
-        .visible(autoIgnore::get)
-        .build()
-    );
-
-    private final Setting<Boolean> ignoreNotify = sgAutoIgnore.add(new BoolSetting.Builder()
-        .name("notify")
-        .description("Print a local message when a player is auto-ignored.")
-        .defaultValue(true)
-        .visible(autoIgnore::get)
-        .build()
-    );
-
-    // ── Player Tracking ───────────────────────────────────────────────────────
-
-    private final Setting<Boolean> trackPlayers = sgTracking.add(new BoolSetting.Builder()
-        .name("track-players")
-        .description("Highlights and notifies when players enter visual range.")
-        .defaultValue(false)
-        .build()
-    );
-
-    private final Setting<Integer> trackRange = sgTracking.add(new IntSetting.Builder()
-        .name("track-range")
-        .description("Distance within which players are tracked.")
-        .defaultValue(128)
-        .min(1)
-        .sliderMax(256)
-        .visible(trackPlayers::get)
-        .build()
-    );
-
-    private final Setting<Boolean> trackFriends = sgTracking.add(new BoolSetting.Builder()
-        .name("track-friends")
-        .description("Highlight friends in range.")
-        .defaultValue(true)
-        .visible(trackPlayers::get)
-        .build()
-    );
-
-    private final Setting<Boolean> trackEnemies = sgTracking.add(new BoolSetting.Builder()
-        .name("track-enemies")
-        .description("Highlight enemies in range.")
-        .defaultValue(true)
-        .visible(trackPlayers::get)
-        .build()
-    );
-
-    private final Setting<Boolean> trackOthers = sgTracking.add(new BoolSetting.Builder()
-        .name("track-others")
-        .description("Highlight unknown players in range.")
-        .defaultValue(true)
-        .visible(trackPlayers::get)
-        .build()
-    );
-
-    private final Setting<ShapeMode> trackingShapeMode = sgTracking.add(new EnumSetting.Builder<ShapeMode>()
-        .name("shape-mode")
-        .description("How player highlight shapes are rendered.")
-        .defaultValue(ShapeMode.Lines)
-        .visible(trackPlayers::get)
-        .build()
-    );
-
-    private final Setting<Boolean> notifyChat = sgTracking.add(new BoolSetting.Builder()
-        .name("notify-chat")
-        .description("Send a chat message when a player enters range.")
-        .defaultValue(true)
-        .visible(trackPlayers::get)
-        .build()
-    );
-
-    private final Setting<String> customMessage = sgTracking.add(new StringSetting.Builder()
-        .name("custom-message")
-        .description("Notification message. Use {player} for name and {status} for relation.")
-        .defaultValue("Warning: {status} {player} is in visual range!")
-        .visible(() -> trackPlayers.get() && notifyChat.get())
-        .build()
-    );
-
-    private final Setting<Boolean> playSound = sgTracking.add(new BoolSetting.Builder()
-        .name("play-sound")
-        .description("Play a sound when a player enters range.")
-        .defaultValue(false)
-        .visible(trackPlayers::get)
-        .build()
-    );
-
-    // ── Friends & Enemies ─────────────────────────────────────────────────────
-
-    private final Setting<List<String>> friends = sgFriends.add(new StringListSetting.Builder()
-        .name("friends")
-        .description("Players treated as friends. Case-insensitive.")
-        .defaultValue(List.of())
-        .build()
-    );
-
-    private final Setting<List<String>> enemies = sgFriends.add(new StringListSetting.Builder()
-        .name("enemies")
-        .description("Players treated as enemies. Case-insensitive.")
-        .defaultValue(List.of())
-        .build()
-    );
-
-    private final Setting<SettingColor> friendColor = sgFriends.add(new ColorSetting.Builder()
-        .name("friend-color")
-        .description("Highlight color for friends.")
-        .defaultValue(new SettingColor(0, 255, 0, 255))
-        .visible(trackPlayers::get)
-        .build()
-    );
-
-    private final Setting<SettingColor> enemyColor = sgFriends.add(new ColorSetting.Builder()
-        .name("enemy-color")
-        .description("Highlight color for enemies.")
-        .defaultValue(new SettingColor(255, 0, 0, 255))
-        .visible(trackPlayers::get)
-        .build()
-    );
-
-    private final Setting<SettingColor> otherColor = sgFriends.add(new ColorSetting.Builder()
-        .name("other-color")
-        .description("Highlight color for unknown players.")
-        .defaultValue(new SettingColor(139, 0, 0, 255))
-        .visible(trackPlayers::get)
-        .build()
-    );
-
-    // ── Tab List Monitoring ───────────────────────────────────────────────────
-
-    private final Setting<Boolean> monitorTabList = sgTabList.add(new BoolSetting.Builder()
-        .name("monitor-tab-list")
-        .description("Notifies when players join or leave the server via the tab list.")
-        .defaultValue(false)
-        .build()
-    );
-
-    private final Setting<Boolean> notifyOnJoin = sgTabList.add(new BoolSetting.Builder()
-        .name("notify-on-join")
-        .description("Notify when a player joins the server.")
-        .defaultValue(true)
-        .visible(monitorTabList::get)
-        .build()
-    );
-
-    private final Setting<Boolean> notifyOnLeave = sgTabList.add(new BoolSetting.Builder()
-        .name("notify-on-leave")
-        .description("Notify when a player leaves the server.")
-        .defaultValue(true)
-        .visible(monitorTabList::get)
-        .build()
-    );
-
-    private final Setting<Boolean> tabNotifyFriends = sgTabList.add(new BoolSetting.Builder()
-        .name("notify-friends")
-        .description("Notify when a friend joins or leaves.")
-        .defaultValue(true)
-        .visible(monitorTabList::get)
-        .build()
-    );
-
-    private final Setting<Boolean> tabNotifyEnemies = sgTabList.add(new BoolSetting.Builder()
-        .name("notify-enemies")
-        .description("Notify when an enemy joins or leaves.")
-        .defaultValue(true)
-        .visible(monitorTabList::get)
-        .build()
-    );
-
-    private final Setting<Boolean> tabNotifyOthers = sgTabList.add(new BoolSetting.Builder()
-        .name("notify-others")
-        .description("Notify when an unknown player joins or leaves.")
-        .defaultValue(false)
-        .visible(monitorTabList::get)
         .build()
     );
 
@@ -381,11 +142,6 @@ public class ServerHealthcareSystem extends Module {
 
     // Auto Totem / Safety
     private int totemPops = 0;
-
-    // Tracking / Ignore / Tab
-    private final Set<Integer> notifiedPlayers   = new HashSet<>();
-    private final Set<String>  ignoredThisSession = new HashSet<>();
-    private final Set<String>  playersInTab       = new HashSet<>();
 
     // ── Constructor ───────────────────────────────────────────────────────────
 
@@ -432,9 +188,6 @@ public class ServerHealthcareSystem extends Module {
         tookDamageWhileOnFire = false;
         eatHotbarSlot        = -1;
         swapTimer            = 0;
-        notifiedPlayers.clear();
-        ignoredThisSession.clear();
-        playersInTab.clear();
     }
 
     // ── Tick ──────────────────────────────────────────────────────────────────
@@ -447,12 +200,10 @@ public class ServerHealthcareSystem extends Module {
 
         tickHealthTracking();
         if (tickTotemPop())           return; // disconnected — stop processing this tick
-        if (tickDisconnectOnPlayer()) return; // disconnected — stop processing this tick
         tickAutoRespawn();
         tickAutoTotem();
         tickAutoArmor();
         tickAutoEat();
-        tickPlayerTracking();
     }
 
     private void tickHealthTracking() {
@@ -479,21 +230,6 @@ public class ServerHealthcareSystem extends Module {
             return true;
         }
         totemPops = currentPops;
-        return false;
-    }
-
-    /** @return true if a disconnect was triggered */
-    private boolean tickDisconnectOnPlayer() {
-        if (!disconnectOnPlayer.get()) return false;
-
-        for (PlayerEntity player : mc.world.getPlayers()) {
-            if (player == mc.player || player.isCreative() || player.isSpectator()) continue;
-            if (ignoreFriendsOnDisconnect.get() && isFriend(player.getName().getString())) continue;
-            if (mc.player.distanceTo(player) <= playerDetectionRange.get()) {
-                disconnect("[SHS] Player detected: " + player.getName().getString());
-                return true;
-            }
-        }
         return false;
     }
 
@@ -559,46 +295,40 @@ public class ServerHealthcareSystem extends Module {
     private void tickAutoEat() {
         if (!autoEat.get()) return;
 
-        float health           = mc.player.getHealth();
-        boolean needsHealth    = health <= healthThreshold.get();
-        boolean needsFireEat   = mc.player.isOnFire() && tookDamageWhileOnFire && !ateForFire;
+        // Logic to start eating
+        if (!isEating && !mc.player.isUsingItem()) {
+            boolean needsHealth = mc.player.getHealth() <= healthThreshold.get();
+            boolean needsFireEat = mc.player.isOnFire() && tookDamageWhileOnFire && !ateForFire;
 
-        if ((needsHealth || needsFireEat) && !isEating && !mc.player.isUsingItem()) {
-            int  found     = -1;
-            boolean forFire = false;
+            if (needsHealth || needsFireEat) {
+                int gappleSlot = findBestGapple();
+                if (gappleSlot == -1) return;
 
-            if (needsFireEat) {
-                found = findEnchantedGapple();
-                if (found != -1) forFire = true;
-            }
-            if (found == -1 && needsHealth) {
-                found = findGapple();
-            }
-
-            if (found != -1) {
-                if (found < 9) {
-                    eatHotbarSlot = found;
+                if (gappleSlot < 9) {
+                    eatHotbarSlot = gappleSlot;
                 } else {
                     eatHotbarSlot = mc.player.getInventory().selectedSlot;
-                    InvUtils.move().from(found).toHotbar(eatHotbarSlot);
+                    InvUtils.move().from(gappleSlot).toHotbar(eatHotbarSlot);
                 }
                 mc.player.getInventory().selectedSlot = eatHotbarSlot;
+
                 mc.options.useKey.setPressed(true);
                 isEating = true;
-                if (forFire) {
-                    ateForFire            = true;
+
+                if (needsFireEat) {
+                    ateForFire = true;
                     tookDamageWhileOnFire = false;
                 }
             }
         }
+        // Logic to stop eating
+        else if (isEating) {
+            ItemStack activeItem = mc.player.getActiveItem();
+            boolean isHoldingGapple = activeItem.isOf(Items.GOLDEN_APPLE) || activeItem.isOf(Items.ENCHANTED_GOLDEN_APPLE);
 
-        if (isEating) {
-            ItemStack active        = mc.player.getActiveItem();
-            boolean  holdingGapple = active.isOf(Items.GOLDEN_APPLE) || active.isOf(Items.ENCHANTED_GOLDEN_APPLE);
-
-            if (!mc.player.isUsingItem() || !holdingGapple) {
+            if (!mc.player.isUsingItem() || !isHoldingGapple) {
                 mc.options.useKey.setPressed(false);
-                isEating      = false;
+                isEating = false;
                 eatHotbarSlot = -1;
             } else if (mc.player.getInventory().selectedSlot != eatHotbarSlot) {
                 mc.player.getInventory().selectedSlot = eatHotbarSlot;
@@ -606,110 +336,7 @@ public class ServerHealthcareSystem extends Module {
         }
     }
 
-    private void tickPlayerTracking() {
-        if (!trackPlayers.get()) return;
-
-        for (PlayerEntity player : mc.world.getPlayers()) {
-            if (player == mc.player || player.isSpectator()) continue;
-            if (mc.player.distanceTo(player) > trackRange.get()) continue;
-
-            if (notifiedPlayers.add(player.getId())) {
-                if (notifyChat.get()) {
-                    String playerName = player.getName().getString();
-                    String status = getPlayerStatus(playerName).name().toLowerCase();
-                    String msg = customMessage.get()
-                        .replace("{player}", playerName)
-                        .replace("{status}", status);
-                    info(msg);
-                }
-                if (playSound.get()) {
-                    mc.player.playSound(SoundEvents.BLOCK_NOTE_BLOCK_BELL.value(), 1.0f, 1.0f);
-                }
-            }
-        }
-        notifiedPlayers.removeIf(id -> mc.world.getEntityById(id) == null);
-    }
-
     // ── Event Handlers ────────────────────────────────────────────────────────
-
-    @EventHandler
-    private void onReceiveMessage(ReceiveMessageEvent event) {
-        if (!autoIgnore.get() || mc.player == null || mc.player.networkHandler == null) return;
-
-        List<String> keywords = ignoreKeywords.get();
-        if (keywords.isEmpty()) return;
-
-        String raw = event.getMessage().getString();
-        String sender, messageBody;
-
-        if (raw.startsWith("<")) {
-            int close = raw.indexOf('>');
-            if (close < 1) return;
-            sender      = raw.substring(1, close).trim();
-            messageBody = raw.substring(close + 1).trim();
-        } else {
-            int colon = raw.indexOf(':');
-            if (colon < 1 || colon >= 20) return;
-            String possibleName = raw.substring(0, colon);
-            if (possibleName.contains(" ")) return;
-            sender      = possibleName.trim();
-            messageBody = raw.substring(colon + 1).trim();
-        }
-
-        if (sender.equalsIgnoreCase(mc.player.getName().getString())) return;
-        if (isFriend(sender)) return;
-        if (ignoredThisSession.contains(sender.toLowerCase())) return;
-
-        boolean matched = false;
-        for (String keyword : keywords) {
-            if (keyword.isBlank()) continue;
-            String body = ignoreCaseSensitive.get() ? messageBody : messageBody.toLowerCase();
-            String kw   = ignoreCaseSensitive.get() ? keyword     : keyword.toLowerCase();
-            if (body.contains(kw)) { matched = true; break; }
-        }
-        if (!matched) return;
-
-        mc.player.networkHandler.sendChatCommand("ignorehard " + sender);
-        ignoredThisSession.add(sender.toLowerCase());
-        if (ignoreNotify.get()) info("Auto-ignored %s (keyword match).", sender);
-    }
-
-    @EventHandler
-    private void onRender(Render3DEvent event) {
-        if (!trackPlayers.get() || mc.world == null || mc.player == null) return;
-
-        for (PlayerEntity player : mc.world.getPlayers()) {
-            if (player == mc.player || player.isSpectator()) continue;
-            if (mc.player.distanceTo(player) > trackRange.get()) continue;
-
-            SettingColor color = switch (getPlayerStatus(player.getName().getString())) {
-                case Friend -> trackFriends.get() ? friendColor.get() : null;
-                case Enemy  -> trackEnemies.get() ? enemyColor.get()  : null;
-                case Other  -> trackOthers.get()  ? otherColor.get()  : null;
-            };
-
-            if (color != null) {
-                event.renderer.box(player.getBoundingBox(), color, color, trackingShapeMode.get(), 0);
-            }
-        }
-    }
-
-    @EventHandler
-    private void onPacketReceive(PacketEvent.Receive event) {
-        if (!monitorTabList.get() || !(event.packet instanceof PlayerListS2CPacket packet)) return;
-
-        for (PlayerListS2CPacket.Entry entry : packet.getEntries()) {
-            if (entry.profile() == null) continue;
-            String name = entry.profile().getName();
-            if (name == null || name.isEmpty()) continue;
-
-            if (packet.getActions().contains(PlayerListS2CPacket.Action.ADD_PLAYER)) {
-                if (playersInTab.add(name)) handleTabListChange(name, "joined");
-            } else if (packet.getActions().contains(PlayerListS2CPacket.Action.UPDATE_LISTED) && !entry.listed()) {
-                if (playersInTab.remove(name)) handleTabListChange(name, "left");
-            }
-        }
-    }
 
     // ── Helpers ───────────────────────────────────────────────────────────────
 
@@ -718,40 +345,6 @@ public class ServerHealthcareSystem extends Module {
             mc.player.networkHandler.getConnection().disconnect(Text.literal(reason));
         }
         this.toggle();
-    }
-
-    private void handleTabListChange(String playerName, String action) {
-        PlayerStatus status = getPlayerStatus(playerName);
-
-        boolean shouldNotify = switch (status) {
-            case Friend -> tabNotifyFriends.get();
-            case Enemy  -> tabNotifyEnemies.get();
-            case Other  -> tabNotifyOthers.get();
-        };
-        if (!shouldNotify) return;
-        if (action.equals("joined") && !notifyOnJoin.get()) return;
-        if (action.equals("left")   && !notifyOnLeave.get()) return;
-
-        String label = switch (status) {
-            case Friend -> "§aFriend";
-            case Enemy  -> "§cEnemy";
-            case Other  -> "Player";
-        };
-        info("%s %s has %s the server.", label, playerName, action);
-    }
-
-    public boolean isFriend(String name) {
-        return friends.get().stream().anyMatch(f -> f.equalsIgnoreCase(name));
-    }
-
-    public boolean isEnemy(String name) {
-        return enemies.get().stream().anyMatch(e -> e.equalsIgnoreCase(name));
-    }
-
-    private PlayerStatus getPlayerStatus(String name) {
-        if (isFriend(name)) return PlayerStatus.Friend;
-        if (isEnemy(name))  return PlayerStatus.Enemy;
-        return PlayerStatus.Other;
     }
 
     private void handleChestplateElytraSwitch() {
@@ -824,39 +417,6 @@ public class ServerHealthcareSystem extends Module {
         return (int) (armor * 100 + toughness * 10 + enchBonus);
     }
 
-    private int getEnchantmentLevel(ItemStack stack, String id) {
-        var enchants = stack.get(DataComponentTypes.ENCHANTMENTS);
-        if (enchants == null) return 0;
-        for (var entry : enchants.getEnchantments()) {
-            var key = entry.getKey();
-            if (key.isPresent() && key.get().getValue().toString().equals(id)) return enchants.getLevel(entry);
-        }
-        return 0;
-    }
-
-    private int findEnchantedGapple() {
-        for (int i = 0; i < 36; i++) {
-            if (mc.player.getInventory().getStack(i).isOf(Items.ENCHANTED_GOLDEN_APPLE)) return i;
-        }
-        return -1;
-    }
-
-    private int findGapple() {
-        int fallback = -1;
-        for (int i = 0; i < 9; i++) {
-            Item item = mc.player.getInventory().getStack(i).getItem();
-            if (item == Items.ENCHANTED_GOLDEN_APPLE) return i;
-            if (item == Items.GOLDEN_APPLE && fallback == -1) fallback = i;
-        }
-        if (fallback != -1) return fallback;
-        for (int i = 9; i < 36; i++) {
-            Item item = mc.player.getInventory().getStack(i).getItem();
-            if (item == Items.ENCHANTED_GOLDEN_APPLE) return i;
-            if (item == Items.GOLDEN_APPLE && fallback == -1) fallback = i;
-        }
-        return fallback;
-    }
-
     private int countTotems() {
         if (mc.player == null) return 0;
         int count = 0;
@@ -867,9 +427,47 @@ public class ServerHealthcareSystem extends Module {
         return count;
     }
 
+    /**
+     * Finds the best gapple to eat based on a fixed priority:
+     * 1. Enchanted Gapple (Hotbar)
+     * 2. Gapple (Hotbar)
+     * 3. Enchanted Gapple (Inventory)
+     * 4. Gapple (Inventory)
+     * @return The inventory slot of the best gapple, or -1 if none are found.
+     */
+    private int findBestGapple() {
+        int hotbarGapple = -1;
+        int inventoryEgapple = -1;
+        int inventoryGapple = -1;
+
+        for (int i = 0; i < 36; i++) {
+            ItemStack stack = mc.player.getInventory().getStack(i);
+            if (stack.isEmpty()) continue;
+
+            if (stack.isOf(Items.ENCHANTED_GOLDEN_APPLE)) {
+                if (i < 9) return i; // P1: E-Gapple in hotbar
+                if (inventoryEgapple == -1) inventoryEgapple = i; // P3: E-Gapple in inventory
+            } else if (stack.isOf(Items.GOLDEN_APPLE)) {
+                if (i < 9) { if (hotbarGapple == -1) hotbarGapple = i; } // P2: Gapple in hotbar
+                else { if (inventoryGapple == -1) inventoryGapple = i; } // P4: Gapple in inventory
+            }
+        }
+
+        if (hotbarGapple != -1) return hotbarGapple;
+        if (inventoryEgapple != -1) return inventoryEgapple;
+        return inventoryGapple;
+    }
+
+    private int getEnchantmentLevel(ItemStack stack, String id) {
+        ItemEnchantmentsComponent enchants = stack.get(DataComponentTypes.ENCHANTMENTS);
+        if (enchants == null) return 0;
+        for (RegistryEntry<Enchantment> entry : enchants.getEnchantments()) {
+            if (entry.getKey().isPresent() && entry.getKey().get().getValue().toString().equals(id)) return enchants.getLevel(entry);
+        }
+        return 0;
+    }
+
     // ── Enums ─────────────────────────────────────────────────────────────────
 
     public enum ChestplatePreference { Chestplate, Elytra }
-
-    public enum PlayerStatus { Friend, Enemy, Other }
 }
