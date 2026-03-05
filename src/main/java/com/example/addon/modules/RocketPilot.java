@@ -76,6 +76,36 @@ public class RocketPilot extends Module {
         .build()
     );
 
+    public final Setting<Boolean> useFreeLookY = sgFlight.add(new BoolSetting.Builder()
+        .name("use-freelook-y")
+        .description("Render the camera at a specific Y level while flying.")
+        .defaultValue(false)
+        .build()
+    );
+
+    public final Setting<Double> freeLookY = sgFlight.add(new DoubleSetting.Builder()
+        .name("freelook-y")
+        .description("The Y level to render the camera at.")
+        .defaultValue(120.0)
+        .min(-64).max(320)
+        .sliderRange(0, 256)
+        .visible(useFreeLookY::get)
+        .build()
+    );
+
+    private final Setting<Keybind> toggleFreeLookY = sgFlight.add(new KeybindSetting.Builder()
+        .name("toggle-freelook-y")
+        .description("Key to toggle the freelook Y feature.")
+        .defaultValue(Keybind.none())
+        .action(() -> {
+            if (mc.currentScreen != null) return;
+            boolean newVal = !useFreeLookY.get();
+            useFreeLookY.set(newVal);
+            info("Freelook Y " + (newVal ? "enabled" : "disabled") + ".");
+        })
+        .build()
+    );
+
     private final Setting<Boolean> autoTakeoff = sgFlight.add(new BoolSetting.Builder()
         .name("auto-takeoff")
         .description("Automatically jump and fire a rocket to start elytra flight.")
