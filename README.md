@@ -19,6 +19,7 @@ Current Modules
 - Server Healthcare System
 - Sign Scanner
 - Time Throttle
+- Neighbourhood Watch
 
 More modules coming soon — 
 
