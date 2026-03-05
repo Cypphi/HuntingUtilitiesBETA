@@ -24,7 +24,6 @@ import net.minecraft.item.ItemStack;
 import net.minecraft.item.Items;
 import net.minecraft.sound.SoundEvents;
 import net.minecraft.util.Hand;
-import net.minecraft.util.math.Vec3d;
 
 public class ElytraAssistant extends Module {
 
@@ -62,6 +61,7 @@ public class ElytraAssistant extends Module {
         .description("Key to toggle auto swap.")
         .defaultValue(Keybind.none())
         .action(() -> {
+            if (mc.currentScreen != null) return;
             boolean newVal = !autoSwap.get();
             autoSwap.set(newVal);
             info("Auto Swap " + (newVal ? "enabled" : "disabled") + ".");
@@ -130,6 +130,7 @@ public class ElytraAssistant extends Module {
         .description("Key to toggle auto mending.")
         .defaultValue(Keybind.none())
         .action(() -> {
+            if (mc.currentScreen != null) return;
             boolean newVal = !autoMend.get();
             autoMend.set(newVal);
             info("Auto Mend " + (newVal ? "enabled" : "disabled") + ".");

@@ -388,6 +388,7 @@ public class DungeonAssistant extends Module {
         .description("Key to toggle custom block scanning on/off.")
         .defaultValue(Keybind.none())
         .action(() -> {
+            if (mc.currentScreen != null) return;
             boolean newValue = !scanCustomBlocks.get();
             scanCustomBlocks.set(newValue);
             if (mc.player != null) info("Custom Blocks Highlight toggled %s.", newValue ? "§aON" : "§cOFF");

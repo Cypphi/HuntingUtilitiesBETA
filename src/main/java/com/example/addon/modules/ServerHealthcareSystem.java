@@ -82,6 +82,7 @@ public class ServerHealthcareSystem extends Module {
         .description("Switches between preferring Chestplate or Elytra.")
         .defaultValue(Keybind.none())
         .action(() -> {
+            if (mc.currentScreen != null) return;
             if (chestplatePreference.get() == ChestplatePreference.Chestplate) {
                 chestplatePreference.set(ChestplatePreference.Elytra);
             } else {

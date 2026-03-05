@@ -501,12 +501,14 @@ public class RocketPilot extends Module {
     }
 
     private void togglePause() {
+        if (mc.currentScreen != null) return;
         if (!isPatternMode()) return;
         paused = !paused;
         info("Pattern flight %s.", paused ? "paused" : "resumed");
     }
 
     private void togglePanicLanding() {
+        if (mc.currentScreen != null) return;
         if (panicLanding) {
             panicLanding = false;
             info("Panic landing cancelled. Resuming normal flight.");
