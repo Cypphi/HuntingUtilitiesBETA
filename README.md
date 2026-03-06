@@ -21,6 +21,7 @@ Current Modules
 - Time Throttle
 - Neighbourhood Watch
 - Tunnelers
+- Third Sight
 
 More modules coming soon — 
 
