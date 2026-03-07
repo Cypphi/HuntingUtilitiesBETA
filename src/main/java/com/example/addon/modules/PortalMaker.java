@@ -76,6 +76,14 @@ public class PortalMaker extends Module {
         .build()
     );
 
+    private final Setting<Boolean> useEnderPearl = sgGeneral.add(new BoolSetting.Builder()
+        .name("use-ender-pearl")
+        .description("Throw an ender pearl into the portal instead of walking in.")
+        .defaultValue(false)
+        .visible(autoEnter::get)
+        .build()
+    );
+
     private final Setting<Integer> finishDelay = sgGeneral.add(new IntSetting.Builder()
         .name("finish-delay")
         .description("Ticks to wait after lighting the portal before turning off.")
@@ -89,6 +97,7 @@ public class PortalMaker extends Module {
     private int placementIndex = 0;
     private int tickTimer = 0;
     private int finishTimer = 0;
+    private boolean pearlThrown = false;
 
     public PortalMaker() {
         super(HuntingUtilities.CATEGORY, "portal-maker", "Builds and lights a minimal Nether portal (10 obsidian).");
@@ -100,6 +109,7 @@ public class PortalMaker extends Module {
         placementIndex = 0;
         tickTimer = 0;
         finishTimer = 0;
+        pearlThrown = false;
 
         if (mc.player == null || mc.world == null) {
             toggle();
@@ -326,6 +336,23 @@ public class PortalMaker extends Module {
             p1.getY(),
             (p1.getZ() + p2.getZ()) / 2.0 + 0.5
         );
+
+        if (useEnderPearl.get()) {
+            if (pearlThrown) return;
+            if (selectHotbarItem(Items.ENDER_PEARL)) {
+                Vec3d pearlTarget = new Vec3d(
+                    portalCenter.x,
+                    p1.getY() + 1.5,
+                    portalCenter.z
+                );
+                Rotations.rotate(Rotations.getYaw(pearlTarget), Rotations.getPitch(pearlTarget), () -> {
+                    mc.interactionManager.interactItem(mc.player, Hand.MAIN_HAND);
+                    mc.player.swingHand(Hand.MAIN_HAND);
+                });
+                pearlThrown = true;
+                return;
+            }
+        }
 
         // 2. Stop if already inside portal (check feet or head)
         if (mc.world.getBlockState(mc.player.getBlockPos()).isOf(Blocks.NETHER_PORTAL) ||
