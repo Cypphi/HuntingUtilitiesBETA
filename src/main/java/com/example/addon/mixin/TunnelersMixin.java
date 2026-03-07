@@ -68,13 +68,6 @@ public abstract class TunnelersMixin {
             Consumer<ChunkData.BlockEntityVisitor> chunkDataConsumer,
             CallbackInfoReturnable<WorldChunk> cir
     ) {
-        WorldChunk chunk = cir.getReturnValue();
-        if (chunk == null) return;
-
-        Tunnelers module = Modules.get().get(Tunnelers.class);
-        if (module != null && module.isActive()) {
-            module.onChunkLoaded(chunk);
-        }
     }
 
     // ------------------------------------------------------------------ //
@@ -94,9 +87,5 @@ public abstract class TunnelersMixin {
         at = @At("HEAD")
     )
     private void tunnelers$onChunkUnloaded(ChunkPos pos, CallbackInfo ci) {
-        Tunnelers module = Modules.get().get(Tunnelers.class);
-        if (module != null && module.isActive()) {
-            module.onChunkUnloaded(pos.x, pos.z);
-        }
     }
 }

@@ -208,7 +208,8 @@ public class Tunnelers extends Module {
     /** Background executor — one daemon thread at minimum priority. */
     private ExecutorService executor;
 
-    private int tickTimer;
+    private String lastDimension = "";
+    private int dimensionChangeCooldown = 0;
 
     private static final int MAX_SNAPSHOTS_PER_PASS = 3;
     private static final int MAX_MERGE_PER_TICK = 500;
@@ -228,7 +229,8 @@ public class Tunnelers extends Module {
         pendingResults.clear();
         scannedChunks.clear();
         inFlight.clear();
-        tickTimer = 0;
+        dimensionChangeCooldown = 0;
+        if (mc.world != null) lastDimension = mc.world.getRegistryKey().getValue().toString();
         executor = Executors.newSingleThreadExecutor(r -> {
             Thread t = new Thread(r, "Tunnelers-Scanner");
             t.setDaemon(true);
@@ -248,26 +250,6 @@ public class Tunnelers extends Module {
     }
 
     // ------------------------------------------------------------------ //
-    //  Mixin hooks                                                         //
-    // ------------------------------------------------------------------ //
-
-    /** Called by TunnelersMixin when a chunk packet is fully received. */
-    public void onChunkLoaded(WorldChunk chunk) {
-        ChunkPos cp = chunk.getPos();
-        evictChunk(cp);           // clear stale data first
-        scannedChunks.remove(cp);
-        // Defer to onTick to respect rate limits
-    }
-
-    /** Called by TunnelersMixin when a chunk is unloaded. */
-    public void onChunkUnloaded(int chunkX, int chunkZ) {
-        ChunkPos cp = new ChunkPos(chunkX, chunkZ);
-        inFlight.remove(cp);
-        scannedChunks.remove(cp);
-        evictChunk(cp);
-    }
-
-    // ------------------------------------------------------------------ //
     //  Tick                                                                //
     // ------------------------------------------------------------------ //
 
@@ -275,16 +257,27 @@ public class Tunnelers extends Module {
     private void onTick(TickEvent.Post event) {
         if (mc.player == null || mc.world == null) return;
 
+        if (dimensionChangeCooldown > 0) {
+            dimensionChangeCooldown--;
+            return;
+        }
+
+        String currDim = mc.world.getRegistryKey().getValue().toString();
+        if (!currDim.equals(lastDimension)) {
+            lastDimension = currDim;
+            dimensionChangeCooldown = 40;
+            locations.clear();
+            chunkIndex.clear();
+            scannedChunks.clear();
+            inFlight.clear();
+            return;
+        }
+
         // Flush background results onto the main map — cheap.
         flushPendingResults();
 
-        submitMissingChunks();
-
-        // Throttled housekeeping.
-        if (tickTimer > 0) { tickTimer--; return; }
-        tickTimer = scanDelay.get();
-
-        pruneOutOfRange();
+        BlockPos playerPos = mc.player.getBlockPos();
+        scanNewChunks(playerPos.getX() >> 4, playerPos.getZ() >> 4);
     }
 
     /**
@@ -310,73 +303,58 @@ public class Tunnelers extends Module {
         }
     }
 
-    private void pruneOutOfRange() {
-        int pcx = mc.player.getBlockX() >> 4;
-        int pcz = mc.player.getBlockZ() >> 4;
+    private void scanNewChunks(int centerChunkX, int centerChunkZ) {
         int r   = range.get();
         int rSq = r * r;
 
         scannedChunks.removeIf(cp -> {
-            int dx = cp.x - pcx, dz = cp.z - pcz;
-            if (dx * dx + dz * dz > rSq) { evictChunk(cp); return true; }
+            int dx = cp.x - centerChunkX;
+            int dz = cp.z - centerChunkZ;
+            if (dx * dx + dz * dz > rSq) {
+                evictChunk(cp);
+                return true;
+            }
             return false;
         });
-    }
 
-    private void submitMissingChunks() {
-        if (mc.player == null || mc.world == null) return;
+        int chunksScanned = 0;
+        int limit = MAX_SNAPSHOTS_PER_PASS;
 
-        int pcx = mc.player.getBlockX() >> 4;
-        int pcz = mc.player.getBlockZ() >> 4;
-        int r   = range.get();
-        int rSq = r * r;
-
-        // Player view vector for prioritization
-        float yaw = mc.player.getYaw();
-        float rad = (float) Math.toRadians(yaw);
-        float lookX = -(float) Math.sin(rad);
-        float lookZ = (float) Math.cos(rad);
-
-        List<ChunkPos> candidates = new ArrayList<>();
-
-        for (int dx = -r; dx <= r; dx++) {
-            for (int dz = -r; dz <= r; dz++) {
-                if (dx * dx + dz * dz > rSq) continue;
-                int cx = pcx + dx, cz = pcz + dz;
-                ChunkPos cp = new ChunkPos(cx, cz);
-                
-                if (scannedChunks.contains(cp) || inFlight.contains(cp)) continue;
-                if (!mc.world.getChunkManager().isChunkLoaded(cx, cz)) continue;
-                
-                candidates.add(cp);
+        outer:
+        for (int d = 0; d <= r; d++) {
+            int minX = -d, maxX = d, minZ = -d, maxZ = d;
+            for (int x = minX; x <= maxX; x++) {
+                if (processChunk(centerChunkX + x, centerChunkZ + minZ, rSq, centerChunkX, centerChunkZ)) chunksScanned++;
+                if (chunksScanned >= limit) break outer;
+                if (minZ != maxZ) {
+                    if (processChunk(centerChunkX + x, centerChunkZ + maxZ, rSq, centerChunkX, centerChunkZ)) chunksScanned++;
+                    if (chunksScanned >= limit) break outer;
+                }
+            }
+            for (int z = minZ + 1; z < maxZ; z++) {
+                if (processChunk(centerChunkX + minX, centerChunkZ + z, rSq, centerChunkX, centerChunkZ)) chunksScanned++;
+                if (chunksScanned >= limit) break outer;
+                if (minX != maxX) {
+                    if (processChunk(centerChunkX + maxX, centerChunkZ + z, rSq, centerChunkX, centerChunkZ)) chunksScanned++;
+                    if (chunksScanned >= limit) break outer;
+                }
             }
         }
+    }
 
-        if (candidates.isEmpty()) return;
+    private boolean processChunk(int cx, int cz, int rSq, int centerChunkX, int centerChunkZ) {
+        int dx = cx - centerChunkX;
+        int dz = cz - centerChunkZ;
+        if (dx * dx + dz * dz > rSq) return false;
 
-        // Sort candidates: closer and in-front first
-        candidates.sort(Comparator.comparingDouble(cp -> {
-            double dx = (cp.x - pcx);
-            double dz = (cp.z - pcz);
-            double dist = Math.sqrt(dx * dx + dz * dz);
-            if (dist < 0.001) return 0.0;
+        ChunkPos cp = new ChunkPos(cx, cz);
+        if (scannedChunks.contains(cp) || inFlight.contains(cp)) return false;
 
-            double dirX = dx / dist;
-            double dirZ = dz / dist;
-            double dot = dirX * lookX + dirZ * lookZ; // 1.0 = front, -1.0 = back
-            
-            // Penalty factor: 1.0 at front, 3.0 at back
-            double anglePenalty = 1.0 + (1.0 - dot); 
-            
-            return dist * anglePenalty;
-        }));
-
-        int submitted = 0;
-        for (ChunkPos cp : candidates) {
-            submitScan(cp, snapshotChunk(mc.world.getChunk(cp.x, cp.z)));
-            submitted++;
-            if (submitted >= MAX_SNAPSHOTS_PER_PASS) break;
+        if (mc.world.getChunkManager().isChunkLoaded(cx, cz)) {
+            submitScan(cp, snapshotChunk(mc.world.getChunk(cx, cz)));
+            return true;
         }
+        return false;
     }
 
     // ------------------------------------------------------------------ //
