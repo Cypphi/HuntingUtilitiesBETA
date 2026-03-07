@@ -34,14 +34,14 @@ public class Tunnelers extends Module {
     //  Setting Groups                                                      //
     // ------------------------------------------------------------------ //
 
-    private final SettingGroup sgGeneral    = settings.getDefaultGroup();
-    private final SettingGroup sg1x1        = settings.createGroup("1x1 Tunnels");
-    private final SettingGroup sg1x2        = settings.createGroup("1x2 Tunnels");
-    private final SettingGroup sg2x2        = settings.createGroup("2x2 Tunnels");
-    private final SettingGroup sgHoles      = settings.createGroup("Holes");
-    private final SettingGroup sgAbnormal   = settings.createGroup("Abnormal Tunnels");
-    private final SettingGroup sgLadder     = settings.createGroup("Ladder Shafts");
-    private final SettingGroup sgRender     = settings.createGroup("Render");
+    private final SettingGroup sgGeneral  = settings.getDefaultGroup();
+    private final SettingGroup sg1x1      = settings.createGroup("1x1 Tunnels");
+    private final SettingGroup sg1x2      = settings.createGroup("1x2 Tunnels");
+    private final SettingGroup sg2x2      = settings.createGroup("2x2 Tunnels");
+    private final SettingGroup sgHoles    = settings.createGroup("Holes");
+    private final SettingGroup sgAbnormal = settings.createGroup("Abnormal Tunnels");
+    private final SettingGroup sgLadder   = settings.createGroup("Ladder Shafts");
+    private final SettingGroup sgRender   = settings.createGroup("Render");
 
     // ------------------------------------------------------------------ //
     //  General                                                             //
@@ -184,9 +184,22 @@ public class Tunnelers extends Module {
     //  State                                                               //
     // ------------------------------------------------------------------ //
 
-    private final ConcurrentHashMap<BlockPos, TunnelType> locations  = new ConcurrentHashMap<>();
+    private final ConcurrentHashMap<BlockPos, TunnelType>    locations  = new ConcurrentHashMap<>();
     private final ConcurrentHashMap<ChunkPos, Set<BlockPos>> chunkIndex = new ConcurrentHashMap<>();
-    private final ConcurrentLinkedQueue<ScanResult> pendingResults   = new ConcurrentLinkedQueue<>();
+    private final ConcurrentLinkedQueue<ScanResult>          pendingResults = new ConcurrentLinkedQueue<>();
+
+    /**
+     * FIX #1 — render snapshot.
+     * The render thread iterates this plain ArrayList instead of the live
+     * ConcurrentHashMap, eliminating per-frame CHM iteration overhead and
+     * the associated lock contention. Rebuilt on the main thread only when
+     * new results are flushed (i.e. at most once per tick, not once per frame).
+     * Declared volatile so the render thread always sees the latest reference.
+     */
+    private volatile List<RenderEntry> renderSnapshot = new ArrayList<>();
+
+    /** Whether the snapshot needs to be rebuilt after a flush. */
+    private boolean renderSnapshotDirty = false;
 
     /** Chunks whose results are already live in {@code locations}. Main-thread only. */
     private final Set<ChunkPos> scannedChunks = new HashSet<>();
@@ -198,25 +211,31 @@ public class Tunnelers extends Module {
      */
     private final LinkedHashSet<ChunkPos> snapshotQueue = new LinkedHashSet<>();
 
-    /** Chunks currently being scanned (snapshot + classify) on the background thread. */
+    /** Chunks currently being scanned on the background thread. */
     private final Set<ChunkPos> inFlight = ConcurrentHashMap.newKeySet();
 
     private ExecutorService executor;
 
-    private String lastDimension        = "";
+    private String lastDimension           = "";
     private int    dimensionChangeCooldown = 0;
-    private int    pruneTimer           = 0;
+    private int    pruneTimer              = 0;
 
     // How many chunks we *queue* per tick (cheap – just adds to a set).
-    private static final int MAX_QUEUE_PER_TICK   = 32;
-    // How many pending results we merge into the live map per tick.
-    private static final int MAX_MERGE_PER_TICK   = 200;
+    private static final int MAX_QUEUE_PER_TICK = 32;
+    /**
+     * FIX #2 — count *batches* consumed per flush, not individual entries.
+     * The old MAX_MERGE_PER_TICK=200 counted entries, but each batch can carry
+     * hundreds of entries, so a burst of completed scans could insert thousands
+     * of map entries in one tick. Limiting to 4 batches per tick spreads the
+     * work evenly and bounds the worst-case main-thread time per flush call.
+     */
+    private static final int MAX_BATCHES_PER_FLUSH = 4;
     // Max concurrent background scan jobs.
-    private static final int MAX_IN_FLIGHT        = 6;
+    private static final int MAX_IN_FLIGHT         = 6;
     // How many jobs we drain from the queue each tick.
-    private static final int DRAIN_PER_TICK       = 4;
+    private static final int DRAIN_PER_TICK        = 4;
     // Time budget for the queue-building loop (does NOT include snapshot work).
-    private static final long TIME_BUDGET_NS      = 500_000L; // 0.5 ms
+    private static final long TIME_BUDGET_NS       = 500_000L; // 0.5 ms
 
     // ------------------------------------------------------------------ //
     //  Lifecycle                                                           //
@@ -234,6 +253,8 @@ public class Tunnelers extends Module {
         scannedChunks.clear();
         snapshotQueue.clear();
         inFlight.clear();
+        renderSnapshot = new ArrayList<>();
+        renderSnapshotDirty = false;
         pruneTimer = 0;
         dimensionChangeCooldown = 0;
         if (mc.world != null) lastDimension = mc.world.getRegistryKey().getValue().toString();
@@ -254,6 +275,7 @@ public class Tunnelers extends Module {
         scannedChunks.clear();
         snapshotQueue.clear();
         inFlight.clear();
+        renderSnapshot = new ArrayList<>();
     }
 
     // ------------------------------------------------------------------ //
@@ -278,37 +300,59 @@ public class Tunnelers extends Module {
             scannedChunks.clear();
             inFlight.clear();
             snapshotQueue.clear();
+            renderSnapshot = new ArrayList<>();
+            renderSnapshotDirty = false;
             return;
         }
 
-        // 1. Merge a bounded slice of completed results — O(MAX_MERGE_PER_TICK).
+        // 1. Merge a bounded slice of completed results.
         flushPendingResults();
 
-        // 2. Periodically prune out-of-range chunks — amortised, not every tick.
+        // 2. Rebuild the render snapshot if anything was flushed this tick.
+        //    Done once per tick on the main thread — not once per frame.
+        if (renderSnapshotDirty) {
+            rebuildRenderSnapshot();
+            renderSnapshotDirty = false;
+        }
+
+        // 3. Periodically prune out-of-range chunks.
         pruneTimer++;
         if (pruneTimer >= scanDelay.get()) {
             pruneTimer = 0;
             pruneOutOfRange();
         }
 
-        // 3. Discover new chunks to scan and add them to snapshotQueue.
+        // 4. Discover new chunks to scan.
         int playerCX = mc.player.getBlockPos().getX() >> 4;
         int playerCZ = mc.player.getBlockPos().getZ() >> 4;
         enqueueNewChunks(playerCX, playerCZ);
 
-        // 4. Hand one pending snapshot job to the background thread per tick.
-        //    The expensive copy now happens off the main thread.
+        // 5. Hand pending snapshot jobs to the background thread.
         drainSnapshotQueue();
+    }
+
+    // ------------------------------------------------------------------ //
+    //  Render snapshot                                                     //
+    // ------------------------------------------------------------------ //
+
+    /**
+     * FIX #1 — rebuilds the render list from the live map once per tick.
+     * Pre-bakes the BlockPos as three ints to avoid repeated field accesses
+     * in the hot render loop.
+     */
+    private void rebuildRenderSnapshot() {
+        List<RenderEntry> next = new ArrayList<>(locations.size());
+        for (Map.Entry<BlockPos, TunnelType> e : locations.entrySet()) {
+            BlockPos p = e.getKey();
+            next.add(new RenderEntry(p.getX(), p.getY(), p.getZ(), e.getValue()));
+        }
+        renderSnapshot = next; // volatile write — render thread picks it up next frame
     }
 
     // ------------------------------------------------------------------ //
     //  Pruning                                                             //
     // ------------------------------------------------------------------ //
 
-    /**
-     * Removes scanned chunks that have drifted out of range.
-     * Called once every {@code scanDelay} ticks, not every tick.
-     */
     private void pruneOutOfRange() {
         if (mc.player == null) return;
         int centerCX = mc.player.getBlockPos().getX() >> 4;
@@ -323,6 +367,7 @@ public class Tunnelers extends Module {
             if (dx * dx + dz * dz > rSq) {
                 evictChunk(cp);
                 it.remove();
+                renderSnapshotDirty = true;
             }
         }
     }
@@ -331,10 +376,6 @@ public class Tunnelers extends Module {
     //  Queue building (main thread, cheap)                                 //
     // ------------------------------------------------------------------ //
 
-    /**
-     * Walks the spiral and pushes chunk positions that need scanning onto
-     * {@code snapshotQueue}. No chunk data is touched here — just coords.
-     */
     private void enqueueNewChunks(int centerCX, int centerCZ) {
         int r     = range.get();
         int rSq   = r * r;
@@ -368,16 +409,19 @@ public class Tunnelers extends Module {
         ChunkPos cp = new ChunkPos(cx, cz);
         if (scannedChunks.contains(cp) || inFlight.contains(cp)) return false;
         if (!mc.world.getChunkManager().isChunkLoaded(cx, cz)) return false;
-        return snapshotQueue.add(cp); // no-op if already queued (O(1))
+        return snapshotQueue.add(cp);
     }
 
     // ------------------------------------------------------------------ //
-    //  Snapshot + scan — all moved to the background thread               //
+    //  Snapshot + scan                                                     //
     // ------------------------------------------------------------------ //
 
     /**
-     * Drains up to DRAIN_PER_TICK jobs from the queue each tick,
-     * respecting the MAX_IN_FLIGHT concurrency cap.
+     * FIX #3 — the snapshot (block iteration) and scan both happen on the
+     * background thread. The main thread only hands over the live WorldChunk
+     * reference. To guard against the chunk being modified mid-copy we do the
+     * snapshot as early as possible and work only from the copied array.
+     * The WorldChunk reference itself is not kept past the snapshot call.
      */
     private void drainSnapshotQueue() {
         for (int i = 0; i < DRAIN_PER_TICK; i++) {
@@ -405,6 +449,7 @@ public class Tunnelers extends Module {
 
             executor.submit(() -> {
                 try {
+                    // Snapshot and scan entirely off the main thread.
                     BlockState[][] snapshot = snapshotChunk(chunk);
                     Map<BlockPos, TunnelType> results = scanSnapshot(cp, snapshot, bottomCoord, config);
                     pendingResults.add(new ScanResult(cp, results));
@@ -419,23 +464,30 @@ public class Tunnelers extends Module {
     //  Flush                                                               //
     // ------------------------------------------------------------------ //
 
+    /**
+     * FIX #2 — limits by number of batches consumed, not individual entries.
+     * Each batch is one full chunk scan result. Capping at MAX_BATCHES_PER_FLUSH
+     * gives a predictable, small upper bound on main-thread work per tick
+     * regardless of how many BlockPos entries each batch contains.
+     */
     private void flushPendingResults() {
         ScanResult batch;
-        int processed = 0;
-        while (processed < MAX_MERGE_PER_TICK && (batch = pendingResults.poll()) != null) {
+        int batchesProcessed = 0;
+        while (batchesProcessed < MAX_BATCHES_PER_FLUSH && (batch = pendingResults.poll()) != null) {
             scannedChunks.add(batch.chunkPos);
             Set<BlockPos> index = chunkIndex.computeIfAbsent(
                 batch.chunkPos, k -> ConcurrentHashMap.newKeySet());
             for (Map.Entry<BlockPos, TunnelType> e : batch.results.entrySet()) {
                 locations.put(e.getKey(), e.getValue());
                 index.add(e.getKey());
-                processed++;
             }
+            batchesProcessed++;
+            renderSnapshotDirty = true;
         }
     }
 
     // ------------------------------------------------------------------ //
-    //  Snapshot                                                            //
+    //  Snapshot (off-thread)                                               //
     // ------------------------------------------------------------------ //
 
     private BlockState[][] snapshotChunk(WorldChunk chunk) {
@@ -534,7 +586,7 @@ public class Tunnelers extends Module {
     }
 
     // ------------------------------------------------------------------ //
-    //  Block tests (unchanged)                                             //
+    //  Block tests                                                         //
     // ------------------------------------------------------------------ //
 
     private boolean isHole(int x, int y, int z, ScanContext ctx, int depth) {
@@ -722,27 +774,52 @@ public class Tunnelers extends Module {
     //  Render                                                              //
     // ------------------------------------------------------------------ //
 
+    /**
+     * FIX #1 + FIX #4 — iterates the pre-built renderSnapshot (a plain ArrayList)
+     * instead of the live ConcurrentHashMap, and uses squared-distance comparison
+     * to avoid Math.sqrt per entry. No SettingColor is allocated per entry;
+     * a single reusable SettingColor is mutated in-place for the faded case.
+     */
     @EventHandler
     private void onRender(Render3DEvent event) {
         if (mc.player == null) return;
 
-        boolean doFade  = fadeWithDistance.get();
-        double  maxDist = range.get() * 16.0;
+        List<RenderEntry> snapshot = renderSnapshot; // single volatile read
+        if (snapshot.isEmpty()) return;
 
-        for (Map.Entry<BlockPos, TunnelType> entry : locations.entrySet()) {
-            BlockPos pos  = entry.getKey();
-            SettingColor base = getColor(entry.getValue());
+        boolean doFade   = fadeWithDistance.get();
+        // FIX #4 — compare squared distances; no sqrt needed.
+        double maxDistSq = (double)(range.get() * 16) * (range.get() * 16);
+
+        BlockPos playerPos = mc.player.getBlockPos();
+        int px = playerPos.getX(), py = playerPos.getY(), pz = playerPos.getZ();
+
+        // FIX #4 — one reusable color object; mutated per entry, never heap-allocated in the loop.
+        SettingColor reusable = new SettingColor(0, 0, 0, 0);
+
+        for (RenderEntry entry : snapshot) {
+            SettingColor base = getColor(entry.type);
             if (base == null) continue;
 
-            SettingColor c = base;
+            SettingColor c;
             if (doFade) {
-                double dist = Math.sqrt(mc.player.getBlockPos().getSquaredDistance(pos));
-                float  frac = (float) Math.max(0, 1.0 - dist / maxDist);
+                long dx = entry.x - px, dy = entry.y - py, dz = entry.z - pz;
+                double distSq = dx * dx + dy * dy + dz * dz;
+                float  frac   = (float) Math.max(0.0, 1.0 - distSq / maxDistSq);
                 int fadedAlpha = Math.max(8, (int)(base.a * frac));
-                c = new SettingColor(base.r, base.g, base.b, fadedAlpha);
+                // Mutate the reusable color rather than allocating a new one.
+                reusable.r = base.r;
+                reusable.g = base.g;
+                reusable.b = base.b;
+                reusable.a = fadedAlpha;
+                c = reusable;
+            } else {
+                c = base;
             }
 
-            event.renderer.box(pos, c, c, shapeMode.get(), 0);
+            event.renderer.box(entry.x, entry.y, entry.z,
+                entry.x + 1, entry.y + 1, entry.z + 1,
+                c, c, shapeMode.get(), 0);
         }
     }
 
@@ -774,6 +851,19 @@ public class Tunnelers extends Module {
         ScanResult(ChunkPos chunkPos, Map<BlockPos, TunnelType> results) {
             this.chunkPos = chunkPos;
             this.results  = results;
+        }
+    }
+
+    /**
+     * FIX #1 — lightweight render entry that stores coordinates as primitive ints.
+     * Avoids repeated BlockPos field unpacking in the hot render loop and keeps
+     * the render list tightly packed for cache-friendly iteration.
+     */
+    private static final class RenderEntry {
+        final int x, y, z;
+        final TunnelType type;
+        RenderEntry(int x, int y, int z, TunnelType type) {
+            this.x = x; this.y = y; this.z = z; this.type = type;
         }
     }
 }
