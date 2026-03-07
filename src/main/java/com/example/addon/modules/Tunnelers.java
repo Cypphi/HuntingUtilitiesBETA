@@ -209,6 +209,9 @@ public class Tunnelers extends Module {
 
     private int tickTimer;
 
+    private static final int MAX_SNAPSHOTS_PER_PASS = 20;
+    private static final int MAX_MERGE_PER_TICK = 4000;
+
     // ------------------------------------------------------------------ //
     //  Lifecycle                                                           //
     // ------------------------------------------------------------------ //
@@ -289,7 +292,8 @@ public class Tunnelers extends Module {
      */
     private void flushPendingResults() {
         ScanResult batch;
-        while ((batch = pendingResults.poll()) != null) {
+        int processed = 0;
+        while (processed < MAX_MERGE_PER_TICK && (batch = pendingResults.poll()) != null) {
             // Mark scanned only once results are safely on the main thread.
             scannedChunks.add(batch.chunkPos);
 
@@ -299,6 +303,7 @@ public class Tunnelers extends Module {
             for (Map.Entry<BlockPos, TunnelType> e : batch.results.entrySet()) {
                 locations.put(e.getKey(), e.getValue());
                 index.add(e.getKey());
+                processed++;
             }
         }
     }
@@ -322,6 +327,7 @@ public class Tunnelers extends Module {
         int r   = range.get();
         int rSq = r * r;
 
+        int submitted = 0;
         for (int dx = -r; dx <= r; dx++) {
             for (int dz = -r; dz <= r; dz++) {
                 if (dx * dx + dz * dz > rSq) continue;
@@ -330,6 +336,8 @@ public class Tunnelers extends Module {
                 if (scannedChunks.contains(cp) || inFlight.contains(cp)) continue;
                 if (!mc.world.getChunkManager().isChunkLoaded(cx, cz)) continue;
                 submitScan(cp, snapshotChunk(mc.world.getChunk(cx, cz)));
+                submitted++;
+                if (submitted >= MAX_SNAPSHOTS_PER_PASS) return;
             }
         }
     }
