@@ -22,6 +22,7 @@ public class Tunnelers extends Module {
 
     public enum TunnelType {
         TUNNEL_1x1,
+        TUNNEL_1x2,
         TUNNEL_2x2,
         HOLE,
         ABNORMAL_TUNNEL,
@@ -34,6 +35,7 @@ public class Tunnelers extends Module {
 
     private final SettingGroup sgGeneral    = settings.getDefaultGroup();
     private final SettingGroup sg1x1        = settings.createGroup("1x1 Tunnels");
+    private final SettingGroup sg1x2        = settings.createGroup("1x2 Tunnels");
     private final SettingGroup sg2x2        = settings.createGroup("2x2 Tunnels");
     private final SettingGroup sgHoles      = settings.createGroup("Holes");
     private final SettingGroup sgAbnormal   = settings.createGroup("Abnormal Tunnels");
@@ -69,6 +71,21 @@ public class Tunnelers extends Module {
         .name("color-1x1")
         .defaultValue(new SettingColor(255, 255, 0, 75))
         .visible(find1x1::get)
+        .build());
+
+    // ------------------------------------------------------------------ //
+    //  1x2 Tunnels                                                         //
+    // ------------------------------------------------------------------ //
+
+    private final Setting<Boolean> find1x2 = sg1x2.add(new BoolSetting.Builder()
+        .name("find-1x2-tunnels")
+        .defaultValue(true)
+        .build());
+
+    private final Setting<SettingColor> color1x2 = sg1x2.add(new ColorSetting.Builder()
+        .name("color-1x2")
+        .defaultValue(new SettingColor(255, 200, 0, 75))
+        .visible(find1x2::get)
         .build());
 
     // ------------------------------------------------------------------ //
@@ -342,7 +359,7 @@ public class Tunnelers extends Module {
         inFlight.add(cp);
 
         ScanConfig config = new ScanConfig(
-            find1x1.get(), find2x2.get(), findHoles.get(), findAbnormalTunnels.get(), findLadderShafts.get(),
+            find1x1.get(), find1x2.get(), find2x2.get(), findHoles.get(), findAbnormalTunnels.get(), findLadderShafts.get(),
             minHoleHeight.get(), minLadderHeight.get(),
             mc.world.getBottomY(), mc.world.getBottomY() + mc.world.getHeight()
         );
@@ -414,7 +431,12 @@ public class Tunnelers extends Module {
         // ---- 1x1 TUNNEL --------------------------------------------------
         if (config.do1x1 && is1x1Tunnel(wx, wy, wz, ctx)) {
             results.put(new BlockPos(wx, wy + 1, wz), TunnelType.TUNNEL_1x1);
-            results.put(new BlockPos(wx, wy + 2, wz), TunnelType.TUNNEL_1x1);
+        }
+
+        // ---- 1x2 TUNNEL --------------------------------------------------
+        if (config.do1x2 && is1x2Tunnel(wx, wy, wz, ctx)) {
+            results.put(new BlockPos(wx, wy + 1, wz), TunnelType.TUNNEL_1x2);
+            results.put(new BlockPos(wx, wy + 2, wz), TunnelType.TUNNEL_1x2);
         }
 
         // ---- ABNORMAL (3x3 / 4x4 / 5x5) ---------------------------------
@@ -471,11 +493,28 @@ public class Tunnelers extends Module {
     }
 
     /**
-     * 1x1 tunnel: solid floor at y, 2-block air column (y+1, y+2),
+     * 1x1 tunnel: solid floor at y, 1-block air column (y+1),
+     * solid ceiling at y+2, and all 8 surrounding blocks solid at
+     * air level (cardinal + diagonal).
+     */
+    private boolean is1x1Tunnel(int x, int y, int z, ScanContext ctx) {
+        if (!ctx.isSolid(x, y,     z)) return false;
+        if (!ctx.isAir  (x, y + 1, z)) return false;
+        if (!ctx.isSolid(x, y + 2, z)) return false;
+        for (int dx = -1; dx <= 1; dx++)
+            for (int dz = -1; dz <= 1; dz++) {
+                if (dx == 0 && dz == 0) continue;
+                if (!ctx.isSolid(x + dx, y + 1, z + dz)) return false;
+            }
+        return true;
+    }
+
+    /**
+     * 1x2 tunnel: solid floor at y, 2-block air column (y+1, y+2),
      * solid ceiling at y+3, and all 8 surrounding blocks solid at both
      * air levels (cardinal + diagonal).
      */
-    private boolean is1x1Tunnel(int x, int y, int z, ScanContext ctx) {
+    private boolean is1x2Tunnel(int x, int y, int z, ScanContext ctx) {
         if (!ctx.isSolid(x, y,     z)) return false;
         if (!ctx.isAir  (x, y + 1, z)) return false;
         if (!ctx.isAir  (x, y + 2, z)) return false;
@@ -676,6 +715,7 @@ public class Tunnelers extends Module {
         if (type == null) return null;
         return switch (type) {
             case TUNNEL_1x1      -> find1x1.get()             ? color1x1.get()             : null;
+            case TUNNEL_1x2      -> find1x2.get()             ? color1x2.get()             : null;
             case TUNNEL_2x2      -> find2x2.get()             ? color2x2.get()             : null;
             case HOLE            -> findHoles.get()            ? colorHoles.get()           : null;
             case ABNORMAL_TUNNEL -> findAbnormalTunnels.get()  ? colorAbnormalTunnels.get() : null;
@@ -688,7 +728,7 @@ public class Tunnelers extends Module {
     // ------------------------------------------------------------------ //
 
     private record ScanConfig(
-        boolean do1x1, boolean do2x2, boolean doHoles, boolean doAbnormal, boolean doLadder,
+        boolean do1x1, boolean do1x2, boolean do2x2, boolean doHoles, boolean doAbnormal, boolean doLadder,
         int holeDepth, int ladderMin,
         int minY, int maxY
     ) {}
