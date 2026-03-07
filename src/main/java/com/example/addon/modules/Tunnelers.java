@@ -416,8 +416,8 @@ public class Tunnelers extends Module {
     ) {
         // ---- HOLE --------------------------------------------------------
         if (config.doHoles && isHole(wx, wy, wz, ctx, config.holeDepth)) {
-            // Highlight the air column inside the shaft (below the rim).
-            for (int i = 1; i <= config.holeDepth; i++)
+            // Highlight the air column inside the shaft.
+            for (int i = 0; i < config.holeDepth; i++)
                 results.put(new BlockPos(wx, wy - i, wz), TunnelType.HOLE);
             return;
         }
@@ -466,13 +466,12 @@ public class Tunnelers extends Module {
     // ------------------------------------------------------------------ //
 
     /**
-     * Hole: solid rim at y with a fully enclosed 8-neighbour ring,
-     * open air above (y+1), and a narrow air shaft going DOWN at least
-     * {@code depth} blocks with solid walls maintained all the way.
+     * Hole: air block at y with a fully enclosed 8-neighbour solid ring,
+     * and a narrow air shaft going DOWN at least {@code depth} blocks
+     * with solid walls maintained all the way.
      */
     private boolean isHole(int x, int y, int z, ScanContext ctx, int depth) {
-        if (!ctx.isSolid(x, y, z))   return false;
-        if (!ctx.isAir(x, y + 1, z)) return false;
+        if (!ctx.isAir(x, y, z)) return false;
 
         // Full 8-neighbour solid ring at rim level.
         for (int dx = -1; dx <= 1; dx++)
@@ -481,7 +480,7 @@ public class Tunnelers extends Module {
                     if (!ctx.isSolid(x + dx, y, z + dz)) return false;
 
         // Air shaft downward with solid cardinal walls at every level.
-        for (int i = 1; i <= depth; i++) {
+        for (int i = 1; i < depth; i++) {
             int sy = y - i;
             if (!ctx.isAir(x, sy, z))      return false;
             if (!ctx.isSolid(x - 1, sy, z)) return false;
