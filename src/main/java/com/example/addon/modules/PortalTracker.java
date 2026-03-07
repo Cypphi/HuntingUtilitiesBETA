@@ -44,6 +44,7 @@ import net.minecraft.util.math.BlockPos;
 import net.minecraft.util.math.Box;
 import net.minecraft.util.math.ChunkPos;
 import net.minecraft.util.math.Direction;
+import net.minecraft.util.math.Vec3d;
 import net.minecraft.world.chunk.ChunkSection;
 import net.minecraft.world.chunk.ChunkStatus;
 import net.minecraft.world.chunk.WorldChunk;
@@ -143,6 +144,13 @@ public class PortalTracker extends Module {
         .name("dynamic-colors")
         .description("Animate portal colors. Each type uses a distinct hue offset so types stay visually distinguishable.")
         .defaultValue(false)
+        .build()
+    );
+
+    private final Setting<Boolean> highlightFrame = sgGeneral.add(new BoolSetting.Builder()
+        .name("highlight-frame")
+        .description("Highlights the obsidian frame of Nether portals.")
+        .defaultValue(true)
         .build()
     );
 
@@ -703,10 +711,27 @@ public class PortalTracker extends Module {
             Color color = getColor(structure.type);
             if (color == null) continue;
 
-            event.renderer.box(structure.boundingBox, color, color, shapeMode.get(), 0);
+            Box renderBox = structure.boundingBox;
+            if (highlightFrame.get() && structure.type == PortalType.NETHER) {
+                double xLen = renderBox.maxX - renderBox.minX;
+                double zLen = renderBox.maxZ - renderBox.minZ;
+                if (xLen > zLen) {
+                    renderBox = new Box(
+                        renderBox.minX - 1, renderBox.minY - 1, renderBox.minZ,
+                        renderBox.maxX + 1, renderBox.maxY + 1, renderBox.maxZ
+                    );
+                } else {
+                    renderBox = new Box(
+                        renderBox.minX, renderBox.minY - 1, renderBox.minZ - 1,
+                        renderBox.maxX, renderBox.maxY + 1, renderBox.maxZ + 1
+                    );
+                }
+            }
+
+            event.renderer.box(renderBox, color, color, shapeMode.get(), 0);
             if (showBeam.get()) {
                 if (!onlyNearestBeam.get() || structure == nearest) {
-                    renderBeam(event, structure.boundingBox, color);
+                    renderBeam(event, renderBox, color);
                 }
             }
         }
@@ -914,8 +939,10 @@ public class PortalTracker extends Module {
         for (Direction side : Direction.values()) {
             BlockPos neighbor = pos.offset(side);
             if (!mc.world.getBlockState(neighbor).isReplaceable()) {
-                Rotations.rotate(Rotations.getYaw(neighbor), Rotations.getPitch(neighbor), () -> {
-                    mc.interactionManager.interactBlock(mc.player, Hand.MAIN_HAND, new BlockHitResult(net.minecraft.util.math.Vec3d.ofCenter(neighbor), side.getOpposite(), neighbor, false));
+                Direction placeFace = side.getOpposite();
+                Vec3d hitPos = Vec3d.ofCenter(neighbor).add(Vec3d.of(placeFace.getVector()).multiply(0.5));
+                Rotations.rotate(Rotations.getYaw(hitPos), Rotations.getPitch(hitPos), () -> {
+                    mc.interactionManager.interactBlock(mc.player, Hand.MAIN_HAND, new BlockHitResult(hitPos, placeFace, neighbor, false));
                     mc.player.swingHand(Hand.MAIN_HAND);
                 });
                 return true;

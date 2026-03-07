@@ -519,12 +519,21 @@ public class Tunnelers extends Module {
         if (!ctx.isAir  (x, y + 1, z)) return false;
         if (!ctx.isAir  (x, y + 2, z)) return false;
         if (!ctx.isSolid(x, y + 3, z)) return false;
-        for (int dy = 1; dy <= 2; dy++)
-            for (int dx = -1; dx <= 1; dx++)
-                for (int dz = -1; dz <= 1; dz++) {
-                    if (dx == 0 && dz == 0) continue;
-                    if (!ctx.isSolid(x + dx, y + dy, z + dz)) return false;
-                }
+
+        boolean isZTunnel = true;
+        for (int dy = 1; dy <= 2; dy++) {
+            if (!ctx.isSolid(x - 1, y + dy, z) || !ctx.isSolid(x + 1, y + dy, z)) {
+                isZTunnel = false;
+                break;
+            }
+        }
+        if (isZTunnel) return true;
+
+        for (int dy = 1; dy <= 2; dy++) {
+            if (!ctx.isSolid(x, y + dy, z - 1) || !ctx.isSolid(x, y + dy, z + 1)) {
+                return false;
+            }
+        }
         return true;
     }
 
