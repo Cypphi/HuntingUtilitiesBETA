@@ -730,6 +730,13 @@ public class Inventory101 extends Module {
             }
         }
 
+        ItemStack chestStack = mc.player.getEquippedStack(EquipmentSlot.CHEST);
+        if (!chestStack.isEmpty()) {
+            if (!isLowDurability(chestStack)) {
+                currentCounts.put(chestStack.getItem(), currentCounts.getOrDefault(chestStack.getItem(), 0) + chestStack.getCount());
+            }
+        }
+
         int goodElytraCount    = currentCounts.getOrDefault(Items.ELYTRA, 0);
         int desiredElytraCount = desiredCounts.getOrDefault(Items.ELYTRA, 0);
 
@@ -749,21 +756,30 @@ public class Inventory101 extends Module {
 
         // 4. Swap low-durability elytra
         if (hasLowDuraElytra) {
-            int replacementSlot = findGoodElytraInShulker(handler);
-            if (replacementSlot != -1) {
-                mc.interactionManager.clickSlot(handler.syncId, replacementSlot, 0, SlotActionType.QUICK_MOVE, mc.player);
-                return true;
+            boolean hasSpace = false;
+            for (int j = 0; j < 36; j++) {
+                if (mc.player.getInventory().getStack(j).isEmpty()) {
+                    hasSpace = true;
+                    break;
+                }
             }
-            if (goodElytraCount >= desiredElytraCount) {
-                for (int j = 0; j < 36; j++) {
-                    if (isLowDurability(mc.player.getInventory().getStack(j))) {
-                        int playerSlotId = mapInventoryToSlotId(j);
-                        if (playerSlotId != -1 && findEmptyShulkerSlot(handler) != -1) {
-                            mc.interactionManager.clickSlot(handler.syncId, playerSlotId, 0, SlotActionType.QUICK_MOVE, mc.player);
-                            return true;
-                        }
-                        break;
+
+            if (goodElytraCount < desiredElytraCount && hasSpace) {
+                int replacementSlot = findGoodElytraInShulker(handler);
+                if (replacementSlot != -1) {
+                    mc.interactionManager.clickSlot(handler.syncId, replacementSlot, 0, SlotActionType.QUICK_MOVE, mc.player);
+                    return true;
+                }
+            }
+
+            for (int j = 0; j < 36; j++) {
+                if (isLowDurability(mc.player.getInventory().getStack(j))) {
+                    int playerSlotId = mapInventoryToSlotId(j);
+                    if (playerSlotId != -1 && findEmptyShulkerSlot(handler) != -1) {
+                        mc.interactionManager.clickSlot(handler.syncId, playerSlotId, 0, SlotActionType.QUICK_MOVE, mc.player);
+                        return true;
                     }
+                    break;
                 }
             }
         }
