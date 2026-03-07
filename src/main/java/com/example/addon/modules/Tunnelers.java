@@ -184,35 +184,39 @@ public class Tunnelers extends Module {
     //  State                                                               //
     // ------------------------------------------------------------------ //
 
-    /**
-     * Primary results map iterated by the render thread.
-     * Only written on the main thread during flushPendingResults().
-     */
-    private final ConcurrentHashMap<BlockPos, TunnelType> locations = new ConcurrentHashMap<>();
-
-    /**
-     * Reverse index: ChunkPos → set of BlockPos entries in that chunk.
-     * Makes evictChunk() O(n-in-chunk) instead of O(total-results).
-     */
+    private final ConcurrentHashMap<BlockPos, TunnelType> locations  = new ConcurrentHashMap<>();
     private final ConcurrentHashMap<ChunkPos, Set<BlockPos>> chunkIndex = new ConcurrentHashMap<>();
+    private final ConcurrentLinkedQueue<ScanResult> pendingResults   = new ConcurrentLinkedQueue<>();
 
-    /** Batched scan results waiting to be merged on the main thread. */
-    private final ConcurrentLinkedQueue<ScanResult> pendingResults = new ConcurrentLinkedQueue<>();
-
-    /** Chunks whose data is already in {@code locations}. Main thread only. */
+    /** Chunks whose results are already live in {@code locations}. Main-thread only. */
     private final Set<ChunkPos> scannedChunks = new HashSet<>();
 
-    /** Chunks currently being scanned on the background thread. */
+    /**
+     * Chunks queued for snapshotting. LinkedHashSet gives O(1) contains()
+     * AND preserves insertion order so we drain in spiral order.
+     * Main-thread only.
+     */
+    private final LinkedHashSet<ChunkPos> snapshotQueue = new LinkedHashSet<>();
+
+    /** Chunks currently being scanned (snapshot + classify) on the background thread. */
     private final Set<ChunkPos> inFlight = ConcurrentHashMap.newKeySet();
 
-    /** Background executor — one daemon thread at minimum priority. */
     private ExecutorService executor;
 
-    private String lastDimension = "";
-    private int dimensionChangeCooldown = 0;
+    private String lastDimension        = "";
+    private int    dimensionChangeCooldown = 0;
+    private int    pruneTimer           = 0;
 
-    private static final int MAX_SNAPSHOTS_PER_PASS = 3;
-    private static final int MAX_MERGE_PER_TICK = 500;
+    // How many chunks we *queue* per tick (cheap – just adds to a set).
+    private static final int MAX_QUEUE_PER_TICK   = 32;
+    // How many pending results we merge into the live map per tick.
+    private static final int MAX_MERGE_PER_TICK   = 200;
+    // Max concurrent background scan jobs.
+    private static final int MAX_IN_FLIGHT        = 6;
+    // How many jobs we drain from the queue each tick.
+    private static final int DRAIN_PER_TICK       = 4;
+    // Time budget for the queue-building loop (does NOT include snapshot work).
+    private static final long TIME_BUDGET_NS      = 500_000L; // 0.5 ms
 
     // ------------------------------------------------------------------ //
     //  Lifecycle                                                           //
@@ -228,10 +232,12 @@ public class Tunnelers extends Module {
         chunkIndex.clear();
         pendingResults.clear();
         scannedChunks.clear();
+        snapshotQueue.clear();
         inFlight.clear();
+        pruneTimer = 0;
         dimensionChangeCooldown = 0;
         if (mc.world != null) lastDimension = mc.world.getRegistryKey().getValue().toString();
-        executor = Executors.newSingleThreadExecutor(r -> {
+        executor = Executors.newFixedThreadPool(3, r -> {
             Thread t = new Thread(r, "Tunnelers-Scanner");
             t.setDaemon(true);
             t.setPriority(Thread.MIN_PRIORITY);
@@ -246,6 +252,7 @@ public class Tunnelers extends Module {
         chunkIndex.clear();
         pendingResults.clear();
         scannedChunks.clear();
+        snapshotQueue.clear();
         inFlight.clear();
     }
 
@@ -270,31 +277,155 @@ public class Tunnelers extends Module {
             chunkIndex.clear();
             scannedChunks.clear();
             inFlight.clear();
+            snapshotQueue.clear();
             return;
         }
 
-        // Flush background results onto the main map — cheap.
+        // 1. Merge a bounded slice of completed results — O(MAX_MERGE_PER_TICK).
         flushPendingResults();
 
-        BlockPos playerPos = mc.player.getBlockPos();
-        scanNewChunks(playerPos.getX() >> 4, playerPos.getZ() >> 4);
+        // 2. Periodically prune out-of-range chunks — amortised, not every tick.
+        pruneTimer++;
+        if (pruneTimer >= scanDelay.get()) {
+            pruneTimer = 0;
+            pruneOutOfRange();
+        }
+
+        // 3. Discover new chunks to scan and add them to snapshotQueue.
+        int playerCX = mc.player.getBlockPos().getX() >> 4;
+        int playerCZ = mc.player.getBlockPos().getZ() >> 4;
+        enqueueNewChunks(playerCX, playerCZ);
+
+        // 4. Hand one pending snapshot job to the background thread per tick.
+        //    The expensive copy now happens off the main thread.
+        drainSnapshotQueue();
     }
 
+    // ------------------------------------------------------------------ //
+    //  Pruning                                                             //
+    // ------------------------------------------------------------------ //
+
     /**
-     * Merges all completed scan batches into {@code locations}.
-     * Also updates the reverse chunk index and fires proximity notifications.
-     * Runs on the main thread — scannedChunks.add() is safe here.
+     * Removes scanned chunks that have drifted out of range.
+     * Called once every {@code scanDelay} ticks, not every tick.
      */
+    private void pruneOutOfRange() {
+        if (mc.player == null) return;
+        int centerCX = mc.player.getBlockPos().getX() >> 4;
+        int centerCZ = mc.player.getBlockPos().getZ() >> 4;
+        int r        = range.get();
+        int rSq      = r * r;
+
+        Iterator<ChunkPos> it = scannedChunks.iterator();
+        while (it.hasNext()) {
+            ChunkPos cp = it.next();
+            int dx = cp.x - centerCX, dz = cp.z - centerCZ;
+            if (dx * dx + dz * dz > rSq) {
+                evictChunk(cp);
+                it.remove();
+            }
+        }
+    }
+
+    // ------------------------------------------------------------------ //
+    //  Queue building (main thread, cheap)                                 //
+    // ------------------------------------------------------------------ //
+
+    /**
+     * Walks the spiral and pushes chunk positions that need scanning onto
+     * {@code snapshotQueue}. No chunk data is touched here — just coords.
+     */
+    private void enqueueNewChunks(int centerCX, int centerCZ) {
+        int r     = range.get();
+        int rSq   = r * r;
+        int added = 0;
+        long t0   = System.nanoTime();
+
+        outer:
+        for (int d = 0; d <= r; d++) {
+            for (int x = -d; x <= d; x++) {
+                if (tryEnqueue(centerCX + x, centerCZ - d, rSq, centerCX, centerCZ)) added++;
+                if (added >= MAX_QUEUE_PER_TICK || System.nanoTime() - t0 > TIME_BUDGET_NS) break outer;
+                if (d != 0) {
+                    if (tryEnqueue(centerCX + x, centerCZ + d, rSq, centerCX, centerCZ)) added++;
+                    if (added >= MAX_QUEUE_PER_TICK || System.nanoTime() - t0 > TIME_BUDGET_NS) break outer;
+                }
+            }
+            for (int z = -d + 1; z < d; z++) {
+                if (tryEnqueue(centerCX - d, centerCZ + z, rSq, centerCX, centerCZ)) added++;
+                if (added >= MAX_QUEUE_PER_TICK || System.nanoTime() - t0 > TIME_BUDGET_NS) break outer;
+                if (d != 0) {
+                    if (tryEnqueue(centerCX + d, centerCZ + z, rSq, centerCX, centerCZ)) added++;
+                    if (added >= MAX_QUEUE_PER_TICK || System.nanoTime() - t0 > TIME_BUDGET_NS) break outer;
+                }
+            }
+        }
+    }
+
+    private boolean tryEnqueue(int cx, int cz, int rSq, int centerCX, int centerCZ) {
+        int dx = cx - centerCX, dz = cz - centerCZ;
+        if (dx * dx + dz * dz > rSq) return false;
+        ChunkPos cp = new ChunkPos(cx, cz);
+        if (scannedChunks.contains(cp) || inFlight.contains(cp)) return false;
+        if (!mc.world.getChunkManager().isChunkLoaded(cx, cz)) return false;
+        return snapshotQueue.add(cp); // no-op if already queued (O(1))
+    }
+
+    // ------------------------------------------------------------------ //
+    //  Snapshot + scan — all moved to the background thread               //
+    // ------------------------------------------------------------------ //
+
+    /**
+     * Drains up to DRAIN_PER_TICK jobs from the queue each tick,
+     * respecting the MAX_IN_FLIGHT concurrency cap.
+     */
+    private void drainSnapshotQueue() {
+        for (int i = 0; i < DRAIN_PER_TICK; i++) {
+            if (inFlight.size() >= MAX_IN_FLIGHT) break;
+            if (snapshotQueue.isEmpty()) break;
+
+            Iterator<ChunkPos> it = snapshotQueue.iterator();
+            ChunkPos cp = it.next();
+            it.remove();
+
+            if (!mc.world.getChunkManager().isChunkLoaded(cp.x, cp.z)) continue;
+
+            WorldChunk chunk = mc.world.getChunk(cp.x, cp.z);
+            if (chunk == null) continue;
+
+            inFlight.add(cp);
+
+            ScanConfig config = new ScanConfig(
+                find1x1.get(), find1x2.get(), find2x2.get(),
+                findHoles.get(), findAbnormalTunnels.get(), findLadderShafts.get(),
+                minHoleHeight.get(), minLadderHeight.get(),
+                mc.world.getBottomY(), mc.world.getBottomY() + mc.world.getHeight()
+            );
+            int bottomCoord = config.minY >> 4;
+
+            executor.submit(() -> {
+                try {
+                    BlockState[][] snapshot = snapshotChunk(chunk);
+                    Map<BlockPos, TunnelType> results = scanSnapshot(cp, snapshot, bottomCoord, config);
+                    pendingResults.add(new ScanResult(cp, results));
+                } finally {
+                    inFlight.remove(cp);
+                }
+            });
+        }
+    }
+
+    // ------------------------------------------------------------------ //
+    //  Flush                                                               //
+    // ------------------------------------------------------------------ //
+
     private void flushPendingResults() {
         ScanResult batch;
         int processed = 0;
         while (processed < MAX_MERGE_PER_TICK && (batch = pendingResults.poll()) != null) {
-            // Mark scanned only once results are safely on the main thread.
             scannedChunks.add(batch.chunkPos);
-
             Set<BlockPos> index = chunkIndex.computeIfAbsent(
                 batch.chunkPos, k -> ConcurrentHashMap.newKeySet());
-
             for (Map.Entry<BlockPos, TunnelType> e : batch.results.entrySet()) {
                 locations.put(e.getKey(), e.getValue());
                 index.add(e.getKey());
@@ -303,62 +434,8 @@ public class Tunnelers extends Module {
         }
     }
 
-    private void scanNewChunks(int centerChunkX, int centerChunkZ) {
-        int r   = range.get();
-        int rSq = r * r;
-
-        scannedChunks.removeIf(cp -> {
-            int dx = cp.x - centerChunkX;
-            int dz = cp.z - centerChunkZ;
-            if (dx * dx + dz * dz > rSq) {
-                evictChunk(cp);
-                return true;
-            }
-            return false;
-        });
-
-        int chunksScanned = 0;
-        int limit = MAX_SNAPSHOTS_PER_PASS;
-
-        outer:
-        for (int d = 0; d <= r; d++) {
-            int minX = -d, maxX = d, minZ = -d, maxZ = d;
-            for (int x = minX; x <= maxX; x++) {
-                if (processChunk(centerChunkX + x, centerChunkZ + minZ, rSq, centerChunkX, centerChunkZ)) chunksScanned++;
-                if (chunksScanned >= limit) break outer;
-                if (minZ != maxZ) {
-                    if (processChunk(centerChunkX + x, centerChunkZ + maxZ, rSq, centerChunkX, centerChunkZ)) chunksScanned++;
-                    if (chunksScanned >= limit) break outer;
-                }
-            }
-            for (int z = minZ + 1; z < maxZ; z++) {
-                if (processChunk(centerChunkX + minX, centerChunkZ + z, rSq, centerChunkX, centerChunkZ)) chunksScanned++;
-                if (chunksScanned >= limit) break outer;
-                if (minX != maxX) {
-                    if (processChunk(centerChunkX + maxX, centerChunkZ + z, rSq, centerChunkX, centerChunkZ)) chunksScanned++;
-                    if (chunksScanned >= limit) break outer;
-                }
-            }
-        }
-    }
-
-    private boolean processChunk(int cx, int cz, int rSq, int centerChunkX, int centerChunkZ) {
-        int dx = cx - centerChunkX;
-        int dz = cz - centerChunkZ;
-        if (dx * dx + dz * dz > rSq) return false;
-
-        ChunkPos cp = new ChunkPos(cx, cz);
-        if (scannedChunks.contains(cp) || inFlight.contains(cp)) return false;
-
-        if (mc.world.getChunkManager().isChunkLoaded(cx, cz)) {
-            submitScan(cp, snapshotChunk(mc.world.getChunk(cx, cz)));
-            return true;
-        }
-        return false;
-    }
-
     // ------------------------------------------------------------------ //
-    //  Snapshot + async scan                                               //
+    //  Snapshot                                                            //
     // ------------------------------------------------------------------ //
 
     private BlockState[][] snapshotChunk(WorldChunk chunk) {
@@ -375,27 +452,6 @@ public class Tunnelers extends Module {
             snapshot[si] = data;
         }
         return snapshot;
-    }
-
-    private void submitScan(ChunkPos cp, BlockState[][] snapshot) {
-        if (inFlight.contains(cp)) return;
-        inFlight.add(cp);
-
-        ScanConfig config = new ScanConfig(
-            find1x1.get(), find1x2.get(), find2x2.get(), findHoles.get(), findAbnormalTunnels.get(), findLadderShafts.get(),
-            minHoleHeight.get(), minLadderHeight.get(),
-            mc.world.getBottomY(), mc.world.getBottomY() + mc.world.getHeight()
-        );
-        int bottomCoord = config.minY >> 4;
-
-        executor.submit(() -> {
-            try {
-                Map<BlockPos, TunnelType> results = scanSnapshot(cp, snapshot, bottomCoord, config);
-                pendingResults.add(new ScanResult(cp, results));
-            } finally {
-                inFlight.remove(cp);
-            }
-        });
     }
 
     // ------------------------------------------------------------------ //
@@ -437,32 +493,26 @@ public class Tunnelers extends Module {
             ScanConfig config,
             Map<BlockPos, TunnelType> results
     ) {
-        // ---- HOLE --------------------------------------------------------
         if (config.doHoles && isHole(wx, wy, wz, ctx, config.holeDepth)) {
-            // Highlight the air column inside the shaft.
             for (int i = 0; i < config.holeDepth; i++)
                 results.put(new BlockPos(wx, wy - i, wz), TunnelType.HOLE);
             return;
         }
 
-        // ---- LADDER SHAFT ------------------------------------------------
         if (config.doLadder && isLadderShaft(wx, wy, wz, ctx, config.ladderMin)) {
             for (int i = 0; i < config.ladderMin; i++)
                 results.put(new BlockPos(wx, wy + i, wz), TunnelType.LADDER_SHAFT);
         }
 
-        // ---- 1x1 TUNNEL --------------------------------------------------
         if (config.do1x1 && is1x1Tunnel(wx, wy, wz, ctx)) {
             results.put(new BlockPos(wx, wy + 1, wz), TunnelType.TUNNEL_1x1);
         }
 
-        // ---- 1x2 TUNNEL --------------------------------------------------
         if (config.do1x2 && is1x2Tunnel(wx, wy, wz, ctx)) {
             results.put(new BlockPos(wx, wy + 1, wz), TunnelType.TUNNEL_1x2);
             results.put(new BlockPos(wx, wy + 2, wz), TunnelType.TUNNEL_1x2);
         }
 
-        // ---- ABNORMAL (3x3 / 4x4 / 5x5) ---------------------------------
         if (config.doAbnormal) {
             int sz = getAbnormalTunnelSize(wx, wy, wz, ctx);
             if (sz > 0) {
@@ -474,7 +524,6 @@ public class Tunnelers extends Module {
             }
         }
 
-        // ---- 2x2 ---------------------------------------------------------
         if (config.do2x2 && is2x2Tunnel(wx, wy, wz, ctx)) {
             for (int dx = 0; dx < 2; dx++)
                 for (int dy = 1; dy <= 2; dy++)
@@ -485,27 +534,18 @@ public class Tunnelers extends Module {
     }
 
     // ------------------------------------------------------------------ //
-    //  Block tests                                                         //
+    //  Block tests (unchanged)                                             //
     // ------------------------------------------------------------------ //
 
-    /**
-     * Hole: air block at y with a fully enclosed 8-neighbour solid ring,
-     * and a narrow air shaft going DOWN at least {@code depth} blocks
-     * with solid walls maintained all the way.
-     */
     private boolean isHole(int x, int y, int z, ScanContext ctx, int depth) {
         if (!ctx.isAir(x, y, z)) return false;
-
-        // Full 8-neighbour solid ring at rim level.
         for (int dx = -1; dx <= 1; dx++)
             for (int dz = -1; dz <= 1; dz++)
                 if (dx != 0 || dz != 0)
                     if (!ctx.isSolid(x + dx, y, z + dz)) return false;
-
-        // Air shaft downward with solid cardinal walls at every level.
         for (int i = 1; i < depth; i++) {
             int sy = y - i;
-            if (!ctx.isAir(x, sy, z))      return false;
+            if (!ctx.isAir(x, sy, z))       return false;
             if (!ctx.isSolid(x - 1, sy, z)) return false;
             if (!ctx.isSolid(x + 1, sy, z)) return false;
             if (!ctx.isSolid(x, sy, z - 1)) return false;
@@ -514,11 +554,6 @@ public class Tunnelers extends Module {
         return true;
     }
 
-    /**
-     * 1x1 tunnel: solid floor at y, 1-block air column (y+1),
-     * solid ceiling at y+2, and all 8 surrounding blocks solid at
-     * air level (cardinal + diagonal).
-     */
     private boolean is1x1Tunnel(int x, int y, int z, ScanContext ctx) {
         if (!ctx.isSolid(x, y,     z)) return false;
         if (!ctx.isAir  (x, y + 1, z)) return false;
@@ -531,19 +566,12 @@ public class Tunnelers extends Module {
         return true;
     }
 
-    /**
-     * 1x2 tunnel: solid floor at y, 2-block air column (y+1, y+2),
-     * solid ceiling at y+3, and all 8 surrounding blocks solid at both
-     * air levels (cardinal + diagonal).
-     */
     private boolean is1x2Tunnel(int x, int y, int z, ScanContext ctx) {
         if (!ctx.isSolid(x, y,     z)) return false;
         if (!ctx.isAir  (x, y + 1, z)) return false;
         if (!ctx.isAir  (x, y + 2, z)) return false;
         if (!ctx.isSolid(x, y + 3, z)) return false;
-
         if (isMineshaftBlock(ctx.get(x, y, z)) || isMineshaftBlock(ctx.get(x, y + 3, z))) return false;
-
         boolean isZTunnel = true;
         for (int dy = 1; dy <= 2; dy++) {
             if (!ctx.isSolid(x - 1, y + dy, z) || !ctx.isSolid(x + 1, y + dy, z)) {
@@ -552,35 +580,23 @@ public class Tunnelers extends Module {
             }
         }
         if (isZTunnel) return true;
-
         for (int dy = 1; dy <= 2; dy++) {
-            if (!ctx.isSolid(x, y + dy, z - 1) || !ctx.isSolid(x, y + dy, z + 1)) {
-                return false;
-            }
+            if (!ctx.isSolid(x, y + dy, z - 1) || !ctx.isSolid(x, y + dy, z + 1)) return false;
         }
         return true;
     }
 
-    /**
-     * 2x2 tunnel: 2x2 solid floor at y, 2x2x2 air at y+1..y+2,
-     * solid 2x2 ceiling at y+3, solid walls on BOTH N/S AND W/E axes
-     * (fully enclosed, not just one pair).
-     */
     private boolean is2x2Tunnel(int x, int y, int z, ScanContext ctx) {
-        // Floor
         for (int fx = 0; fx < 2; fx++)
             for (int fz = 0; fz < 2; fz++)
                 if (!ctx.isSolid(x + fx, y, z + fz)) return false;
-        // Air volume
         for (int fx = 0; fx < 2; fx++)
             for (int fy = 1; fy <= 2; fy++)
                 for (int fz = 0; fz < 2; fz++)
                     if (!ctx.isAir(x + fx, y + fy, z + fz)) return false;
-        // Ceiling
         for (int fx = 0; fx < 2; fx++)
             for (int fz = 0; fz < 2; fz++)
                 if (!ctx.isSolid(x + fx, y + 3, z + fz)) return false;
-        // Both wall pairs must be solid — fully enclosed.
         for (int fx = 0; fx < 2; fx++) for (int fy = 1; fy <= 2; fy++) {
             if (!ctx.isSolid(x + fx, y + fy, z - 1)) return false;
             if (!ctx.isSolid(x + fx, y + fy, z + 2)) return false;
@@ -599,10 +615,6 @@ public class Tunnelers extends Module {
         return 0;
     }
 
-    /**
-     * NxN tunnel: solid NxN floor at y, NxN air volume y+1..y+N,
-     * solid NxN ceiling at y+N+1, solid walls on all 4 sides (fully enclosed).
-     */
     private boolean isTunnelOfSize(int x, int y, int z, ScanContext ctx, int size) {
         for (int fx = 0; fx < size; fx++)
             for (int fz = 0; fz < size; fz++)
@@ -614,7 +626,6 @@ public class Tunnelers extends Module {
         for (int fx = 0; fx < size; fx++)
             for (int fz = 0; fz < size; fz++)
                 if (!ctx.isSolid(x + fx, y + size + 1, z + fz)) return false;
-        // All 4 walls fully solid.
         for (int fx = 0; fx < size; fx++) for (int fy = 1; fy <= size; fy++) {
             if (!ctx.isSolid(x + fx, y + fy, z - 1))    return false;
             if (!ctx.isSolid(x + fx, y + fy, z + size)) return false;
@@ -632,30 +643,21 @@ public class Tunnelers extends Module {
         return block == Blocks.OAK_PLANKS || block == Blocks.DARK_OAK_PLANKS;
     }
 
-    /**
-     * Ladder shaft: air column at (x, y..y+height-1) with at least one
-     * wall face containing a ladder block at each level, and solid walls
-     * on the remaining cardinal sides. Detected from the bottom air block.
-     */
     private boolean isLadderShaft(int x, int y, int z, ScanContext ctx, int minHeight) {
-        // The bottom of the shaft must have a solid floor.
         if (!ctx.isSolid(x, y - 1, z)) return false;
-
         for (int i = 0; i < minHeight; i++) {
             int cy = y + i;
             if (!ctx.isAir(x, cy, z)) return false;
-            // At least one cardinal neighbour must be a ladder.
             boolean hasLadder =
                 ctx.isLadder(x - 1, cy, z) || ctx.isLadder(x + 1, cy, z) ||
                 ctx.isLadder(x, cy, z - 1) || ctx.isLadder(x, cy, z + 1);
             if (!hasLadder) return false;
-            // The other three walls must be solid.
             int solidWalls = 0;
             if (ctx.isSolid(x - 1, cy, z)) solidWalls++;
             if (ctx.isSolid(x + 1, cy, z)) solidWalls++;
             if (ctx.isSolid(x, cy, z - 1)) solidWalls++;
             if (ctx.isSolid(x, cy, z + 1)) solidWalls++;
-            if (solidWalls < 3) return false; // ladder occupies one wall, rest must be solid
+            if (solidWalls < 3) return false;
         }
         return true;
     }
@@ -678,7 +680,7 @@ public class Tunnelers extends Module {
             this.baseZ       = baseZ;
         }
 
-        private BlockState get(int x, int y, int z) {
+        BlockState get(int x, int y, int z) {
             if (y < minY || y >= maxY) return null;
             int lx = x - baseX, lz = z - baseZ;
             if (lx < 0 || lx >= 16 || lz < 0 || lz >= 16) return null;
@@ -709,10 +711,6 @@ public class Tunnelers extends Module {
     //  Helpers                                                             //
     // ------------------------------------------------------------------ //
 
-    /**
-     * Removes all entries for a chunk from both {@code locations} and the
-     * reverse {@code chunkIndex}. O(entries-in-chunk) thanks to the index.
-     */
     private void evictChunk(ChunkPos cp) {
         Set<BlockPos> indexed = chunkIndex.remove(cp);
         if (indexed != null) {
@@ -728,12 +726,11 @@ public class Tunnelers extends Module {
     private void onRender(Render3DEvent event) {
         if (mc.player == null) return;
 
-        boolean doFade   = fadeWithDistance.get();
-        double  maxDist  = range.get() * 16.0;
+        boolean doFade  = fadeWithDistance.get();
+        double  maxDist = range.get() * 16.0;
 
         for (Map.Entry<BlockPos, TunnelType> entry : locations.entrySet()) {
-            BlockPos pos = entry.getKey();
-
+            BlockPos pos  = entry.getKey();
             SettingColor base = getColor(entry.getValue());
             if (base == null) continue;
 
@@ -741,7 +738,6 @@ public class Tunnelers extends Module {
             if (doFade) {
                 double dist = Math.sqrt(mc.player.getBlockPos().getSquaredDistance(pos));
                 float  frac = (float) Math.max(0, 1.0 - dist / maxDist);
-                // Scale alpha only; keep RGB as configured.
                 int fadedAlpha = Math.max(8, (int)(base.a * frac));
                 c = new SettingColor(base.r, base.g, base.b, fadedAlpha);
             }
@@ -753,17 +749,17 @@ public class Tunnelers extends Module {
     private SettingColor getColor(TunnelType type) {
         if (type == null) return null;
         return switch (type) {
-            case TUNNEL_1x1      -> find1x1.get()             ? color1x1.get()             : null;
-            case TUNNEL_1x2      -> find1x2.get()             ? color1x2.get()             : null;
-            case TUNNEL_2x2      -> find2x2.get()             ? color2x2.get()             : null;
-            case HOLE            -> findHoles.get()            ? colorHoles.get()           : null;
-            case ABNORMAL_TUNNEL -> findAbnormalTunnels.get()  ? colorAbnormalTunnels.get() : null;
-            case LADDER_SHAFT    -> findLadderShafts.get()     ? colorLadderShafts.get()    : null;
+            case TUNNEL_1x1      -> find1x1.get()            ? color1x1.get()             : null;
+            case TUNNEL_1x2      -> find1x2.get()            ? color1x2.get()             : null;
+            case TUNNEL_2x2      -> find2x2.get()            ? color2x2.get()             : null;
+            case HOLE            -> findHoles.get()           ? colorHoles.get()           : null;
+            case ABNORMAL_TUNNEL -> findAbnormalTunnels.get() ? colorAbnormalTunnels.get() : null;
+            case LADDER_SHAFT    -> findLadderShafts.get()    ? colorLadderShafts.get()    : null;
         };
     }
 
     // ------------------------------------------------------------------ //
-    //  ScanResult record                                                   //
+    //  Data records                                                        //
     // ------------------------------------------------------------------ //
 
     private record ScanConfig(
