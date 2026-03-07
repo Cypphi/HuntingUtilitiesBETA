@@ -1,5 +1,6 @@
 package com.example.addon.modules;
 
+import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
@@ -15,6 +16,7 @@ import meteordevelopment.meteorclient.renderer.ShapeMode;
 import meteordevelopment.meteorclient.settings.BoolSetting;
 import meteordevelopment.meteorclient.settings.ColorSetting;
 import meteordevelopment.meteorclient.settings.EnumSetting;
+import meteordevelopment.meteorclient.settings.DoubleSetting;
 import meteordevelopment.meteorclient.settings.IntSetting;
 import meteordevelopment.meteorclient.settings.ItemListSetting;
 import meteordevelopment.meteorclient.settings.Setting;
@@ -229,6 +231,24 @@ public class LootLens extends Module {
         .sliderMin(5)
         .sliderMax(50)
         .visible(() -> showBeam.get() || (scanChestMinecarts.get() && highlightStacked.get()))
+        .build()
+    );
+
+    private final Setting<Boolean> mergeBeams = sgGeneral.add(new BoolSetting.Builder()
+        .name("merge-beams")
+        .description("Merge beams for nearby containers to reduce clutter.")
+        .defaultValue(true)
+        .visible(showBeam::get)
+        .build()
+    );
+
+    private final Setting<Double> mergeDistance = sgGeneral.add(new DoubleSetting.Builder()
+        .name("merge-distance")
+        .description("Distance to merge beams.")
+        .defaultValue(2.0)
+        .min(0)
+        .sliderMax(10)
+        .visible(() -> showBeam.get() && mergeBeams.get())
         .build()
     );
 
@@ -749,11 +769,11 @@ public class LootLens extends Module {
         ShapeMode    mode               = shapeMode.get();
         Set<BlockPos> toRemove          = new HashSet<>();
         Set<BlockPos> renderedDoubleChests = new HashSet<>();
+        List<BeamData> beamsToRender    = new ArrayList<>();
 
-        renderItemFrames(event);
-        if (containers.isEmpty()) return;
+        renderItemFrames(event, beamsToRender);
 
-        for (Map.Entry<BlockPos, StorageType> entry : containers.entrySet()) {
+        if (!containers.isEmpty()) for (Map.Entry<BlockPos, StorageType> entry : containers.entrySet()) {
             BlockPos    pos  = entry.getKey();
             StorageType type = entry.getValue();
 
@@ -789,7 +809,7 @@ public class LootLens extends Module {
             if (shulkerContainers.contains(pos)) {
                 color = shulkerFoundColor.get();
                 event.renderer.box(renderBox, color, color, ShapeMode.Both, 0);
-                if (showBeam.get()) renderBeam(event, renderBox, color);
+                if (showBeam.get()) beamsToRender.add(new BeamData(renderBox, color));
             } else {
                 boolean isStacked = type == StorageType.CHEST_MINECART
                     && highlightStacked.get()
@@ -799,10 +819,12 @@ public class LootLens extends Module {
                 if (color != null) {
                     event.renderer.box(renderBox, color, color, mode, 0);
                     // Automatically render a beam for stacked minecarts to improve visibility
-                    if (isStacked) renderBeam(event, renderBox, color);
+                    if (isStacked) beamsToRender.add(new BeamData(renderBox, color));
                 }
             }
         }
+
+        renderBeams(event, beamsToRender);
 
         if (!toRemove.isEmpty()) {
             for (BlockPos removePos : toRemove) {
@@ -813,6 +835,34 @@ public class LootLens extends Module {
                 shulkerCounts.remove(removePos);
             }
         }
+    }
+
+    private void renderBeams(Render3DEvent event, List<BeamData> beams) {
+        if (beams.isEmpty()) return;
+
+        if (mergeBeams.get()) {
+            List<BeamData> merged = new ArrayList<>();
+            double distSq = Math.pow(mergeDistance.get(), 2);
+
+            for (BeamData beam : beams) {
+                boolean skip = false;
+                double bx = (beam.box.minX + beam.box.maxX) / 2.0;
+                double bz = (beam.box.minZ + beam.box.maxZ) / 2.0;
+
+                for (BeamData m : merged) {
+                    double mx = (m.box.minX + m.box.maxX) / 2.0;
+                    double mz = (m.box.minZ + m.box.maxZ) / 2.0;
+                    if (Math.pow(bx - mx, 2) + Math.pow(bz - mz, 2) <= distSq) {
+                        skip = true;
+                        break;
+                    }
+                }
+                if (!skip) merged.add(beam);
+            }
+            beams = merged;
+        }
+
+        for (BeamData beam : beams) renderBeam(event, beam.box, beam.color);
     }
 
     private void renderBeam(Render3DEvent event, Box anchorBox, SettingColor color) {
@@ -829,34 +879,19 @@ public class LootLens extends Module {
         event.renderer.box(beamBox, color, color, ShapeMode.Both, 0);
     }
 
-    private void renderItemFrames(Render3DEvent event) {
+    private void renderItemFrames(Render3DEvent event, List<BeamData> beams) {
         SettingColor color    = itemFrameColor.get();
-        double       beamSize = beamWidth.get() / 100.0;
-        int worldBot = mc.world.getBottomY();
-        int worldTop = worldBot + mc.world.getHeight();
 
         for (ItemFrameEntity frame : itemFrameEntities.values()) {
             if (frame == null || frame.isRemoved()) continue;
             event.renderer.box(frame.getBoundingBox(), color, color, ShapeMode.Both, 0);
-            if (showBeam.get()) {
-                Vec3d pos = frame.getPos();
-                event.renderer.box(
-                    new Box(pos.x - beamSize, worldBot, pos.z - beamSize,
-                            pos.x + beamSize, worldTop, pos.z + beamSize),
-                    color, color, ShapeMode.Both, 0);
-            }
+            if (showBeam.get()) beams.add(new BeamData(frame.getBoundingBox(), color));
         }
 
         for (GlowItemFrameEntity frame : glowItemFrameEntities.values()) {
             if (frame == null || frame.isRemoved()) continue;
             event.renderer.box(frame.getBoundingBox(), color, color, ShapeMode.Both, 0);
-            if (showBeam.get()) {
-                Vec3d pos = frame.getPos();
-                event.renderer.box(
-                    new Box(pos.x - beamSize, worldBot, pos.z - beamSize,
-                            pos.x + beamSize, worldTop, pos.z + beamSize),
-                    color, color, ShapeMode.Both, 0);
-            }
+            if (showBeam.get()) beams.add(new BeamData(frame.getBoundingBox(), color));
         }
     }
 
@@ -949,4 +984,6 @@ public class LootLens extends Module {
         FURNACE, DISPENSER, DROPPER, HOPPER,
         BREWING_STAND, CRAFTER, DECORATED_POT
     }
+
+    private record BeamData(Box box, SettingColor color) {}
 }
