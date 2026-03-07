@@ -8,6 +8,7 @@ import meteordevelopment.meteorclient.settings.*;
 import meteordevelopment.meteorclient.systems.modules.Module;
 import meteordevelopment.meteorclient.utils.render.color.SettingColor;
 import meteordevelopment.orbit.EventHandler;
+import net.minecraft.block.Block;
 import net.minecraft.block.BlockState;
 import net.minecraft.block.Blocks;
 import net.minecraft.util.math.BlockPos;
@@ -209,8 +210,8 @@ public class Tunnelers extends Module {
 
     private int tickTimer;
 
-    private static final int MAX_SNAPSHOTS_PER_PASS = 20;
-    private static final int MAX_MERGE_PER_TICK = 4000;
+    private static final int MAX_SNAPSHOTS_PER_PASS = 3;
+    private static final int MAX_MERGE_PER_TICK = 500;
 
     // ------------------------------------------------------------------ //
     //  Lifecycle                                                           //
@@ -255,7 +256,7 @@ public class Tunnelers extends Module {
         ChunkPos cp = chunk.getPos();
         evictChunk(cp);           // clear stale data first
         scannedChunks.remove(cp);
-        submitScan(cp, snapshotChunk(chunk));
+        // Defer to onTick to respect rate limits
     }
 
     /** Called by TunnelersMixin when a chunk is unloaded. */
@@ -277,12 +278,13 @@ public class Tunnelers extends Module {
         // Flush background results onto the main map — cheap.
         flushPendingResults();
 
+        submitMissingChunks();
+
         // Throttled housekeeping.
         if (tickTimer > 0) { tickTimer--; return; }
         tickTimer = scanDelay.get();
 
         pruneOutOfRange();
-        submitMissingChunks();
     }
 
     /**
@@ -322,23 +324,58 @@ public class Tunnelers extends Module {
     }
 
     private void submitMissingChunks() {
+        if (mc.player == null || mc.world == null) return;
+
         int pcx = mc.player.getBlockX() >> 4;
         int pcz = mc.player.getBlockZ() >> 4;
         int r   = range.get();
         int rSq = r * r;
 
-        int submitted = 0;
+        // Player view vector for prioritization
+        float yaw = mc.player.getYaw();
+        float rad = (float) Math.toRadians(yaw);
+        float lookX = -(float) Math.sin(rad);
+        float lookZ = (float) Math.cos(rad);
+
+        List<ChunkPos> candidates = new ArrayList<>();
+
         for (int dx = -r; dx <= r; dx++) {
             for (int dz = -r; dz <= r; dz++) {
                 if (dx * dx + dz * dz > rSq) continue;
                 int cx = pcx + dx, cz = pcz + dz;
                 ChunkPos cp = new ChunkPos(cx, cz);
+                
                 if (scannedChunks.contains(cp) || inFlight.contains(cp)) continue;
                 if (!mc.world.getChunkManager().isChunkLoaded(cx, cz)) continue;
-                submitScan(cp, snapshotChunk(mc.world.getChunk(cx, cz)));
-                submitted++;
-                if (submitted >= MAX_SNAPSHOTS_PER_PASS) return;
+                
+                candidates.add(cp);
             }
+        }
+
+        if (candidates.isEmpty()) return;
+
+        // Sort candidates: closer and in-front first
+        candidates.sort(Comparator.comparingDouble(cp -> {
+            double dx = (cp.x - pcx);
+            double dz = (cp.z - pcz);
+            double dist = Math.sqrt(dx * dx + dz * dz);
+            if (dist < 0.001) return 0.0;
+
+            double dirX = dx / dist;
+            double dirZ = dz / dist;
+            double dot = dirX * lookX + dirZ * lookZ; // 1.0 = front, -1.0 = back
+            
+            // Penalty factor: 1.0 at front, 3.0 at back
+            double anglePenalty = 1.0 + (1.0 - dot); 
+            
+            return dist * anglePenalty;
+        }));
+
+        int submitted = 0;
+        for (ChunkPos cp : candidates) {
+            submitScan(cp, snapshotChunk(mc.world.getChunk(cp.x, cp.z)));
+            submitted++;
+            if (submitted >= MAX_SNAPSHOTS_PER_PASS) break;
         }
     }
 
@@ -527,6 +564,8 @@ public class Tunnelers extends Module {
         if (!ctx.isAir  (x, y + 2, z)) return false;
         if (!ctx.isSolid(x, y + 3, z)) return false;
 
+        if (isMineshaftBlock(ctx.get(x, y, z)) || isMineshaftBlock(ctx.get(x, y + 3, z))) return false;
+
         boolean isZTunnel = true;
         for (int dy = 1; dy <= 2; dy++) {
             if (!ctx.isSolid(x - 1, y + dy, z) || !ctx.isSolid(x + 1, y + dy, z)) {
@@ -607,6 +646,12 @@ public class Tunnelers extends Module {
             if (!ctx.isSolid(x + size, y + fy, z + fz)) return false;
         }
         return true;
+    }
+
+    private boolean isMineshaftBlock(BlockState state) {
+        if (state == null) return false;
+        Block block = state.getBlock();
+        return block == Blocks.OAK_PLANKS || block == Blocks.DARK_OAK_PLANKS;
     }
 
     /**
