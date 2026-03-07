@@ -197,6 +197,16 @@ public class ServerHealthcareSystem extends Module {
         }
     }
 
+    // ── Public API for other modules ──────────────────────────────────────────
+
+    public boolean isAutoTotemEnabled() {
+        return isActive() && autoTotem.get();
+    }
+
+    public void setAutoTotem(boolean enabled) {
+        autoTotem.set(enabled);
+    }
+
     /** Clears all transient session state. */
     private void resetState() {
         isEating              = false;

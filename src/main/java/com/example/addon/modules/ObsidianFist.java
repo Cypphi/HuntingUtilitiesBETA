@@ -6,7 +6,14 @@ import meteordevelopment.meteorclient.events.packets.PacketEvent;
 import meteordevelopment.meteorclient.events.render.Render3DEvent;
 import meteordevelopment.meteorclient.events.world.TickEvent;
 import meteordevelopment.meteorclient.renderer.ShapeMode;
-import meteordevelopment.meteorclient.settings.*;
+import meteordevelopment.meteorclient.settings.BoolSetting;
+import meteordevelopment.meteorclient.settings.ColorSetting;
+import meteordevelopment.meteorclient.settings.DoubleSetting;
+import meteordevelopment.meteorclient.settings.EnumSetting;
+import meteordevelopment.meteorclient.settings.IntSetting;
+import meteordevelopment.meteorclient.settings.Setting;
+import meteordevelopment.meteorclient.settings.SettingGroup;
+import meteordevelopment.meteorclient.systems.modules.Modules;
 import meteordevelopment.meteorclient.systems.modules.Module;
 import meteordevelopment.meteorclient.utils.player.FindItemResult;
 import meteordevelopment.meteorclient.utils.player.InvUtils;
@@ -20,6 +27,7 @@ import net.minecraft.network.packet.c2s.play.PlayerActionC2SPacket;
 import net.minecraft.network.packet.c2s.play.PlayerMoveC2SPacket;
 import net.minecraft.network.packet.s2c.play.BlockUpdateS2CPacket;
 import net.minecraft.network.packet.s2c.play.ChunkDeltaUpdateS2CPacket;
+import net.minecraft.util.ActionResult;
 import net.minecraft.util.Hand;
 import net.minecraft.util.hit.BlockHitResult;
 import net.minecraft.util.hit.HitResult;
@@ -30,7 +38,7 @@ import net.minecraft.util.math.Vec3d;
 import net.minecraft.world.World;
 
 /**
- * ObsidianFist — Place-break Ender Chests for XP.
+ * ObsidianFist — Rapidly places and breaks Ender Chests to Obsidian blocks.
  *
  * Speed design:
  *   Every cycle sends PLACE + START_DESTROY + STOP_DESTROY in a single tick.
@@ -57,6 +65,12 @@ public class ObsidianFist extends Module {
         .name("rotate")
         .description("Sends a rotation packet each cycle (no callback delay).")
         .defaultValue(true).build());
+
+    private final Setting<Boolean> offhandPlace = sgGeneral.add(new BoolSetting.Builder()
+        .name("offhand-place")
+        .description("Places Ender Chests from your offhand to speed up the cycle (requires e-chests in offhand).")
+        .defaultValue(true)
+        .onChanged(this::onOffhandSettingChanged).build());
 
     private final Setting<Boolean> swapBack = sgGeneral.add(new BoolSetting.Builder()
         .name("swap-back")
@@ -109,11 +123,10 @@ public class ObsidianFist extends Module {
 
     /**
      * IDLE       — waiting for the player to look at a block.
-     * FIRST_MINE — holding START_DESTROY on an existing chest; waiting for server air confirm.
      * WAIT_BREAK — place+mine sent this tick; waiting for server air confirm.
      * DELAY      — confirmed, counting down cycleDelay before next cycle.
      */
-    private enum State { IDLE, FIRST_MINE, WAIT_BREAK, DELAY }
+    private enum State { IDLE, WAIT_BREAK, DELAY }
 
     private State    state          = State.IDLE;
     private BlockPos currentPos;      // ender chest position
@@ -129,6 +142,9 @@ public class ObsidianFist extends Module {
     private volatile boolean breakConfirmed    = false;
     private volatile boolean restorationPending = false;
 
+    // Compatibility
+    private boolean shsAutoTotemWasEnabled = false;
+
     // Repair
     private boolean isRepairing = false;
     private int     repairTimer = 0;
@@ -136,14 +152,24 @@ public class ObsidianFist extends Module {
     // ── Lifecycle ─────────────────────────────────────────────────────────────
 
     public ObsidianFist() {
-        super(HuntingUtilities.CATEGORY, "obsidian-fist", "Place-break Ender Chests for XP.");
+        super(HuntingUtilities.CATEGORY, "obsidian-fist", "Rapidly places and breaks Ender Chests to clear blocks.");
     }
 
-    @Override public void onActivate()   { fullReset(); }
-    @Override public void onDeactivate() { fullReset(); }
+    @Override public void onActivate() {
+        fullReset();
+        onOffhandSettingChanged(offhandPlace.get()); // Initial check
+    }
+    @Override public void onDeactivate() {
+        if (shsAutoTotemWasEnabled) {
+            reEnableAutoTotem();
+            shsAutoTotemWasEnabled = false;
+        }
+        fullReset();
+    }
 
     private void fullReset() {
         if (swapBack.get() && prevSlot != -1) InvUtils.swap(prevSlot, false);
+        if (mc.interactionManager != null) mc.interactionManager.cancelBlockBreaking();
         state        = State.IDLE;
         currentPos   = null;
         currentDir   = null;
@@ -157,6 +183,7 @@ public class ObsidianFist extends Module {
         restorationPending = false;
         isRepairing  = false;
         repairTimer  = 0;
+        // Do not reset shsAutoTotemWasEnabled here, it's managed by onActivate/onDeactivate
     }
 
     // ── Tick ──────────────────────────────────────────────────────────────────
@@ -203,7 +230,6 @@ public class ObsidianFist extends Module {
         // ── State dispatch ────────────────────────────────────────────────────
         switch (state) {
             case IDLE       -> tickIdle();
-            case FIRST_MINE -> tickFirstMine();
             case WAIT_BREAK -> tickWaitBreak(); // timeout only — normally packet fires first
             case DELAY      -> tickCycle();     // delay elapsed, fire next cycle
         }
@@ -227,8 +253,8 @@ public class ObsidianFist extends Module {
             placeTarget = pos.offset(hit.getSide());
             placeSide   = hit.getSide().getOpposite();
             cyclesDone  = 0;
-            retries     = 0;
-            doFirstMine();
+            retries     = 0;            
+            doInitialMine();
         } else {
             // Empty surface — place then mine
             if (!findPickaxe().found() || !InvUtils.find(Items.ENDER_CHEST).found()) return;
@@ -244,34 +270,25 @@ public class ObsidianFist extends Module {
         }
     }
 
-    // ── FIRST MINE ────────────────────────────────────────────────────────────
-
     /**
-     * Sends START_DESTROY to begin mining the existing chest.
-     * Does NOT send STOP_DESTROY — we hold and wait for the server to confirm
-     * the break (requires instant-mine conditions: Eff5 pick + Haste II).
+     * Packet-mines an existing chest and enters WAIT_BREAK state.
      */
-    private void doFirstMine() {
+    private void doInitialMine() {
         FindItemResult pk = findPickaxe();
         if (!pk.found()) { fullReset(); return; }
 
         InvUtils.swap(pk.slot(), false);
         sendRotation(currentPos);
+
+        mc.interactionManager.cancelBlockBreaking();
         mc.interactionManager.attackBlock(currentPos, currentDir);
         mc.player.swingHand(Hand.MAIN_HAND);
+        mc.player.networkHandler.sendPacket(new PlayerActionC2SPacket(
+            PlayerActionC2SPacket.Action.STOP_DESTROY_BLOCK, currentPos, currentDir));
 
-        state = State.FIRST_MINE;
+        state = State.WAIT_BREAK;
         timer = breakTimeout.get(); // safety timeout
     }
-
-    private void tickFirstMine() {
-        // Timer expired without a break confirm — resend START_DESTROY
-        syncGhostBlock(currentPos);
-        retries++;
-        if (retries > 5) { error("First mine timed out."); fullReset(); return; }
-        doFirstMine();
-    }
-
     // ── CYCLE — place + mine in ONE tick ─────────────────────────────────────
 
     /**
@@ -288,42 +305,35 @@ public class ObsidianFist extends Module {
      * and drained at the TOP of the very next onTick — zero extra latency.
      */
     private void tickCycle() {
-        FindItemResult echest  = InvUtils.find(Items.ENDER_CHEST);
         FindItemResult pickaxe = findPickaxe();
-        if (!echest.found() || !pickaxe.found()) { fullReset(); return; }
+        boolean useOffhand = offhandPlace.get() && mc.player.getOffHandStack().isOf(Items.ENDER_CHEST);
 
-        // 1. Clear ghost blocks on BOTH positions — placement surface and chest pos
+        if (!pickaxe.found()) { fullReset(); return; }
+        if (!useOffhand && !InvUtils.find(Items.ENDER_CHEST).found()) { fullReset(); return; }
+
+        mc.interactionManager.cancelBlockBreaking();
+
+        // 1. Clear ghost blocks
         syncGhostBlock(currentPos);
         syncGhostBlock(placeTarget);
 
-        // 2. Place ender chest
-        InvUtils.swap(echest.slot(), false);
-        sendRotation(placeTarget);
-
-        boolean sneaking = !mc.player.isSneaking()
-            && isClickable(mc.world.getBlockState(placeTarget).getBlock());
-        if (sneaking) mc.player.networkHandler.sendPacket(
-            new ClientCommandC2SPacket(mc.player, ClientCommandC2SPacket.Mode.PRESS_SHIFT_KEY));
-
-        mc.interactionManager.interactBlock(mc.player, Hand.MAIN_HAND, new BlockHitResult(
-            new Vec3d(
-                placeTarget.getX() + 0.5 + placeSide.getOffsetX() * 0.5,
-                placeTarget.getY() + 0.5 + placeSide.getOffsetY() * 0.5,
-                placeTarget.getZ() + 0.5 + placeSide.getOffsetZ() * 0.5),
-            placeSide, placeTarget, false));
-        mc.player.swingHand(Hand.MAIN_HAND);
-
-        if (sneaking) mc.player.networkHandler.sendPacket(
-            new ClientCommandC2SPacket(mc.player, ClientCommandC2SPacket.Mode.RELEASE_SHIFT_KEY));
-
-        // 3+4. Mine immediately — same tick
-        InvUtils.swap(pickaxe.slot(), false);
-        sendRotation(currentPos);
-
-        mc.interactionManager.attackBlock(currentPos, currentDir);
-        mc.player.swingHand(Hand.MAIN_HAND);
-        mc.player.networkHandler.sendPacket(new PlayerActionC2SPacket(
-            PlayerActionC2SPacket.Action.STOP_DESTROY_BLOCK, currentPos, currentDir));
+        // 2. Place and mine
+        if (useOffhand) {
+            // Ensure pickaxe is selected, place from offhand, mine with main hand
+            if (mc.player.getInventory().selectedSlot != pickaxe.slot()) {
+                InvUtils.swap(pickaxe.slot(), false);
+            }
+            doPlace(Hand.OFF_HAND);
+            doMine(false); // don't swap, pickaxe is already in main hand
+        } else {
+            // Swap to echest, place, swap to pickaxe, mine
+            FindItemResult echest = InvUtils.find(Items.ENDER_CHEST);
+            if (!echest.found()) { fullReset(); return; }
+            InvUtils.swap(echest.slot(), false);
+            doPlace(Hand.MAIN_HAND);
+            InvUtils.swap(pickaxe.slot(), false);
+            doMine(false); // don't swap, we just did
+        }
 
         // 5. Wait for server air confirm
         state = State.WAIT_BREAK;
@@ -331,11 +341,39 @@ public class ObsidianFist extends Module {
         retries = 0;
     }
 
+    private void doPlace(Hand hand) {
+        sendRotation(placeTarget);
+
+        boolean sneaking = !mc.player.isSneaking() && isClickable(mc.world.getBlockState(placeTarget).getBlock());
+        if (sneaking) mc.player.networkHandler.sendPacket(new ClientCommandC2SPacket(mc.player, ClientCommandC2SPacket.Mode.PRESS_SHIFT_KEY));
+
+        mc.interactionManager.interactBlock(mc.player, hand, new BlockHitResult(
+            new Vec3d(
+                placeTarget.getX() + 0.5 + placeSide.getOffsetX() * 0.5,
+                placeTarget.getY() + 0.5 + placeSide.getOffsetY() * 0.5,
+                placeTarget.getZ() + 0.5 + placeSide.getOffsetZ() * 0.5),
+            placeSide, placeTarget, false));
+        mc.player.swingHand(hand);
+
+        if (sneaking) mc.player.networkHandler.sendPacket(new ClientCommandC2SPacket(mc.player, ClientCommandC2SPacket.Mode.RELEASE_SHIFT_KEY));
+    }
+
+    private void doMine(boolean swapToPick) {
+        if (swapToPick) {
+            FindItemResult pickaxe = findPickaxe();
+            if (!pickaxe.found()) { fullReset(); return; }
+            InvUtils.swap(pickaxe.slot(), false);
+        }
+        sendRotation(currentPos);
+        mc.player.networkHandler.sendPacket(new PlayerActionC2SPacket(PlayerActionC2SPacket.Action.START_DESTROY_BLOCK, currentPos, currentDir));
+        mc.player.swingHand(Hand.MAIN_HAND);
+        mc.player.networkHandler.sendPacket(new PlayerActionC2SPacket(PlayerActionC2SPacket.Action.STOP_DESTROY_BLOCK, currentPos, currentDir));
+    }
+
     // ── WAIT_BREAK timeout ────────────────────────────────────────────────────
 
     private void tickWaitBreak() {
         // Timeout: server didn't confirm — ghost block likely stuck. Sync and retry.
-        syncGhostBlock(currentPos);
         retries++;
         if (retries > 8) {
             error("Break timed out too many times, aborting.");
@@ -388,21 +426,49 @@ public class ObsidianFist extends Module {
     private void handleBlockUpdate(boolean isAir) {
         if (isAir) {
             switch (state) {
-                case FIRST_MINE, WAIT_BREAK -> {
+                case WAIT_BREAK -> {
                     breakConfirmed = true;
                     timer = 0; // cancel timeout immediately
                 }
                 default -> {}
             }
         } else {
-            // Non-air while waiting for break = server pushed block back (restoration)
+            // Non-air while waiting for break = server pushed block back (restoration)            
             switch (state) {
-                case WAIT_BREAK, FIRST_MINE -> {
+                case WAIT_BREAK -> {
                     restorationPending = true;
                     timer = 0;
                 }
                 default -> {}
             }
+        }
+    }
+
+    // ── Compatibility ─────────────────────────────────────────────────────────
+
+    private void onOffhandSettingChanged(boolean enabled) {
+        if (!isActive()) return;
+
+        if (enabled && !shsAutoTotemWasEnabled) {
+            // Offhand mode was just turned on, check for conflict
+            ServerHealthcareSystem shs = Modules.get().get(ServerHealthcareSystem.class);
+            if (shs != null && shs.isAutoTotemEnabled()) {
+                shsAutoTotemWasEnabled = true;
+                shs.setAutoTotem(false);
+                info("Temporarily disabled Auto Totem in ServerHealthcareSystem to use offhand.");
+            }
+        } else if (!enabled && shsAutoTotemWasEnabled) {
+            // Offhand mode was turned off, restore auto-totem
+            reEnableAutoTotem();
+            shsAutoTotemWasEnabled = false;
+        }
+    }
+
+    private void reEnableAutoTotem() {
+        ServerHealthcareSystem shs = Modules.get().get(ServerHealthcareSystem.class);
+        if (shs != null && shs.isActive()) {
+            shs.setAutoTotem(true);
+            info("Re-enabled Auto Totem in ServerHealthcareSystem.");
         }
     }
 

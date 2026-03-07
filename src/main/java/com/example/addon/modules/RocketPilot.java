@@ -32,8 +32,7 @@ import net.minecraft.world.RaycastContext;
 public class RocketPilot extends Module {
 
     // ─── Enum ────────────────────────────────────────────────────────────────────
-    public enum FlightMode { Normal, Oscillation, Pitch40 }
-    public enum FlightPattern { None, Grid, Circle, ZigZag, }
+    public enum FlightMode { Normal, Oscillation, Pitch40 } public enum FlightPattern { None, Grid, Circle, ZigZag, Lawnmower, FigureEight }
     // ─── Constants ───────────────────────────────────────────────────────────────
     private static final int   TAKEOFF_GRACE_TICKS        = 40;
     private static final float ELYTRA_LOW_PERCENT         = 5.0f;
@@ -319,6 +318,36 @@ public class RocketPilot extends Module {
         .build()
     );
 
+    private final Setting<Integer> lawnmowerLegLength = sgPatterns.add(new IntSetting.Builder()
+        .name("lawnmower-leg-length")
+        .description("Length of each parallel leg in chunks.")
+        .defaultValue(10)
+        .min(1)
+        .sliderRange(1, 50)
+        .visible(() -> flightPattern.get() == FlightPattern.Lawnmower)
+        .build()
+    );
+
+    private final Setting<Integer> lawnmowerSpacing = sgPatterns.add(new IntSetting.Builder()
+        .name("lawnmower-spacing")
+        .description("Spacing between parallel legs in chunks.")
+        .defaultValue(2)
+        .min(1)
+        .sliderRange(1, 16)
+        .visible(() -> flightPattern.get() == FlightPattern.Lawnmower)
+        .build()
+    );
+
+    private final Setting<Integer> figureEightRadius = sgPatterns.add(new IntSetting.Builder()
+        .name("figure-eight-radius")
+        .description("Radius of the loops in chunks.")
+        .defaultValue(5)
+        .min(1)
+        .sliderRange(1, 20)
+        .visible(() -> flightPattern.get() == FlightPattern.FigureEight)
+        .build()
+    );
+
     // ─── Drunk Pilot Settings ────────────────────────────────────────────────────
     public final Setting<Boolean> drunkMode = sgDrunk.add(new BoolSetting.Builder()
         .name("drunk-mode")
@@ -519,6 +548,12 @@ public class RocketPilot extends Module {
     // Circle state
     private double circleAngle = 0;
 
+    // Lawnmower state
+    private int lawnmowerWaypoint = 0;
+
+    // FigureEight state
+    private int figureEightWaypoint = 0;
+
     // ─── Constructor ─────────────────────────────────────────────────────────────
     public RocketPilot() {
         super(HuntingUtilities.CATEGORY, "rocket-pilot",
@@ -564,6 +599,8 @@ public class RocketPilot extends Module {
         zigzagTurnRight  = true;
         zigzagFirstLeg   = true;
         circleAngle      = 0;
+        lawnmowerWaypoint = 0;
+        figureEightWaypoint = 0;
     }
 
     // ─── Lifecycle ────────────────────────────────────────────────────────────────
@@ -1094,6 +1131,59 @@ public class RocketPilot extends Module {
             Vec3d startPoint = (currentTarget != null) ? currentTarget : origin;
             nextX = startPoint.x + (-Math.sin(radYaw) * legLength);
             nextZ = startPoint.z + ( Math.cos(radYaw) * legLength);
+
+        } else if (pattern == FlightPattern.Lawnmower) {
+            double legLength = lawnmowerLegLength.get() * 16.0;
+            double spacing = lawnmowerSpacing.get() * 16.0;
+
+            // Waypoints are corners of the lawnmower path.
+            // Path: E, N, W, N, E, N, W, N ...
+            int step = lawnmowerWaypoint % 4;
+            int row = lawnmowerWaypoint / 4;
+
+            double zOffset = row * 2 * spacing;
+
+            switch (step) {
+                case 0: // End of East leg
+                    nextX = origin.x + legLength;
+                    nextZ = origin.z + zOffset;
+                    break;
+                case 1: // End of North shift
+                    nextX = origin.x + legLength;
+                    nextZ = origin.z + zOffset + spacing;
+                    break;
+                case 2: // End of West leg
+                    nextX = origin.x;
+                    nextZ = origin.z + zOffset + spacing;
+                    break;
+                default: // case 3, End of next North shift
+                    nextX = origin.x;
+                    nextZ = origin.z + zOffset + 2 * spacing;
+                    break;
+            }
+            lawnmowerWaypoint++;
+
+        } else if (pattern == FlightPattern.FigureEight) {
+            double r = figureEightRadius.get() * 16.0;
+            double x_off, z_off;
+
+            // 8 waypoints to approximate a figure-eight centered on origin
+            switch (figureEightWaypoint) {
+                case 0: x_off =  r; z_off =  r; break;
+                case 1: x_off =  0; z_off =  2*r; break;
+                case 2: x_off = -r; z_off =  r; break;
+                case 3: x_off =  0; z_off =  0; break; // Crossover
+                case 4: x_off = -r; z_off = -r; break;
+                case 5: x_off =  0; z_off = -2*r; break;
+                case 6: x_off =  r; z_off = -r; break;
+                default: // case 7
+                    x_off = 0; z_off = 0; break; // Crossover
+            }
+
+            nextX = origin.x + x_off;
+            nextZ = origin.z + z_off;
+
+            figureEightWaypoint = (figureEightWaypoint + 1) % 8;
 
         } else if (pattern == FlightPattern.Circle) {
             double angleStep       = 2.0 * Math.PI / circleSegments.get();

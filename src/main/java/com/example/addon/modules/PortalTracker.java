@@ -22,6 +22,11 @@ import meteordevelopment.meteorclient.settings.EnumSetting;
 import meteordevelopment.meteorclient.settings.IntSetting;
 import meteordevelopment.meteorclient.settings.Setting;
 import meteordevelopment.meteorclient.settings.SettingGroup;
+import meteordevelopment.meteorclient.settings.KeybindSetting;
+import meteordevelopment.meteorclient.utils.misc.Keybind;
+import meteordevelopment.meteorclient.utils.player.FindItemResult;
+import meteordevelopment.meteorclient.utils.player.InvUtils;
+import meteordevelopment.meteorclient.utils.player.Rotations;
 import meteordevelopment.meteorclient.systems.modules.Module;
 import meteordevelopment.meteorclient.utils.render.color.Color;
 import meteordevelopment.meteorclient.utils.render.color.SettingColor;
@@ -31,6 +36,10 @@ import net.minecraft.block.Blocks;
 import net.minecraft.block.entity.BlockEntity;
 import net.minecraft.block.entity.EndGatewayBlockEntity;
 import net.minecraft.block.entity.EndPortalBlockEntity;
+import net.minecraft.item.Items;
+import net.minecraft.util.Hand;
+import net.minecraft.util.hit.BlockHitResult;
+import net.minecraft.util.hit.HitResult;
 import net.minecraft.util.math.BlockPos;
 import net.minecraft.util.math.Box;
 import net.minecraft.util.math.ChunkPos;
@@ -62,6 +71,7 @@ public class PortalTracker extends Module {
     private final SettingGroup sgNetherPortals = settings.createGroup("Nether Portals");
     private final SettingGroup sgEndDimension  = settings.createGroup("End Dimension");
     private final SettingGroup sgRender        = settings.createGroup("Render");
+    private final SettingGroup sgPlatform      = settings.createGroup("Platform 9¾");
 
     // -- General --
 
@@ -199,6 +209,23 @@ public class PortalTracker extends Module {
         .build()
     );
 
+    // -- Platform 9¾ --
+
+    private final Setting<Keybind> platformKey = sgPlatform.add(new KeybindSetting.Builder()
+        .name("platform-key")
+        .description("Key to build the 5x5 platform.")
+        .defaultValue(Keybind.none())
+        .action(this::startPlatformBuild)
+        .build()
+    );
+
+    private final Setting<Integer> platformDelay = sgPlatform.add(new IntSetting.Builder()
+        .name("platform-delay")
+        .description("Ticks between block placements.")
+        .defaultValue(2).min(1)
+        .build()
+    );
+
     // ───────────────────────────────────────────────────────────────
     // State
     // ───────────────────────────────────────────────────────────────
@@ -233,6 +260,11 @@ public class PortalTracker extends Module {
     // Throttle timers
     private int structureTimer = 0;
     private int cleanupTimer   = 0;
+
+    // Platform state
+    private final List<BlockPos> platformPositions = new ArrayList<>();
+    private int platformIndex = 0;
+    private int platformTimer = 0;
 
     // ───────────────────────────────────────────────────────────────
     // Constructor
@@ -281,6 +313,9 @@ public class PortalTracker extends Module {
         sessionStartTime  = 0;
         structureTimer    = 0;
         cleanupTimer      = 0;
+        platformPositions.clear();
+        platformIndex     = 0;
+        platformTimer     = 0;
     }
 
     // ───────────────────────────────────────────────────────────────
@@ -331,6 +366,8 @@ public class PortalTracker extends Module {
         }
 
         if (!manuallyActivated) manuallyActivated = true;
+
+        handlePlatformBuilding();
     }
 
     /**
@@ -794,5 +831,96 @@ public class PortalTracker extends Module {
             this.isCreated   = isCreated;
             this.type        = type;
         }
+    }
+
+    // ───────────────────────────────────────────────────────────────
+    // Platform 9¾ Logic
+    // ───────────────────────────────────────────────────────────────
+
+    private void startPlatformBuild() {
+        if (mc.player == null) return;
+        platformPositions.clear();
+        platformIndex = 0;
+        platformTimer = 0;
+
+        BlockPos center;
+        if (mc.crosshairTarget instanceof BlockHitResult bhr && bhr.getType() == HitResult.Type.BLOCK) {
+            center = bhr.getBlockPos();
+        } else {
+            center = mc.player.getBlockPos().down();
+        }
+
+        int r = 2; // 5x5 centered
+
+        for (int x = -r; x <= r; x++) {
+            for (int z = -r; z <= r; z++) {
+                if (x == 0 && z == 0) continue;
+                platformPositions.add(center.add(x, 0, z));
+            }
+        }
+
+        BlockPos finalCenter = center;
+        platformPositions.sort(java.util.Comparator.comparingDouble(p ->
+            p.getSquaredDistance(finalCenter)));
+
+        info("Building Platform 9¾...");
+    }
+
+    private void handlePlatformBuilding() {
+        if (platformPositions.isEmpty()) return;
+
+        if (platformIndex >= platformPositions.size()) {
+            platformPositions.clear();
+            info("Platform 9¾ complete.");
+            return;
+        }
+
+        if (platformTimer > 0) {
+            platformTimer--;
+            return;
+        }
+
+        if (!mc.player.getMainHandStack().isOf(Items.OBSIDIAN)) {
+            FindItemResult obsidian = InvUtils.find(Items.OBSIDIAN);
+            if (!obsidian.found()) {
+                error("No obsidian found for platform.");
+                platformPositions.clear();
+                return;
+            }
+            if (obsidian.isHotbar()) {
+                InvUtils.swap(obsidian.slot(), false);
+            } else {
+                InvUtils.move().from(obsidian.slot()).toHotbar(mc.player.getInventory().selectedSlot);
+            }
+        }
+
+        BlockPos target = platformPositions.get(platformIndex);
+
+        if (!mc.world.getBlockState(target).isReplaceable()) {
+            platformIndex++;
+            platformTimer = 0;
+            return;
+        }
+
+        if (placeBlock(target)) {
+            platformIndex++;
+            platformTimer = platformDelay.get();
+        } else {
+            platformIndex++;
+        }
+    }
+
+    private boolean placeBlock(BlockPos pos) {
+        for (Direction side : Direction.values()) {
+            BlockPos neighbor = pos.offset(side);
+            if (!mc.world.getBlockState(neighbor).isReplaceable()) {
+                Rotations.rotate(Rotations.getYaw(neighbor), Rotations.getPitch(neighbor), () -> {
+                    mc.interactionManager.interactBlock(mc.player, Hand.MAIN_HAND, new BlockHitResult(net.minecraft.util.math.Vec3d.ofCenter(neighbor), side.getOpposite(), neighbor, false));
+                    mc.player.swingHand(Hand.MAIN_HAND);
+                });
+                return true;
+            }
+        }
+        return false;
     }
 }
