@@ -599,7 +599,8 @@ public class NeighbourhoodWatch extends Module {
             team = scoreboard.addTeam(teamName);
             team.setColor(formatting);
         }
-        Team existing = scoreboard.getTeam(playerName);
+        // getScoreHolderTeam returns the team the player is currently on
+        Team existing = scoreboard.getScoreHolderTeam(playerName);
         if (existing == null || !existing.getName().equals(teamName)) {
             scoreboard.addScoreHolderToTeam(playerName, team);
         }
