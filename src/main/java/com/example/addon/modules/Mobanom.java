@@ -1,6 +1,10 @@
 package com.example.addon.modules;
 
+import java.util.HashSet;
+import java.util.Set;
+
 import com.example.addon.HuntingUtilities;
+
 import meteordevelopment.meteorclient.events.render.Render3DEvent;
 import meteordevelopment.meteorclient.renderer.ShapeMode;
 import meteordevelopment.meteorclient.settings.BoolSetting;
@@ -31,10 +35,6 @@ import net.minecraft.registry.entry.RegistryEntry;
 import net.minecraft.scoreboard.Scoreboard;
 import net.minecraft.scoreboard.Team;
 import net.minecraft.util.Formatting;
-import net.minecraft.util.math.Box;
-
-import java.util.HashSet;
-import java.util.Set;
 
 public class Mobanom extends Module {
     private final SettingGroup sgGeneral = settings.getDefaultGroup();
@@ -113,6 +113,14 @@ public class Mobanom extends Module {
         .name("item-anomaly-line-color")
         .description("The line color for mobs with unnatural items.")
         .defaultValue(new SettingColor(0, 255, 255, 255))
+        .visible(detectUnnaturalItems::get)
+        .build()
+    );
+
+    private final Setting<Boolean> detectPumpkins = sgItemAnomaly.add(new BoolSetting.Builder()
+        .name("detect-pumpkins")
+        .description("Detects mobs wearing carved pumpkins or jack-o'-lanterns.")
+        .defaultValue(true)
         .visible(detectUnnaturalItems::get)
         .build()
     );
@@ -277,6 +285,7 @@ public class Mobanom extends Module {
         // Check for specific items like Elytra or Shulker Boxes
         if (item == Items.ELYTRA) return true;
         if (item instanceof BlockItem && ((BlockItem) item).getBlock() instanceof ShulkerBoxBlock) return true;
+        if (detectPumpkins.get() && (item == Items.CARVED_PUMPKIN || item == Items.JACK_O_LANTERN)) return true;
 
         // Check for enchantments
         ItemEnchantmentsComponent enchants = stack.get(DataComponentTypes.ENCHANTMENTS);
