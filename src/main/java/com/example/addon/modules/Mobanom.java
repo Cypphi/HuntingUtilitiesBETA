@@ -6,11 +6,9 @@ import java.util.Set;
 import com.example.addon.HuntingUtilities;
 
 import meteordevelopment.meteorclient.events.render.Render3DEvent;
-import meteordevelopment.meteorclient.renderer.ShapeMode;
 import meteordevelopment.meteorclient.settings.BoolSetting;
 import meteordevelopment.meteorclient.settings.ColorSetting;
 import meteordevelopment.meteorclient.settings.EntityTypeListSetting;
-import meteordevelopment.meteorclient.settings.EnumSetting;
 import meteordevelopment.meteorclient.settings.IntSetting;
 import meteordevelopment.meteorclient.settings.Setting;
 import meteordevelopment.meteorclient.settings.SettingGroup;
@@ -41,54 +39,26 @@ public class Mobanom extends Module {
     private final SettingGroup sgColors = settings.createGroup("Colors");
     private final SettingGroup sgItemAnomaly = settings.createGroup("Item Anomaly");
 
-    private final Setting<ShapeMode> shapeMode = sgGeneral.add(new EnumSetting.Builder<ShapeMode>()
-        .name("shape-mode")
-        .description("How the shapes are rendered.")
-        .defaultValue(ShapeMode.Both)
-        .build()
-    );
-
     // Overworld Colors
-    private final Setting<SettingColor> overworldSideColor = sgColors.add(new ColorSetting.Builder()
-        .name("overworld-side-color")
-        .description("Side color for Overworld mobs in other dimensions.")
-        .defaultValue(new SettingColor(0, 255, 0, 75))
-        .build()
-    );
-
     private final Setting<SettingColor> overworldLineColor = sgColors.add(new ColorSetting.Builder()
         .name("overworld-line-color")
-        .description("Line color for Overworld mobs in other dimensions.")
+        .description("Glow color for Overworld mobs in other dimensions.")
         .defaultValue(new SettingColor(0, 255, 0, 255))
         .build()
     );
 
     // Nether Colors
-    private final Setting<SettingColor> netherSideColor = sgColors.add(new ColorSetting.Builder()
-        .name("nether-side-color")
-        .description("Side color for Nether mobs in other dimensions.")
-        .defaultValue(new SettingColor(255, 0, 0, 75))
-        .build()
-    );
-
     private final Setting<SettingColor> netherLineColor = sgColors.add(new ColorSetting.Builder()
         .name("nether-line-color")
-        .description("Line color for Nether mobs in other dimensions.")
+        .description("Glow color for Nether mobs in other dimensions.")
         .defaultValue(new SettingColor(255, 0, 0, 255))
         .build()
     );
 
     // End Colors
-    private final Setting<SettingColor> endSideColor = sgColors.add(new ColorSetting.Builder()
-        .name("end-side-color")
-        .description("Side color for End mobs in other dimensions.")
-        .defaultValue(new SettingColor(255, 0, 255, 75))
-        .build()
-    );
-
     private final Setting<SettingColor> endLineColor = sgColors.add(new ColorSetting.Builder()
         .name("end-line-color")
-        .description("Line color for End mobs in other dimensions.")
+        .description("Glow color for End mobs in other dimensions.")
         .defaultValue(new SettingColor(255, 0, 255, 255))
         .build()
     );
@@ -101,17 +71,9 @@ public class Mobanom extends Module {
         .build()
     );
 
-    private final Setting<SettingColor> itemAnomalySideColor = sgItemAnomaly.add(new ColorSetting.Builder()
-        .name("item-anomaly-side-color")
-        .description("The side color for mobs with unnatural items.")
-        .defaultValue(new SettingColor(0, 255, 255, 75))
-        .visible(detectUnnaturalItems::get)
-        .build()
-    );
-
     private final Setting<SettingColor> itemAnomalyLineColor = sgItemAnomaly.add(new ColorSetting.Builder()
         .name("item-anomaly-line-color")
-        .description("The line color for mobs with unnatural items.")
+        .description("The glow color for mobs with unnatural items.")
         .defaultValue(new SettingColor(0, 255, 255, 255))
         .visible(detectUnnaturalItems::get)
         .build()
@@ -189,8 +151,8 @@ public class Mobanom extends Module {
         if (mc.world != null) {
             for (int id : highlightedEntities) {
                 Entity entity = mc.world.getEntityById(id);
-                if (entity != null) {
-                    entity.setGlowing(false);
+                if (entity instanceof net.minecraft.entity.LivingEntity living) {
+                    living.removeStatusEffect(net.minecraft.entity.effect.StatusEffects.GLOWING);
                     clearEntityTeam(entity);
                 }
             }
@@ -219,14 +181,13 @@ public class Mobanom extends Module {
                 currentAnomalies.add(mob.getId());
                 highlightedEntities.add(mob.getId());
 
-                SettingColor sideColor = getSideColorForAnomaly(mob, isItemAnomaly || isChestedAnomaly);
                 SettingColor lineColor = getColorForAnomaly(mob, isItemAnomaly || isChestedAnomaly);
 
-                // Draw the bounding box around the mob
-                event.renderer.box(mob.getBoundingBox(), sideColor, lineColor, shapeMode.get(), 0);
-
-                // Glowing outline (best-effort client-side)
-                mob.setGlowing(true);
+                // Apply glowing effect like spectral arrow (refreshed each render tick)
+                mob.addStatusEffect(new net.minecraft.entity.effect.StatusEffectInstance(
+                    net.minecraft.entity.effect.StatusEffects.GLOWING,
+                    60, 0, false, false
+                ));
                 setEntityTeam(mob, getNearestColor(lineColor));
 
                 if (chatNotification.get() && notifiedEntities.add(mob.getId())) {
@@ -245,7 +206,9 @@ public class Mobanom extends Module {
             if (!currentAnomalies.contains(id)) {
                 Entity entity = mc.world.getEntityById(id);
                 if (entity != null) {
-                    entity.setGlowing(false);
+                    if (entity instanceof net.minecraft.entity.LivingEntity living) {
+                        living.removeStatusEffect(net.minecraft.entity.effect.StatusEffects.GLOWING);
+                    }
                     clearEntityTeam(entity);
                 }
                 return true;
@@ -318,13 +281,6 @@ public class Mobanom extends Module {
             return llama.hasChest();
         }
         return false;
-    }
-
-    private SettingColor getSideColorForAnomaly(MobEntity mob, boolean isItemAnomaly) {
-        if (isItemAnomaly) return itemAnomalySideColor.get();
-        if (END_NATIVES.contains(mob.getType())) return endSideColor.get();
-        if (NETHER_NATIVES.contains(mob.getType())) return netherSideColor.get();
-        return overworldSideColor.get();
     }
 
     private SettingColor getColorForAnomaly(MobEntity mob, boolean isItemAnomaly) {
