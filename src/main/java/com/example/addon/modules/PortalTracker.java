@@ -11,6 +11,9 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CopyOnWriteArrayList;
 
 import com.example.addon.HuntingUtilities;
+import com.example.addon.utils.XaeroPortalBridge;
+import com.example.addon.utils.XaerosWaypointHelper;
+import com.example.addon.utils.XaerosWaypointHelper.WaypointEntry;
 
 import meteordevelopment.meteorclient.events.render.Render3DEvent;
 import meteordevelopment.meteorclient.events.world.BlockUpdateEvent;
@@ -63,6 +66,9 @@ public class PortalTracker extends Module {
     private static final int    STRUCTURE_REBUILD_INTERVAL_TICKS = 5;
     private static final int    CLEANUP_INTERVAL_TICKS           = 60;
     private static final long   MESSAGE_COOLDOWN_MS              = 2000;
+
+    /** XZ radius (blocks) used when deduplicating newly written waypoints. */
+    private static final int WAYPOINT_DEDUP_RADIUS = 8;
 
     // ───────────────────────────────────────────────────────────────
     // Settings
@@ -153,6 +159,25 @@ public class PortalTracker extends Module {
         .defaultValue(true)
         .build()
     );
+
+    // ── NEW: Xaero integration settings ──────────────────────────────────────
+
+    private final Setting<Boolean> xaeroWaypoints = sgGeneral.add(new BoolSetting.Builder()
+        .name("xaero-waypoints")
+        .description("Write a Xaero waypoint when a portal you created is first discovered.")
+        .defaultValue(true)
+        .build()
+    );
+
+    private final Setting<Boolean> xaeroRemovalDetection = sgGeneral.add(new BoolSetting.Builder()
+        .name("xaero-removal-detection")
+        .description("Alert + update waypoint when a previously-saved portal is no longer in the world.")
+        .defaultValue(true)
+        .visible(xaeroWaypoints::get)
+        .build()
+    );
+
+    // ─────────────────────────────────────────────────────────────────────────
 
     private final Setting<Boolean> resetButton = sgGeneral.add(new BoolSetting.Builder()
         .name("reset")
@@ -274,9 +299,18 @@ public class PortalTracker extends Module {
     private int platformIndex = 0;
     private int platformTimer = 0;
 
-    // ───────────────────────────────────────────────────────────────
+    // ── Xaero removal-detection state ────────────────────────────────────────
+
+    /**
+     * Waypoints loaded from Xaero's file on dimension enter.
+     * Key = BlockPos of the waypoint, Value = the full entry.
+     * Registered with XaeroPortalBridge to be checked when their chunk loads.
+     */
+    private final Map<BlockPos, WaypointEntry> xaeroTrackedPortals = new ConcurrentHashMap<>();
+
+    // ─────────────────────────────────────────────────────────────────────────
     // Constructor
-    // ───────────────────────────────────────────────────────────────
+    // ─────────────────────────────────────────────────────────────────────────
 
     public PortalTracker() {
         super(HuntingUtilities.CATEGORY, "portal-tracker", "Automatically tracks and highlights portals.");
@@ -293,6 +327,7 @@ public class PortalTracker extends Module {
 
         if (mc.player != null && mc.world != null && mc.world.getRegistryKey() != null) {
             lastDimension = mc.world.getRegistryKey().getValue().toString();
+            loadXaeroWaypointsForDimension(lastDimension);
         }
     }
 
@@ -316,6 +351,8 @@ public class PortalTracker extends Module {
         messageCooldowns.clear();
         scannedChunks.clear();
         dirtyChunks.clear();
+        xaeroTrackedPortals.clear();
+        XaeroPortalBridge.clearWatched();
         portalsDirty      = false;
         manuallyActivated = false;
         sessionStartTime  = 0;
@@ -360,6 +397,10 @@ public class PortalTracker extends Module {
         scanBlockEntities(centerChunkX, centerChunkZ);
         scanNewChunks(centerChunkX, centerChunkZ);
 
+        // Tick the Xaero bridge to resolve any watched portal positions
+        // whose chunks have loaded since last tick.
+        if (xaeroRemovalDetection.get()) XaeroPortalBridge.tick();
+
         if (portalsDirty && ++structureTimer >= STRUCTURE_REBUILD_INTERVAL_TICKS) {
             structureTimer = 0;
             portalsDirty   = false;
@@ -398,7 +439,12 @@ public class PortalTracker extends Module {
             notifiedStructures.clear();
             scannedChunks.clear();
             dirtyChunks.clear();
+            xaeroTrackedPortals.clear();
+            XaeroPortalBridge.clearWatched();
             portalsDirty = false;
+
+            // Load Xaero waypoints saved for this dimension in previous sessions.
+            loadXaeroWaypointsForDimension(currDim);
 
             boolean notify =
                 (currDim.equals("minecraft:the_nether") && scanNetherPortals.get()) ||
@@ -408,6 +454,70 @@ public class PortalTracker extends Module {
             return true;
         } catch (Exception ignored) {
             return true;
+        }
+    }
+
+    // ───────────────────────────────────────────────────────────────
+    // Xaero Waypoint Integration
+    // ───────────────────────────────────────────────────────────────
+
+    /**
+     * Reads all [PT]-tagged waypoints from Xaero's file for this dimension
+     * and registers each with XaeroPortalBridge to be checked the moment
+     * its chunk loads. No polling — purely event-driven via chunk load.
+     */
+    private void loadXaeroWaypointsForDimension(String dimensionId) {
+        if (!xaeroRemovalDetection.get() && !xaeroWaypoints.get()) return;
+
+        List<WaypointEntry> entries = XaerosWaypointHelper.loadPortalWaypoints(dimensionId);
+        for (WaypointEntry entry : entries) {
+            if (entry.name.contains(XaerosWaypointHelper.REMOVED_TAG)) continue;
+            BlockPos pos = entry.toBlockPos();
+            xaeroTrackedPortals.put(pos, entry);
+
+            // Register with the bridge — callback fires when the chunk loads.
+            XaeroPortalBridge.watchPosition(pos, (watchedPos, stillExists) -> {
+                if (!isActive()) return;
+                if (stillExists) {
+                    // Portal confirmed present — untrack, nothing to do.
+                    xaeroTrackedPortals.remove(watchedPos);
+                } else {
+                    // Portal gone — confirm removal if we haven't already seen it
+                    // appear in our portals map this session.
+                    if (!portals.containsKey(watchedPos)) {
+                        WaypointEntry e = xaeroTrackedPortals.remove(watchedPos);
+                        if (e != null) confirmPortalRemoved(watchedPos, e, dimensionId);
+                    }
+                }
+            });
+        }
+
+        if (!xaeroTrackedPortals.isEmpty()) {
+            sendMessage("§7Xaero: watching §f" + xaeroTrackedPortals.size()
+                + " §7saved portal" + (xaeroTrackedPortals.size() == 1 ? "" : "s")
+                + " for removal" + (XaeroPortalBridge.XAERO_PRESENT ? "" : " §8(Xaero not detected)"));
+        }
+    }
+
+    /**
+     * Called when a chunk loads and confirms a previously-saved portal is gone.
+     * Notifies the player and updates the Xaero waypoint in-place to [PT-REMOVED].
+     */
+    private void confirmPortalRemoved(BlockPos pos, WaypointEntry entry, String dimensionId) {
+        String newName = entry.name.replace(XaerosWaypointHelper.PORTAL_TAG,
+                                             XaerosWaypointHelper.REMOVED_TAG);
+        if (newName.equals(entry.name)) newName = XaerosWaypointHelper.REMOVED_TAG + " " + entry.name;
+
+        boolean updated = XaerosWaypointHelper.replaceWaypoint(
+            dimensionId, entry, newName, XaerosWaypointHelper.COLOR_GRAY);
+
+        String coordStr = "§8(§7" + pos.getX() + ", " + pos.getY() + ", " + pos.getZ() + "§8)";
+        if (updated) {
+            sendMessage("§c⚠ Portal removed §7— waypoint updated " + coordStr
+                + " §8[" + getDimensionName(dimensionId) + "]");
+        } else {
+            sendMessage("§c⚠ Portal removed " + coordStr
+                + " §8[" + getDimensionName(dimensionId) + "]");
         }
     }
 
@@ -563,7 +673,43 @@ public class PortalTracker extends Module {
         if (exclusionTimer > 0 && entryPortalPos != null
                 && pos.getSquaredDistance(entryPortalPos) <= ENTRY_EXCLUSION_RADIUS_SQ) return;
 
-        if (createdPortals.add(pos)) portalsDirty = true;
+        boolean added = createdPortals.add(pos);
+        if (added) {
+            portalsDirty = true;
+
+            // Write a Xaero waypoint for this newly discovered created portal.
+            if (xaeroWaypoints.get()) {
+                tryWriteXaeroWaypoint(pos, type, dimensionId);
+            }
+        }
+    }
+
+    /**
+     * Writes a [PT]-tagged Xaero waypoint for a portal we've just confirmed
+     * as ours. The name includes the coordinates for easy identification.
+     */
+    private void tryWriteXaeroWaypoint(BlockPos pos, PortalType type, String dimensionId) {
+        String name = XaerosWaypointHelper.PORTAL_TAG + " "
+            + type.getDisplayName()
+            + " (" + pos.getX() + ", " + pos.getY() + ", " + pos.getZ() + ")";
+
+        int color = switch (type) {
+            case NETHER      -> XaerosWaypointHelper.COLOR_PURPLE;
+            case END_PORTAL  -> XaerosWaypointHelper.COLOR_LIME;
+            case END_GATEWAY -> XaerosWaypointHelper.COLOR_CYAN;
+        };
+
+        boolean written = XaerosWaypointHelper.addWaypoint(pos, name, dimensionId, color, WAYPOINT_DEDUP_RADIUS);
+        if (written) {
+            // Register in our removal-watch map so this session can also catch removal.
+            // We parse a synthetic entry since we just wrote it.
+            WaypointEntry synth = new WaypointEntry(
+                "waypoint:" + name + ":PT:" + pos.getX() + ":" + pos.getY() + ":" + pos.getZ()
+                    + ":" + color + ":false:0:gui.xaero_default:0.0:false",
+                name, pos.getX(), pos.getY(), pos.getZ(), color
+            );
+            xaeroTrackedPortals.put(pos, synth);
+        }
     }
 
     // ───────────────────────────────────────────────────────────────
@@ -678,6 +824,16 @@ public class PortalTracker extends Module {
         if (!isPortal) {
             portals.remove(event.pos);
             portalsDirty = true;
+
+            // If this was a Xaero-tracked portal, handle removal immediately via
+            // a real block-update event — more reliable than waiting for chunk load.
+            if (xaeroRemovalDetection.get()) {
+                WaypointEntry entry = xaeroTrackedPortals.remove(event.pos);
+                if (entry != null) {
+                    XaeroPortalBridge.unwatch(event.pos);
+                    confirmPortalRemoved(event.pos, entry, lastDimension);
+                }
+            }
         }
     }
 
@@ -713,28 +869,94 @@ public class PortalTracker extends Module {
 
             Box renderBox = structure.boundingBox;
             if (highlightFrame.get() && structure.type == PortalType.NETHER) {
-                double xLen = renderBox.maxX - renderBox.minX;
-                double zLen = renderBox.maxZ - renderBox.minZ;
-                if (xLen > zLen) {
-                    renderBox = new Box(
-                        renderBox.minX - 1, renderBox.minY - 1, renderBox.minZ,
-                        renderBox.maxX + 1, renderBox.maxY + 1, renderBox.maxZ
-                    );
-                } else {
-                    renderBox = new Box(
-                        renderBox.minX, renderBox.minY - 1, renderBox.minZ - 1,
-                        renderBox.maxX, renderBox.maxY + 1, renderBox.maxZ + 1
-                    );
-                }
+                renderNetherFrame(event, renderBox, color);
+            } else {
+                event.renderer.box(renderBox, color, color, shapeMode.get(), 0);
             }
-
-            event.renderer.box(renderBox, color, color, shapeMode.get(), 0);
             if (showBeam.get()) {
                 if (!onlyNearestBeam.get() || structure == nearest) {
                     renderBeam(event, renderBox, color);
                 }
             }
         }
+    }
+
+    /**
+     * Renders the four obsidian frame pieces of a Nether portal without corners.
+     *
+     * A standard portal frame has:
+     *   - Two vertical side pillars (height of the portal + 2 for top/bottom obsidian)
+     *   - One top bar and one bottom bar spanning between the pillars (no corners)
+     *
+     * The portal bounding box covers only the inner air/fire blocks, so we
+     * expand by 1 in the flat axis and 1 below/above for the top and bottom bars,
+     * then draw each piece individually.
+     */
+    private void renderNetherFrame(Render3DEvent event, Box box, Color color) {
+        double xLen = box.maxX - box.minX;
+        double zLen = box.maxZ - box.minZ;
+
+        // Determine orientation: wider in X → N/S facing portal; wider in Z → E/W facing
+        boolean facingNS = xLen >= zLen;
+
+        // Frame extends 1 block outside the portal air in the flat axis,
+        // and 1 block below minY and above maxY for bottom/top bars.
+        double frameMinY = box.minY - 1;
+        double frameMaxY = box.maxY + 1;
+
+        if (facingNS) {
+            // Pillars run along Z (thin axis), left and right of the portal in X
+            double leftX  = box.minX - 1;
+            double rightX = box.maxX;
+
+            // Left pillar: from frameMinY to frameMaxY, full Z depth of portal
+            event.renderer.box(
+                new Box(leftX,  frameMinY, box.minZ, leftX  + 1, frameMaxY, box.maxZ),
+                color, color, shapeMode.get(), 0);
+
+            // Right pillar
+            event.renderer.box(
+                new Box(rightX, frameMinY, box.minZ, rightX + 1, frameMaxY, box.maxZ),
+                color, color, shapeMode.get(), 0);
+
+            // Bottom bar: spans between pillars (not including pillar columns)
+            event.renderer.box(
+                new Box(box.minX, frameMinY, box.minZ, box.maxX, box.minY, box.maxZ),
+                color, color, shapeMode.get(), 0);
+
+            // Top bar
+            event.renderer.box(
+                new Box(box.minX, box.maxY, box.minZ, box.maxX, frameMaxY, box.maxZ),
+                color, color, shapeMode.get(), 0);
+
+        } else {
+            // Pillars run along X (thin axis), front and back in Z
+            double frontZ = box.minZ - 1;
+            double backZ  = box.maxZ;
+
+            // Front pillar
+            event.renderer.box(
+                new Box(box.minX, frameMinY, frontZ,  box.maxX, frameMaxY, frontZ + 1),
+                color, color, shapeMode.get(), 0);
+
+            // Back pillar
+            event.renderer.box(
+                new Box(box.minX, frameMinY, backZ,   box.maxX, frameMaxY, backZ  + 1),
+                color, color, shapeMode.get(), 0);
+
+            // Bottom bar
+            event.renderer.box(
+                new Box(box.minX, frameMinY, box.minZ, box.maxX, box.minY, box.maxZ),
+                color, color, shapeMode.get(), 0);
+
+            // Top bar
+            event.renderer.box(
+                new Box(box.minX, box.maxY, box.minZ, box.maxX, frameMaxY, box.maxZ),
+                color, color, shapeMode.get(), 0);
+        }
+
+        // Also highlight the portal interior itself
+        event.renderer.box(box, color, color, shapeMode.get(), 0);
     }
 
     private void renderBeam(Render3DEvent event, Box anchorBox, Color color) {
@@ -755,10 +977,6 @@ public class PortalTracker extends Module {
     // Color
     // ───────────────────────────────────────────────────────────────
 
-    /**
-     * When dynamic colors are on, each type uses a distinct hue offset
-     * (Nether 0°, End 120°, Gateway 240°) so types stay visually distinguishable.
-     */
     private Color getColor(PortalType type) {
         if (dynamicColors.get()) {
             float baseHue = switch (type) {
@@ -787,6 +1005,8 @@ public class PortalTracker extends Module {
         totalCreated = 0;
         createdPortals.clear();
         notifiedStructures.clear();
+        xaeroTrackedPortals.clear();
+        XaeroPortalBridge.clearWatched();
         sessionStartTime = System.currentTimeMillis();
         portalsDirty     = true;
         info("Session cleared. Reset " + old + " created portal" + (old == 1 ? "" : "s") + ".");
@@ -797,13 +1017,10 @@ public class PortalTracker extends Module {
     // Public API
     // ───────────────────────────────────────────────────────────────
 
-    /** Used by PortalGuiMixin to check whether screen-opening in portals is allowed. */
     public boolean isPortalGuiEnabled() { return isActive(); }
-
     public int getTotalPortals()         { return portalStructures.size(); }
     public int getTotalCreated()         { return totalCreated; }
 
-    /** Called by chunk-load mixins to force a re-scan of a specific chunk. */
     public void markChunkDirty(ChunkPos chunkPos) {
         if (chunkPos == null) return;
         dirtyChunks.add(chunkPos);
@@ -875,8 +1092,7 @@ public class PortalTracker extends Module {
             center = mc.player.getBlockPos().down();
         }
 
-        int r = 2; // 5x5 centered
-
+        int r = 2;
         for (int x = -r; x <= r; x++) {
             for (int z = -r; z <= r; z++) {
                 if (x == 0 && z == 0) continue;
@@ -900,10 +1116,7 @@ public class PortalTracker extends Module {
             return;
         }
 
-        if (platformTimer > 0) {
-            platformTimer--;
-            return;
-        }
+        if (platformTimer > 0) { platformTimer--; return; }
 
         if (!mc.player.getMainHandStack().isOf(Items.OBSIDIAN)) {
             FindItemResult obsidian = InvUtils.find(Items.OBSIDIAN);
@@ -920,7 +1133,6 @@ public class PortalTracker extends Module {
         }
 
         BlockPos target = platformPositions.get(platformIndex);
-
         if (!mc.world.getBlockState(target).isReplaceable()) {
             platformIndex++;
             platformTimer = 0;
@@ -942,7 +1154,8 @@ public class PortalTracker extends Module {
                 Direction placeFace = side.getOpposite();
                 Vec3d hitPos = Vec3d.ofCenter(neighbor).add(Vec3d.of(placeFace.getVector()).multiply(0.5));
                 Rotations.rotate(Rotations.getYaw(hitPos), Rotations.getPitch(hitPos), () -> {
-                    mc.interactionManager.interactBlock(mc.player, Hand.MAIN_HAND, new BlockHitResult(hitPos, placeFace, neighbor, false));
+                    mc.interactionManager.interactBlock(mc.player, Hand.MAIN_HAND,
+                        new BlockHitResult(hitPos, placeFace, neighbor, false));
                     mc.player.swingHand(Hand.MAIN_HAND);
                 });
                 return true;

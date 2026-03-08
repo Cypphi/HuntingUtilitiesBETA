@@ -25,5 +25,9 @@
     "java": ">=21",
     "minecraft": "1.21.4",
     "meteor-client": "*"
+  },
+  "suggests": {
+    "xaeroworldmap": "*",
+    "xaerominimapfair": "*"
   }
 }
