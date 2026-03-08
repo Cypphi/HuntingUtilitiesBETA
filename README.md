@@ -22,6 +22,7 @@ Current Modules
 - Neighbourhood Watch
 - Tunnelers
 - Third Sight
+- Illushine
 
 More modules coming soon — 
 
