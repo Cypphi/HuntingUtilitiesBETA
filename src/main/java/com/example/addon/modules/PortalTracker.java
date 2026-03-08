@@ -161,26 +161,11 @@ public class PortalTracker extends Module {
         .build()
     );
 
-    // ── NEW: Xaero integration settings ──────────────────────────────────────
+    // ── Xaero integration ─────────────────────────────────────────────────────
 
-    private final Setting<Boolean> xaeroWaypoints = sgGeneral.add(new BoolSetting.Builder()
-        .name("xaero-waypoints")
-        .description("Write a Xaero waypoint when a portal you created is first discovered.")
-        .defaultValue(true)
-        .build()
-    );
-
-    private final Setting<Boolean> xaeroRemovalDetection = sgGeneral.add(new BoolSetting.Builder()
-        .name("xaero-removal-detection")
-        .description("Alert + update waypoint when a previously-saved portal is no longer in the world.")
-        .defaultValue(true)
-        .visible(xaeroWaypoints::get)
-        .build()
-    );
-
-    private final Setting<Boolean> xaerosPlusDetection = sgGeneral.add(new BoolSetting.Builder()
-        .name("xaerosplus-detection")
-        .description("Load portal positions from XaeroPlus's portal database (XaerosPlusPortals.db) and watch them for removal in the background.")
+    private final Setting<Boolean> xaeroIntegration = sgGeneral.add(new BoolSetting.Builder()
+        .name("xaero-integration")
+        .description("Enables all Xaero integration: writes waypoints for portals you create, watches for removals, and loads historical portals from XaeroPlus's database.")
         .defaultValue(true)
         .build()
     );
@@ -410,7 +395,7 @@ public class PortalTracker extends Module {
 
         // Tick the Xaero bridge to resolve any watched portal positions
         // whose chunks have loaded since last tick.
-        if (xaeroRemovalDetection.get()) XaeroPortalBridge.tick();
+        if (xaeroIntegration.get()) XaeroPortalBridge.tick();
 
         if (portalsDirty && ++structureTimer >= STRUCTURE_REBUILD_INTERVAL_TICKS) {
             structureTimer = 0;
@@ -478,7 +463,7 @@ public class PortalTracker extends Module {
      * its chunk loads. No polling — purely event-driven via chunk load.
      */
     private void loadXaeroWaypointsForDimension(String dimensionId) {
-        if (!xaeroRemovalDetection.get() && !xaeroWaypoints.get()) return;
+        if (!xaeroIntegration.get()) return;
 
         List<WaypointEntry> entries = XaerosWaypointHelper.loadPortalWaypoints(dimensionId);
         for (WaypointEntry entry : entries) {
@@ -522,11 +507,11 @@ public class PortalTracker extends Module {
      * If the portal is gone the player is notified; if present it's silently
      * added to the live portals map for highlighting.
      *
-     * Runs entirely in the background — no UI blocking, capped at 5000 entries
+     * Runs entirely in the background — no UI blocking, capped at 50000 entries
      * per dimension to avoid watching millions of positions on large databases.
      */
     private void loadXaerosPlusPortals(String dimensionId) {
-        if (!xaerosPlusDetection.get()) return;
+        if (!xaeroIntegration.get()) return;
         if (!XaerosPlusPortalDB.isAvailable()) return;
 
         // Only load Nether portals from the DB — End portals/gateways are block
@@ -535,7 +520,7 @@ public class PortalTracker extends Module {
                 && !dimensionId.equals("minecraft:overworld")) return;
 
         List<XaerosPlusPortalDB.PortalEntry> entries =
-            XaerosPlusPortalDB.loadForDimension(dimensionId, 5000);
+            XaerosPlusPortalDB.loadForDimension(dimensionId, 50000);
 
         xaerosPlusWatchCount = 0;
         for (XaerosPlusPortalDB.PortalEntry entry : entries) {
@@ -738,7 +723,7 @@ public class PortalTracker extends Module {
             portalsDirty = true;
 
             // Write a Xaero waypoint for this newly discovered created portal.
-            if (xaeroWaypoints.get()) {
+            if (xaeroIntegration.get()) {
                 tryWriteXaeroWaypoint(pos, type, dimensionId);
             }
         }
@@ -887,7 +872,7 @@ public class PortalTracker extends Module {
 
             // If this was a Xaero-tracked portal, handle removal immediately via
             // a real block-update event — more reliable than waiting for chunk load.
-            if (xaeroRemovalDetection.get()) {
+            if (xaeroIntegration.get()) {
                 WaypointEntry entry = xaeroTrackedPortals.remove(event.pos);
                 if (entry != null) {
                     XaeroPortalBridge.unwatch(event.pos);
