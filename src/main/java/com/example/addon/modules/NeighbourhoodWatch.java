@@ -5,16 +5,15 @@ import java.util.List;
 import java.util.Set;
 
 import com.example.addon.HuntingUtilities;
+import com.example.addon.utils.GlowingRegistry;
 
 import meteordevelopment.meteorclient.events.game.GameJoinedEvent;
 import meteordevelopment.meteorclient.events.game.ReceiveMessageEvent;
 import meteordevelopment.meteorclient.events.packets.PacketEvent;
 import meteordevelopment.meteorclient.events.render.Render3DEvent;
 import meteordevelopment.meteorclient.events.world.TickEvent;
-import meteordevelopment.meteorclient.renderer.ShapeMode;
 import meteordevelopment.meteorclient.settings.BoolSetting;
 import meteordevelopment.meteorclient.settings.ColorSetting;
-import meteordevelopment.meteorclient.settings.EnumSetting;
 import meteordevelopment.meteorclient.settings.IntSetting;
 import meteordevelopment.meteorclient.settings.Setting;
 import meteordevelopment.meteorclient.settings.SettingGroup;
@@ -23,10 +22,14 @@ import meteordevelopment.meteorclient.settings.StringSetting;
 import meteordevelopment.meteorclient.systems.modules.Module;
 import meteordevelopment.meteorclient.utils.render.color.SettingColor;
 import meteordevelopment.orbit.EventHandler;
+import net.minecraft.entity.Entity;
 import net.minecraft.entity.player.PlayerEntity;
 import net.minecraft.network.packet.s2c.play.PlayerListS2CPacket;
+import net.minecraft.scoreboard.Scoreboard;
+import net.minecraft.scoreboard.Team;
 import net.minecraft.sound.SoundEvents;
 import net.minecraft.text.Text;
+import net.minecraft.util.Formatting;
 
 public class NeighbourhoodWatch extends Module {
 
@@ -153,14 +156,6 @@ public class NeighbourhoodWatch extends Module {
         .name("track-others")
         .description("Highlight unknown players in range.")
         .defaultValue(true)
-        .visible(trackPlayers::get)
-        .build()
-    );
-
-    private final Setting<ShapeMode> trackingShapeMode = sgTracking.add(new EnumSetting.Builder<ShapeMode>()
-        .name("shape-mode")
-        .description("How player highlight shapes are rendered.")
-        .defaultValue(ShapeMode.Lines)
         .visible(trackPlayers::get)
         .build()
     );
@@ -307,6 +302,7 @@ public class NeighbourhoodWatch extends Module {
     // ── State ─────────────────────────────────────────────────────────────────
 
     private final Set<Integer> notifiedPlayers    = new HashSet<>();
+    private final Set<Integer> highlightedPlayers = new HashSet<>();
     private final Set<String>  ignoredThisSession = new HashSet<>();
     private final Set<String>  playersInTab       = new HashSet<>();
     private final Set<String>  friendSet          = new HashSet<>();
@@ -330,6 +326,14 @@ public class NeighbourhoodWatch extends Module {
 
     @Override
     public void onDeactivate() {
+        if (mc.world != null) {
+            for (int id : highlightedPlayers) {
+                GlowingRegistry.remove(id);
+                Entity entity = mc.world.getEntityById(id);
+                if (entity != null) clearEntityTeam(entity);
+            }
+        }
+        highlightedPlayers.clear();
         resetState();
     }
 
@@ -344,7 +348,7 @@ public class NeighbourhoodWatch extends Module {
     private void onTick(TickEvent.Pre event) {
         if (mc.player == null || mc.world == null) return;
 
-        if (tickDisconnectOnPlayer()) return; // disconnected — stop processing this tick
+        if (tickDisconnectOnPlayer()) return;
         tickPlayerTracking();
     }
 
@@ -352,29 +356,52 @@ public class NeighbourhoodWatch extends Module {
     private void onRender(Render3DEvent event) {
         if (!trackPlayers.get() || mc.world == null || mc.player == null) return;
 
+        Set<Integer> currentlyVisible = new HashSet<>();
+
         for (PlayerEntity player : mc.world.getPlayers()) {
             if (player == mc.player || player.isSpectator()) continue;
             if (mc.player.distanceTo(player) > trackRange.get()) continue;
 
-            SettingColor color = switch (getPlayerStatus(player.getName().getString())) {
-                case Friend -> trackFriends.get() ? friendColor.get() : null;
-                case Enemy  -> trackEnemies.get() ? enemyColor.get()  : null;
-                case Proxy  -> trackProxies.get() ? proxyColor.get()  : null;
-                case Other  -> trackOthers.get()  ? otherColor.get()  : null;
+            String name = player.getName().getString();
+            PlayerStatus status = getPlayerStatus(name);
+
+            boolean shouldHighlight = switch (status) {
+                case Friend -> trackFriends.get();
+                case Enemy  -> trackEnemies.get();
+                case Proxy  -> trackProxies.get();
+                case Other  -> trackOthers.get();
+            };
+            if (!shouldHighlight) continue;
+
+            SettingColor color = switch (status) {
+                case Friend -> friendColor.get();
+                case Enemy  -> enemyColor.get();
+                case Proxy  -> proxyColor.get();
+                case Other  -> otherColor.get();
             };
 
-            if (color != null) {
-                event.renderer.box(player.getBoundingBox(), color, color, trackingShapeMode.get(), 0);
-            }
+            currentlyVisible.add(player.getId());
+            highlightedPlayers.add(player.getId());
+            GlowingRegistry.add(player.getId());
+            setEntityTeam(player, getNearestColor(color));
         }
+
+        // Remove glow from players no longer in range
+        highlightedPlayers.removeIf(id -> {
+            if (!currentlyVisible.contains(id)) {
+                GlowingRegistry.remove(id);
+                Entity entity = mc.world.getEntityById(id);
+                if (entity != null) clearEntityTeam(entity);
+                return true;
+            }
+            return false;
+        });
     }
 
     @EventHandler
     private void onPacketReceive(PacketEvent.Receive event) {
         if (!monitorTabList.get() || !(event.packet instanceof PlayerListS2CPacket packet)) return;
 
-        // Note: Some servers (e.g., Paper) use UPDATE_LISTED with listed=false
-        // to signify a player leaving, instead of the REMOVE_PLAYER action.
         for (PlayerListS2CPacket.Entry entry : packet.getEntries()) {
             if (entry.profile() == null) continue;
             String name = entry.profile().getName();
@@ -401,10 +428,6 @@ public class NeighbourhoodWatch extends Module {
 
     // ── Tick Logic ────────────────────────────────────────────────────────────
 
-    /**
-     * @return true if a disconnect was triggered
-     */
-    /** @return true if a disconnect was triggered */
     private boolean tickDisconnectOnPlayer() {
         if (!disconnectOnPlayer.get()) return false;
 
@@ -454,11 +477,8 @@ public class NeighbourhoodWatch extends Module {
             messageBody = rawMessage.substring(close + 1).trim();
         } else {
             int colon = rawMessage.indexOf(':');
-            // Check for a colon, but not too far in, to avoid parsing non-chat messages.
-            // Minecraft names are max 16 chars, so 20 is a safe upper bound.
             if (colon < 1 || colon >= 20) return;
             String possibleName = rawMessage.substring(0, colon);
-            // Ensure there are no spaces in the potential sender name.
             if (possibleName.contains(" ")) return;
             sender      = possibleName.trim();
             messageBody = rawMessage.substring(colon + 1).trim();
@@ -473,10 +493,7 @@ public class NeighbourhoodWatch extends Module {
             if (keyword.isBlank()) continue;
             String body = ignoreCaseSensitive.get() ? messageBody : messageBody.toLowerCase();
             String kw   = ignoreCaseSensitive.get() ? keyword     : keyword.toLowerCase();
-            if (body.contains(kw)) {
-                matched = true;
-                break;
-            }
+            if (body.contains(kw)) { matched = true; break; }
         }
         if (!matched) return;
 
@@ -487,7 +504,6 @@ public class NeighbourhoodWatch extends Module {
 
     // ── Helpers ───────────────────────────────────────────────────────────────
 
-    /** Clears all transient session state. */
     private void resetState() {
         notifiedPlayers.clear();
         ignoredThisSession.clear();
@@ -525,33 +541,60 @@ public class NeighbourhoodWatch extends Module {
 
     private void updateFriendEnemySets() {
         friendSet.clear();
-        for (String name : friends.get()) {
-            friendSet.add(name.toLowerCase());
-        }
+        for (String name : friends.get()) friendSet.add(name.toLowerCase());
         enemySet.clear();
-        for (String name : enemies.get()) {
-            enemySet.add(name.toLowerCase());
-        }
+        for (String name : enemies.get()) enemySet.add(name.toLowerCase());
         proxySet.clear();
-        for (String name : proxies.get()) {
-            proxySet.add(name.toLowerCase());
+        for (String name : proxies.get()) proxySet.add(name.toLowerCase());
+    }
+
+    // ── Team / Colour Helpers ─────────────────────────────────────────────────
+
+    private Formatting getNearestColor(SettingColor color) {
+        Formatting best = Formatting.WHITE;
+        double minDist = Double.MAX_VALUE;
+        for (Formatting f : Formatting.values()) {
+            if (!f.isColor()) continue;
+            Integer rgb = f.getColorValue();
+            if (rgb == null) continue;
+            int r = (rgb >> 16) & 0xFF;
+            int g = (rgb >>  8) & 0xFF;
+            int b =  rgb        & 0xFF;
+            double dist = Math.pow(r - color.r, 2)
+                        + Math.pow(g - color.g, 2)
+                        + Math.pow(b - color.b, 2);
+            if (dist < minDist) { minDist = dist; best = f; }
+        }
+        return best;
+    }
+
+    private void setEntityTeam(Entity entity, Formatting color) {
+        Scoreboard scoreboard = mc.world.getScoreboard();
+        String teamName = "nwatch_" + color.getName();
+        Team team = scoreboard.getTeam(teamName);
+        if (team == null) {
+            team = scoreboard.addTeam(teamName);
+            team.setColor(color);
+        }
+        if (entity.getScoreboardTeam() == null
+                || !entity.getScoreboardTeam().getName().equals(teamName)) {
+            scoreboard.addScoreHolderToTeam(entity.getNameForScoreboard(), team);
         }
     }
 
-    public boolean isFriend(String name) {
-        if (name == null) return false;
-        return friendSet.contains(name.toLowerCase());
+    private void clearEntityTeam(Entity entity) {
+        Scoreboard scoreboard = mc.world.getScoreboard();
+        Team currentTeam = entity.getScoreboardTeam();
+        if (currentTeam != null && currentTeam.getName().startsWith("nwatch_")) {
+            scoreboard.removeScoreHolderFromTeam(entity.getNameForScoreboard(), currentTeam);
+        }
     }
 
-    public boolean isEnemy(String name) {
-        if (name == null) return false;
-        return enemySet.contains(name.toLowerCase());
-    }
+    // ── Public API ────────────────────────────────────────────────────────────
 
-    public boolean isProxy(String name) {
-        if (name == null) return false;
-        return proxySet.contains(name.toLowerCase());
-    }
+    public boolean isFriend(String name) { return name != null && friendSet.contains(name.toLowerCase()); }
+    public boolean isEnemy(String name)  { return name != null && enemySet.contains(name.toLowerCase()); }
+    public boolean isProxy(String name)  { return name != null && proxySet.contains(name.toLowerCase()); }
 
     private PlayerStatus getPlayerStatus(String name) {
         if (isFriend(name)) return PlayerStatus.Friend;
