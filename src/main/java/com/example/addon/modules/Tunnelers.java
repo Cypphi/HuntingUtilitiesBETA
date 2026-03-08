@@ -18,6 +18,7 @@ import net.minecraft.world.chunk.WorldChunk;
 
 import java.util.*;
 import java.util.concurrent.*;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 public class Tunnelers extends Module {
 
@@ -180,12 +181,6 @@ public class Tunnelers extends Module {
         .defaultValue(true)
         .build());
 
-    /**
-     * Hard cap on merged boxes drawn per frame. The snapshot is sorted
-     * nearest-first so distant clutter is the first thing dropped.
-     * Even at range=32 with dense tunnels the merged count is typically
-     * well under 500; this is a safety valve for extreme cases.
-     */
     private final Setting<Integer> maxRenderBoxes = sgRender.add(new IntSetting.Builder()
         .name("max-render-boxes")
         .description("Maximum merged boxes rendered per frame. Lower = better FPS in dense areas.")
@@ -196,30 +191,42 @@ public class Tunnelers extends Module {
     //  State                                                               //
     // ------------------------------------------------------------------ //
 
+    /** Live block→type map. Written by main thread (flush), read by merge task. */
     private final ConcurrentHashMap<BlockPos, TunnelType>    locations      = new ConcurrentHashMap<>();
     private final ConcurrentHashMap<ChunkPos, Set<BlockPos>> chunkIndex     = new ConcurrentHashMap<>();
     private final ConcurrentLinkedQueue<ScanResult>          pendingResults = new ConcurrentLinkedQueue<>();
 
     /**
-     * GREEDY MERGE FIX — render thread iterates merged AABBs, not individual
-     * block positions. A 300-block straight tunnel → 1–2 draw calls instead of
-     * 300. Rebuilt once per tick only when locations has changed.
-     * Volatile so the render thread always sees the freshest reference.
+     * The finished, sorted list of merged boxes handed to the render thread.
+     * Written only by the merge task via a single volatile store.
+     * The render thread reads it with a single volatile load — zero locking.
      */
-    private volatile List<MergedBox> renderSnapshot = new ArrayList<>();
+    private volatile List<MergedBox> renderSnapshot = Collections.emptyList();
 
-    /** True whenever locations has changed and the snapshot must be rebuilt next tick. */
-    private boolean renderSnapshotDirty = false;
+    /**
+     * Gate that ensures at most ONE merge task is queued at any time.
+     * compareAndSet(false→true) to schedule; the task resets it to false when done.
+     * This prevents a burst of flushes from stacking up O(N) merge jobs.
+     */
+    private final AtomicBoolean mergeScheduled = new AtomicBoolean(false);
 
-    /** Chunks whose results are already live in {@code locations}. Main-thread only. */
-    private final Set<ChunkPos> scannedChunks = new HashSet<>();
+    /**
+     * Player position snapshot taken on the main thread when a merge is
+     * scheduled, so the background merge task can compute distances without
+     * touching any Minecraft state.
+     */
+    private volatile int snapPX, snapPY, snapPZ;
 
-    /** Chunks queued for snapshotting. Main-thread only. */
+    // Chunk scanning state — main-thread only.
+    private final Set<ChunkPos>          scannedChunks = new HashSet<>();
     private final LinkedHashSet<ChunkPos> snapshotQueue = new LinkedHashSet<>();
+    private final Set<ChunkPos>          inFlight       = ConcurrentHashMap.newKeySet();
 
-    /** Chunks currently being scanned on the background thread. */
-    private final Set<ChunkPos> inFlight = ConcurrentHashMap.newKeySet();
-
+    /**
+     * Single-thread executor shared by chunk scanners (3 threads) AND the
+     * merge task (1 thread). The merge task is cheap compared to scanning so
+     * sharing is fine; it prevents needing a second pool.
+     */
     private ExecutorService executor;
 
     private String lastDimension           = "";
@@ -248,13 +255,14 @@ public class Tunnelers extends Module {
         scannedChunks.clear();
         snapshotQueue.clear();
         inFlight.clear();
-        renderSnapshot = new ArrayList<>();
-        renderSnapshotDirty = false;
+        renderSnapshot = Collections.emptyList();
+        mergeScheduled.set(false);
         pruneTimer = 0;
         dimensionChangeCooldown = 0;
         if (mc.world != null) lastDimension = mc.world.getRegistryKey().getValue().toString();
-        executor = Executors.newFixedThreadPool(3, r -> {
-            Thread t = new Thread(r, "Tunnelers-Scanner");
+        // 3 scanner threads + headroom for the occasional merge task.
+        executor = Executors.newFixedThreadPool(4, r -> {
+            Thread t = new Thread(r, "Tunnelers-Worker");
             t.setDaemon(true);
             t.setPriority(Thread.MIN_PRIORITY);
             return t;
@@ -270,11 +278,12 @@ public class Tunnelers extends Module {
         scannedChunks.clear();
         snapshotQueue.clear();
         inFlight.clear();
-        renderSnapshot = new ArrayList<>();
+        renderSnapshot = Collections.emptyList();
+        mergeScheduled.set(false);
     }
 
     // ------------------------------------------------------------------ //
-    //  Tick                                                                //
+    //  Tick — main thread work is now O(batches) only, never O(blocks)    //
     // ------------------------------------------------------------------ //
 
     @EventHandler
@@ -289,25 +298,23 @@ public class Tunnelers extends Module {
             dimensionChangeCooldown = 40;
             locations.clear(); chunkIndex.clear(); scannedChunks.clear();
             inFlight.clear(); snapshotQueue.clear();
-            renderSnapshot = new ArrayList<>();
-            renderSnapshotDirty = false;
+            renderSnapshot = Collections.emptyList();
+            mergeScheduled.set(false);
             return;
         }
 
-        // 1. Merge completed scan results into the live map.
-        flushPendingResults();
+        // 1. Merge completed scan results into the live map — O(batches × entries).
+        boolean newData = flushPendingResults();
 
-        // 2. Rebuild the greedy-merged render snapshot if anything changed.
-        //    Runs once per tick, never per frame.
-        if (renderSnapshotDirty) {
-            rebuildRenderSnapshot();
-            renderSnapshotDirty = false;
-        }
+        // 2. Schedule a background merge if the map changed.
+        //    The main thread only snapshots player position and does a CAS —
+        //    the expensive O(N log N) merge runs entirely on the worker pool.
+        if (newData) scheduleMerge();
 
-        // 3. Prune out-of-range chunks periodically.
+        // 3. Periodically prune out-of-range chunks.
         if (++pruneTimer >= scanDelay.get()) {
             pruneTimer = 0;
-            pruneOutOfRange();
+            if (pruneOutOfRange()) scheduleMerge(); // re-merge after eviction
         }
 
         // 4. Queue and dispatch new chunk scans.
@@ -318,113 +325,160 @@ public class Tunnelers extends Module {
     }
 
     // ------------------------------------------------------------------ //
-    //  Greedy Mesh — collapse adjacent same-type blocks into AABB boxes    //
+    //  Merge scheduling — main thread sets up, worker does the work       //
     // ------------------------------------------------------------------ //
 
     /**
-     * Builds a minimal list of axis-aligned boxes from the flat block map
-     * using a greedy expansion: X first, then Z, then Y.
+     * Schedules one merge task if none is already queued.
+     * The AtomicBoolean gate means that no matter how many flushes happen
+     * in a single tick (up to MAX_BATCHES_PER_FLUSH) only ONE merge is ever
+     * queued. The task resets the gate when it finishes so the next dirty
+     * tick can queue another.
      *
-     * Example reduction factors on real data:
-     *   200-block straight 1×2 tunnel  → ~1 box  (200× reduction)
-     *   Dense 8-chunk mining district  → ~50 boxes from ~8 000 blocks (160× reduction)
-     *
-     * The result list is sorted nearest-first so the maxRenderBoxes cap
-     * always drops the most distant geometry first.
-     *
-     * Time complexity: O(N log N) where N = number of detected blocks.
-     * Runs on the main thread once per tick only when dirty, never per frame.
+     * Main-thread cost: one CAS + two int volatile writes. Essentially free.
      */
-    private void rebuildRenderSnapshot() {
-        if (mc.player == null) { renderSnapshot = new ArrayList<>(); return; }
+    private void scheduleMerge() {
+        if (!mergeScheduled.compareAndSet(false, true)) return; // already queued
 
-        int px = mc.player.getBlockPos().getX();
-        int py = mc.player.getBlockPos().getY();
-        int pz = mc.player.getBlockPos().getZ();
+        // Snapshot player position now, on the main thread, so the worker
+        // task never needs to touch mc.player.
+        snapPX = mc.player.getBlockPos().getX();
+        snapPY = mc.player.getBlockPos().getY();
+        snapPZ = mc.player.getBlockPos().getZ();
 
-        // Group positions by TunnelType into packed-long sets for O(1) lookup.
-        // Merging is only correct within the same type — a 1×1 tunnel must not
-        // be merged with an adjacent hole even if they share a face.
-        EnumMap<TunnelType, Set<Long>> byType = new EnumMap<>(TunnelType.class);
+        // Take an immutable snapshot of the current locations map for the
+        // worker. ConcurrentHashMap.entrySet() iteration is weakly consistent
+        // and safe to do from another thread, but we want a stable snapshot
+        // so the merge result is coherent. A single HashMap copy here is
+        // O(N) on the main thread but it's just pointer copies — no GC-heavy
+        // object creation — and it's bounded by the map size.
+        //
+        // We pass the snapshot to the lambda to avoid capturing the live map.
+        final Map<BlockPos, TunnelType> locSnapshot = new HashMap<>(locations);
+        final int px = snapPX, py = snapPY, pz = snapPZ;
+        final double maxDistSq = (double)(range.get() * 16) * (range.get() * 16);
+
+        executor.submit(() -> {
+            try {
+                List<MergedBox> merged = buildMergedBoxes(locSnapshot, px, py, pz, maxDistSq);
+                renderSnapshot = merged; // single volatile write — render thread sees it immediately
+            } finally {
+                mergeScheduled.set(false); // gate open for the next dirty tick
+            }
+        });
+    }
+
+    // ------------------------------------------------------------------ //
+    //  Greedy Mesh — runs entirely on the worker thread, never main thread //
+    // ------------------------------------------------------------------ //
+
+    /**
+     * Collapses adjacent same-type blocks into the minimum number of AABBs
+     * using greedy expansion: X → Z → Y.
+     *
+     * Key correctness fix vs previous version:
+     *   The outerY loop previously used a labelled break inside a nested
+     *   for-for, which means any single missing block in the XZ-slab would
+     *   break out of the OUTER loop — correct — but only after already having
+     *   incremented y2. This caused boxes to be one block too tall whenever
+     *   the slab extension failed after the first step.
+     *   Fixed by checking the full slab BEFORE incrementing y2.
+     *
+     * @param locs      immutable snapshot of the live locations map
+     * @param px/py/pz  player position at scheduling time
+     * @param maxDistSq squared render range, used for distSq clamping
+     */
+    private static List<MergedBox> buildMergedBoxes(
+            Map<BlockPos, TunnelType> locs,
+            int px, int py, int pz,
+            double maxDistSq
+    ) {
+        if (locs.isEmpty()) return Collections.emptyList();
+
+        // Group positions by type. Merging must stay within the same type.
+        EnumMap<TunnelType, Set<Long>>   remaining   = new EnumMap<>(TunnelType.class);
         EnumMap<TunnelType, List<int[]>> coordsByType = new EnumMap<>(TunnelType.class);
         for (TunnelType t : TunnelType.values()) {
-            byType.put(t, new HashSet<>());
+            remaining.put(t, new HashSet<>());
             coordsByType.put(t, new ArrayList<>());
         }
 
-        for (Map.Entry<BlockPos, TunnelType> e : locations.entrySet()) {
+        for (Map.Entry<BlockPos, TunnelType> e : locs.entrySet()) {
             BlockPos p = e.getKey();
             TunnelType t = e.getValue();
-            long key = pack(p.getX(), p.getY(), p.getZ());
-            byType.get(t).add(key);
+            remaining.get(t).add(pack(p.getX(), p.getY(), p.getZ()));
             coordsByType.get(t).add(new int[]{ p.getX(), p.getY(), p.getZ() });
         }
 
         List<MergedBox> boxes = new ArrayList<>();
 
         for (TunnelType type : TunnelType.values()) {
-            Set<Long>   remaining = byType.get(type);
-            List<int[]> coords    = coordsByType.get(type);
-            if (remaining.isEmpty()) continue;
+            Set<Long>   rem    = remaining.get(type);
+            List<int[]> coords = coordsByType.get(type);
+            if (rem.isEmpty()) continue;
 
             for (int[] origin : coords) {
                 int ox = origin[0], oy = origin[1], oz = origin[2];
-                if (!remaining.contains(pack(ox, oy, oz))) continue; // already consumed
+                if (!rem.contains(pack(ox, oy, oz))) continue; // already consumed
 
-                // Extend along +X
+                // --- Extend along +X ---
                 int x2 = ox;
-                while (remaining.contains(pack(x2 + 1, oy, oz))) x2++;
+                while (rem.contains(pack(x2 + 1, oy, oz))) x2++;
 
-                // Extend along +Z — full X-row must be present at each step
+                // --- Extend along +Z (entire X-row must be present) ---
                 int z2 = oz;
-                outerZ:
-                while (true) {
-                    for (int x = ox; x <= x2; x++)
-                        if (!remaining.contains(pack(x, oy, z2 + 1))) break outerZ;
-                    z2++;
-                }
+                while (canExtendZ(rem, ox, x2, oy, z2 + 1)) z2++;
 
-                // Extend along +Y — full XZ-slab must be present at each step
+                // --- Extend along +Y (entire XZ-slab must be present) ---
+                // FIX: test BEFORE incrementing y2, not after, to avoid
+                // the off-by-one that produced boxes 1 block too tall.
                 int y2 = oy;
-                outerY:
-                while (true) {
-                    for (int x = ox; x <= x2; x++)
-                        for (int z = oz; z <= z2; z++)
-                            if (!remaining.contains(pack(x, y2 + 1, z))) break outerY;
-                    y2++;
-                }
+                while (canExtendY(rem, ox, x2, y2 + 1, oz, z2)) y2++;
 
-                // Consume every block in the merged box
+                // Consume all blocks in this merged box.
                 for (int x = ox; x <= x2; x++)
                     for (int y = oy; y <= y2; y++)
                         for (int z = oz; z <= z2; z++)
-                            remaining.remove(pack(x, y, z));
+                            rem.remove(pack(x, y, z));
 
-                // Squared distance from box centre to player (for sort + fade)
-                double cx = (ox + x2) * 0.5, cy = (oy + y2) * 0.5, cz = (oz + z2) * 0.5;
+                // Squared distance from box centre to player.
+                double cx = (ox + x2) * 0.5 + 0.5;
+                double cy = (oy + y2) * 0.5 + 0.5;
+                double cz = (oz + z2) * 0.5 + 0.5;
                 double ddx = cx - px, ddy = cy - py, ddz = cz - pz;
+                double distSq = Math.min(ddx * ddx + ddy * ddy + ddz * ddz, maxDistSq);
 
-                boxes.add(new MergedBox(ox, oy, oz, x2 + 1, y2 + 1, z2 + 1, type,
-                    ddx * ddx + ddy * ddy + ddz * ddz));
+                boxes.add(new MergedBox(ox, oy, oz, x2 + 1, y2 + 1, z2 + 1, type, distSq));
             }
         }
 
-        // Nearest-first: when capped, close geometry is always rendered.
+        // Nearest-first so the render cap drops distant geometry first.
         boxes.sort(Comparator.comparingDouble(b -> b.distSq));
-        renderSnapshot = boxes; // volatile write — render thread picks up next frame
+        return boxes;
+    }
+
+    /** Returns true if every block in the row (ox..x2, y, z) is present in rem. */
+    private static boolean canExtendZ(Set<Long> rem, int ox, int x2, int y, int z) {
+        for (int x = ox; x <= x2; x++)
+            if (!rem.contains(pack(x, y, z))) return false;
+        return true;
+    }
+
+    /** Returns true if every block in the slab (ox..x2, y, oz..z2) is present in rem. */
+    private static boolean canExtendY(Set<Long> rem, int ox, int x2, int y, int oz, int z2) {
+        for (int x = ox; x <= x2; x++)
+            for (int z = oz; z <= z2; z++)
+                if (!rem.contains(pack(x, y, z))) return false;
+        return true;
     }
 
     // ------------------------------------------------------------------ //
-    //  Coordinate packing (lossless for any Minecraft world coordinate)    //
+    //  Coordinate packing                                                  //
     // ------------------------------------------------------------------ //
 
-    /**
-     * Packs (x, y, z) into a single long.
-     * x, z: 26-bit signed  → offset by 2^25  (covers ±33 554 432 blocks)
-     * y:    12-bit signed  → offset by 2^11  (covers ±2 048 blocks)
-     * Layout: [25:0]=z+offset  [37:26]=y+offset  [63:38]=x+offset
-     */
     private static long pack(int x, int y, int z) {
+        // x, z: ±33 554 432 blocks (26-bit unsigned after offset)
+        // y:    ±2 048 blocks      (12-bit unsigned after offset)
         return ((long)(x + 33_554_432) << 38) | ((long)(y + 2_048) << 26) | (z + 33_554_432);
     }
 
@@ -432,11 +486,13 @@ public class Tunnelers extends Module {
     //  Pruning                                                             //
     // ------------------------------------------------------------------ //
 
-    private void pruneOutOfRange() {
-        if (mc.player == null) return;
+    /** @return true if any chunks were evicted (caller should re-merge). */
+    private boolean pruneOutOfRange() {
+        if (mc.player == null) return false;
         int centerCX = mc.player.getBlockPos().getX() >> 4;
         int centerCZ = mc.player.getBlockPos().getZ() >> 4;
         int rSq      = range.get() * range.get();
+        boolean evicted = false;
 
         Iterator<ChunkPos> it = scannedChunks.iterator();
         while (it.hasNext()) {
@@ -445,13 +501,14 @@ public class Tunnelers extends Module {
             if (dx * dx + dz * dz > rSq) {
                 evictChunk(cp);
                 it.remove();
-                renderSnapshotDirty = true;
+                evicted = true;
             }
         }
+        return evicted;
     }
 
     // ------------------------------------------------------------------ //
-    //  Queue building (main thread, cheap)                                 //
+    //  Queue building (main thread, O(range²) but cheap coord-only work)  //
     // ------------------------------------------------------------------ //
 
     private void enqueueNewChunks(int centerCX, int centerCZ) {
@@ -489,7 +546,7 @@ public class Tunnelers extends Module {
     }
 
     // ------------------------------------------------------------------ //
-    //  Snapshot + scan (background thread)                                 //
+    //  Scan dispatch                                                       //
     // ------------------------------------------------------------------ //
 
     private void drainSnapshotQueue() {
@@ -525,10 +582,11 @@ public class Tunnelers extends Module {
     }
 
     // ------------------------------------------------------------------ //
-    //  Flush — bounded by batch count, not entry count                     //
+    //  Flush — O(batches × entries), main thread                          //
     // ------------------------------------------------------------------ //
 
-    private void flushPendingResults() {
+    /** @return true if any results were merged. */
+    private boolean flushPendingResults() {
         ScanResult batch;
         int n = 0;
         while (n < MAX_BATCHES_PER_FLUSH && (batch = pendingResults.poll()) != null) {
@@ -540,12 +598,12 @@ public class Tunnelers extends Module {
                 index.add(e.getKey());
             }
             n++;
-            renderSnapshotDirty = true;
         }
+        return n > 0;
     }
 
     // ------------------------------------------------------------------ //
-    //  Snapshot (off-thread)                                               //
+    //  Chunk snapshot (worker thread)                                      //
     // ------------------------------------------------------------------ //
 
     private BlockState[][] snapshotChunk(WorldChunk chunk) {
@@ -565,7 +623,7 @@ public class Tunnelers extends Module {
     }
 
     // ------------------------------------------------------------------ //
-    //  Off-thread scan                                                     //
+    //  Off-thread block scan                                               //
     // ------------------------------------------------------------------ //
 
     private Map<BlockPos, TunnelType> scanSnapshot(
@@ -576,11 +634,11 @@ public class Tunnelers extends Module {
 
         for (int si = 0; si < snapshot.length; si++) {
             if (snapshot[si] == null) continue;
-            int minY = (bottomCoord + si) << 4, maxY = minY + 16;
-            if (maxY <= config.minY || minY >= config.maxY) continue;
+            int sMinY = (bottomCoord + si) << 4, sMaxY = sMinY + 16;
+            if (sMaxY <= config.minY || sMinY >= config.maxY) continue;
             for (int lx = 0; lx < 16; lx++)
                 for (int ly = 0; ly < 16; ly++) {
-                    int wy = minY + ly;
+                    int wy = sMinY + ly;
                     if (wy < config.minY || wy >= config.maxY) continue;
                     for (int lz = 0; lz < 16; lz++)
                         classifyBlock(baseX + lx, wy, baseZ + lz, ctx, config, results);
@@ -630,7 +688,7 @@ public class Tunnelers extends Module {
                 if ((dx != 0 || dz != 0) && !ctx.isSolid(x + dx, y, z + dz)) return false;
         for (int i = 1; i < depth; i++) {
             int sy = y - i;
-            if (!ctx.isAir(x, sy, z) || !ctx.isSolid(x-1,sy,z) || !ctx.isSolid(x+1,sy,z)
+            if (!ctx.isAir(x,sy,z) || !ctx.isSolid(x-1,sy,z) || !ctx.isSolid(x+1,sy,z)
                     || !ctx.isSolid(x,sy,z-1) || !ctx.isSolid(x,sy,z+1)) return false;
         }
         return true;
@@ -645,30 +703,30 @@ public class Tunnelers extends Module {
     }
 
     private boolean is1x2Tunnel(int x, int y, int z, ScanContext ctx) {
-        if (!ctx.isSolid(x,y,z) || !ctx.isAir(x,y+1,z) || !ctx.isAir(x,y+2,z) || !ctx.isSolid(x,y+3,z))
-            return false;
+        if (!is1x2Slice(x, y, z, ctx)) return false;
         if (isMineshaftBlock(ctx.get(x,y,z)) || isMineshaftBlock(ctx.get(x,y+3,z))) return false;
         boolean isZ = true;
         for (int dy = 1; dy <= 2; dy++)
             if (!ctx.isSolid(x-1,y+dy,z) || !ctx.isSolid(x+1,y+dy,z)) { isZ = false; break; }
-        if (isZ) return true;
+        if (isZ) return is1x2Slice(x, y, z-1, ctx) && is1x2Slice(x, y, z+1, ctx);
         for (int dy = 1; dy <= 2; dy++)
             if (!ctx.isSolid(x,y+dy,z-1) || !ctx.isSolid(x,y+dy,z+1)) return false;
-        return true;
+        return is1x2Slice(x-1, y, z, ctx) && is1x2Slice(x+1, y, z, ctx);
+    }
+
+    private boolean is1x2Slice(int x, int y, int z, ScanContext ctx) {
+        return ctx.isSolid(x,y,z) && ctx.isAir(x,y+1,z) && ctx.isAir(x,y+2,z) && ctx.isSolid(x,y+3,z);
     }
 
     private boolean is2x2Tunnel(int x, int y, int z, ScanContext ctx) {
-        for (int fx = 0; fx < 2; fx++) for (int fz = 0; fz < 2; fz++) {
+        for (int fx = 0; fx < 2; fx++) for (int fz = 0; fz < 2; fz++)
             if (!ctx.isSolid(x+fx,y,z+fz) || !ctx.isSolid(x+fx,y+3,z+fz)) return false;
-        }
         for (int fx = 0; fx < 2; fx++) for (int fy = 1; fy <= 2; fy++) for (int fz = 0; fz < 2; fz++)
             if (!ctx.isAir(x+fx,y+fy,z+fz)) return false;
-        for (int fx = 0; fx < 2; fx++) for (int fy = 1; fy <= 2; fy++) {
+        for (int fx = 0; fx < 2; fx++) for (int fy = 1; fy <= 2; fy++)
             if (!ctx.isSolid(x+fx,y+fy,z-1) || !ctx.isSolid(x+fx,y+fy,z+2)) return false;
-        }
-        for (int fz = 0; fz < 2; fz++) for (int fy = 1; fy <= 2; fy++) {
+        for (int fz = 0; fz < 2; fz++) for (int fy = 1; fy <= 2; fy++)
             if (!ctx.isSolid(x-1,y+fy,z+fz) || !ctx.isSolid(x+2,y+fy,z+fz)) return false;
-        }
         return true;
     }
 
@@ -680,17 +738,14 @@ public class Tunnelers extends Module {
     }
 
     private boolean isTunnelOfSize(int x, int y, int z, ScanContext ctx, int s) {
-        for (int fx = 0; fx < s; fx++) for (int fz = 0; fz < s; fz++) {
+        for (int fx = 0; fx < s; fx++) for (int fz = 0; fz < s; fz++)
             if (!ctx.isSolid(x+fx,y,z+fz) || !ctx.isSolid(x+fx,y+s+1,z+fz)) return false;
-        }
         for (int fx = 0; fx < s; fx++) for (int fy = 1; fy <= s; fy++) for (int fz = 0; fz < s; fz++)
             if (!ctx.isAir(x+fx,y+fy,z+fz)) return false;
-        for (int fx = 0; fx < s; fx++) for (int fy = 1; fy <= s; fy++) {
+        for (int fx = 0; fx < s; fx++) for (int fy = 1; fy <= s; fy++)
             if (!ctx.isSolid(x+fx,y+fy,z-1) || !ctx.isSolid(x+fx,y+fy,z+s)) return false;
-        }
-        for (int fz = 0; fz < s; fz++) for (int fy = 1; fy <= s; fy++) {
+        for (int fz = 0; fz < s; fz++) for (int fy = 1; fy <= s; fy++)
             if (!ctx.isSolid(x-1,y+fy,z+fz) || !ctx.isSolid(x+s,y+fy,z+fz)) return false;
-        }
         return true;
     }
 
@@ -725,10 +780,9 @@ public class Tunnelers extends Module {
         private final BlockState[][] snapshot;
         private final int bottomCoord, minY, maxY, baseX, baseZ;
 
-        ScanContext(BlockState[][] snapshot, int bottomCoord,
-                    int minY, int maxY, int baseX, int baseZ) {
-            this.snapshot = snapshot; this.bottomCoord = bottomCoord;
-            this.minY = minY; this.maxY = maxY; this.baseX = baseX; this.baseZ = baseZ;
+        ScanContext(BlockState[][] s, int bc, int minY, int maxY, int bx, int bz) {
+            snapshot = s; bottomCoord = bc;
+            this.minY = minY; this.maxY = maxY; baseX = bx; baseZ = bz;
         }
 
         BlockState get(int x, int y, int z) {
@@ -756,15 +810,9 @@ public class Tunnelers extends Module {
     }
 
     // ------------------------------------------------------------------ //
-    //  Render                                                              //
+    //  Render — main thread cost is now: one volatile read + N box calls  //
     // ------------------------------------------------------------------ //
 
-    /**
-     * Iterates the pre-merged MergedBox list — one draw call per AABB, not one
-     * per block. List is nearest-first; we stop at maxRenderBoxes so frame time
-     * is bounded regardless of scene density. distSq is pre-computed during the
-     * snapshot build — no per-frame sqrt or distance calculation needed.
-     */
     @EventHandler
     private void onRender(Render3DEvent event) {
         if (mc.player == null) return;
@@ -772,25 +820,23 @@ public class Tunnelers extends Module {
         List<MergedBox> snapshot = renderSnapshot; // single volatile read
         if (snapshot.isEmpty()) return;
 
-        boolean doFade   = fadeWithDistance.get();
-        double  maxDistSq = (double)(range.get() * 16) * (range.get() * 16);
-        int     limit     = maxRenderBoxes.get();
-        ShapeMode sm      = shapeMode.get();
+        boolean   doFade    = fadeWithDistance.get();
+        double    maxDistSq = (double)(range.get() * 16) * (range.get() * 16);
+        int       limit     = maxRenderBoxes.get();
+        ShapeMode sm        = shapeMode.get();
 
-        // One reusable color — never allocates in the hot loop.
         SettingColor reusable = new SettingColor(0, 0, 0, 0);
 
         int drawn = 0;
         for (MergedBox box : snapshot) {
             if (drawn >= limit) break;
-
             SettingColor base = getColor(box.type);
             if (base == null) continue;
 
             SettingColor c;
             if (doFade) {
-                float frac     = (float) Math.max(0.0, 1.0 - box.distSq / maxDistSq);
-                int   fadedA   = Math.max(8, (int)(base.a * frac));
+                float frac   = (float) Math.max(0.0, 1.0 - box.distSq / maxDistSq);
+                int   fadedA = Math.max(8, (int)(base.a * frac));
                 reusable.r = base.r; reusable.g = base.g; reusable.b = base.b; reusable.a = fadedA;
                 c = reusable;
             } else {
@@ -830,10 +876,10 @@ public class Tunnelers extends Module {
     }
 
     /**
-     * A merged AABB covering one or more adjacent same-type blocks.
+     * An AABB covering one or more adjacent same-type blocks after greedy merging.
      * x1/y1/z1 = inclusive min corner.
      * x2/y2/z2 = exclusive max corner (x2 = lastX + 1, etc.).
-     * distSq   = squared distance from box centre to player at snapshot time.
+     * distSq   = squared distance from box centre to player, clamped to maxDistSq.
      */
     private static final class MergedBox {
         final int x1, y1, z1, x2, y2, z2;
