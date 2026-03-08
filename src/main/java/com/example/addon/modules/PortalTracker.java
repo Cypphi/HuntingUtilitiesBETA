@@ -14,6 +14,7 @@ import com.example.addon.HuntingUtilities;
 import com.example.addon.utils.XaeroPortalBridge;
 import com.example.addon.utils.XaerosWaypointHelper;
 import com.example.addon.utils.XaerosWaypointHelper.WaypointEntry;
+import com.example.addon.utils.XaerosPlusPortalDB;
 
 import meteordevelopment.meteorclient.events.render.Render3DEvent;
 import meteordevelopment.meteorclient.events.world.BlockUpdateEvent;
@@ -177,6 +178,13 @@ public class PortalTracker extends Module {
         .build()
     );
 
+    private final Setting<Boolean> xaerosPlusDetection = sgGeneral.add(new BoolSetting.Builder()
+        .name("xaerosplus-detection")
+        .description("Load portal positions from XaeroPlus's portal database (XaerosPlusPortals.db) and watch them for removal in the background.")
+        .defaultValue(true)
+        .build()
+    );
+
     // ─────────────────────────────────────────────────────────────────────────
 
     private final Setting<Boolean> resetButton = sgGeneral.add(new BoolSetting.Builder()
@@ -307,6 +315,9 @@ public class PortalTracker extends Module {
      * Registered with XaeroPortalBridge to be checked when their chunk loads.
      */
     private final Map<BlockPos, WaypointEntry> xaeroTrackedPortals = new ConcurrentHashMap<>();
+
+    /** Count of XaeroPlus columns registered this session (for info message). */
+    private int xaerosPlusWatchCount = 0;
 
     // ─────────────────────────────────────────────────────────────────────────
     // Constructor
@@ -497,6 +508,58 @@ public class PortalTracker extends Module {
                 + " §7saved portal" + (xaeroTrackedPortals.size() == 1 ? "" : "s")
                 + " for removal" + (XaeroPortalBridge.XAERO_PRESENT ? "" : " §8(Xaero not detected)"));
         }
+
+        // Also load XaeroPlus portal DB entries for this dimension.
+        loadXaerosPlusPortals(dimensionId);
+    }
+
+    /**
+     * Loads portal positions from XaeroPlus's SQLite database and registers
+     * each as a column watch with XaeroPortalBridge.
+     *
+     * Since the DB only stores X and Z (no Y), the bridge scans the full
+     * world height when the chunk loads to find the actual portal block.
+     * If the portal is gone the player is notified; if present it's silently
+     * added to the live portals map for highlighting.
+     *
+     * Runs entirely in the background — no UI blocking, capped at 5000 entries
+     * per dimension to avoid watching millions of positions on large databases.
+     */
+    private void loadXaerosPlusPortals(String dimensionId) {
+        if (!xaerosPlusDetection.get()) return;
+        if (!XaerosPlusPortalDB.isAvailable()) return;
+
+        // Only load Nether portals from the DB — End portals/gateways are block
+        // entities and already handled by scanBlockEntities().
+        if (!dimensionId.equals("minecraft:the_nether")
+                && !dimensionId.equals("minecraft:overworld")) return;
+
+        List<XaerosPlusPortalDB.PortalEntry> entries =
+            XaerosPlusPortalDB.loadForDimension(dimensionId, 5000);
+
+        xaerosPlusWatchCount = 0;
+        for (XaerosPlusPortalDB.PortalEntry entry : entries) {
+            XaeroPortalBridge.watchColumn(entry.x, entry.z, (foundPos, present) -> {
+                if (!isActive()) return;
+                if (present) {
+                    // Portal still exists — add to live map so it gets highlighted.
+                    if (!portals.containsKey(foundPos)) {
+                        portals.put(foundPos, PortalType.NETHER);
+                        portalsDirty = true;
+                    }
+                } else {
+                    // Portal gone — notify player without leaking coordinates.
+                    sendMessage("§c⚠ XaeroPlus portal removed §8[" + getDimensionName(dimensionId) + "]");
+                }
+            });
+            xaerosPlusWatchCount++;
+        }
+
+        if (xaerosPlusWatchCount > 0) {
+            sendMessage("§7XaeroPlus: watching §f" + xaerosPlusWatchCount
+                + " §7portal" + (xaerosPlusWatchCount == 1 ? "" : "s")
+                + " from database §8[" + getDimensionName(dimensionId) + "]");
+        }
     }
 
     /**
@@ -511,13 +574,10 @@ public class PortalTracker extends Module {
         boolean updated = XaerosWaypointHelper.replaceWaypoint(
             dimensionId, entry, newName, XaerosWaypointHelper.COLOR_GRAY);
 
-        String coordStr = "§8(§7" + pos.getX() + ", " + pos.getY() + ", " + pos.getZ() + "§8)";
         if (updated) {
-            sendMessage("§c⚠ Portal removed §7— waypoint updated " + coordStr
-                + " §8[" + getDimensionName(dimensionId) + "]");
+            sendMessage("§c⚠ Portal removed §7— waypoint updated §8[" + getDimensionName(dimensionId) + "]");
         } else {
-            sendMessage("§c⚠ Portal removed " + coordStr
-                + " §8[" + getDimensionName(dimensionId) + "]");
+            sendMessage("§c⚠ Portal removed §8[" + getDimensionName(dimensionId) + "]");
         }
     }
 
