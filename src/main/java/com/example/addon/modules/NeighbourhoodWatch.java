@@ -25,6 +25,7 @@ import meteordevelopment.orbit.EventHandler;
 import net.minecraft.entity.Entity;
 import net.minecraft.entity.player.PlayerEntity;
 import net.minecraft.network.packet.s2c.play.PlayerListS2CPacket;
+import net.minecraft.scoreboard.AbstractTeam;
 import net.minecraft.scoreboard.Scoreboard;
 import net.minecraft.scoreboard.Team;
 import net.minecraft.sound.SoundEvents;
@@ -343,12 +344,8 @@ public class NeighbourhoodWatch extends Module {
                 if (entity != null) clearEntityTeam(entity);
             }
             // Clear tab list team assignments by name
-            Scoreboard scoreboard = mc.world.getScoreboard();
             for (String name : playersInTab) {
-                Team team = scoreboard.getTeam(name);
-                if (team != null && team.getName().startsWith("nwatch_")) {
-                    scoreboard.removeScoreHolderFromTeam(name, team);
-                }
+                clearTabTeam(name);
             }
         }
         highlightedPlayers.clear();
@@ -579,8 +576,6 @@ public class NeighbourhoodWatch extends Module {
     private void assignTabTeam(String playerName) {
         if (mc.world == null) return;
         PlayerStatus status = getPlayerStatus(playerName);
-
-        // Only colour players who are explicitly on a list
         if (status == PlayerStatus.Other) return;
 
         SettingColor color = switch (status) {
@@ -593,16 +588,22 @@ public class NeighbourhoodWatch extends Module {
 
         Formatting formatting = getNearestColor(color);
         Scoreboard scoreboard = mc.world.getScoreboard();
-        String teamName = "nwatch_" + formatting.getName();
+        // Prefix with "!" so listed players sort above everyone else in the tab list
+        String teamName = "!nwatch_" + formatting.getName();
         Team team = scoreboard.getTeam(teamName);
         if (team == null) {
             team = scoreboard.addTeam(teamName);
             team.setColor(formatting);
         }
-        // getScoreHolderTeam returns the team the player is currently on
-        Team existing = scoreboard.getScoreHolderTeam(playerName);
-        if (existing == null || !existing.getName().equals(teamName)) {
-            scoreboard.addScoreHolderToTeam(playerName, team);
+        scoreboard.addScoreHolderToTeam(playerName, team);
+    }
+
+    private void clearTabTeam(String playerName) {
+        if (mc.world == null) return;
+        Scoreboard scoreboard = mc.world.getScoreboard();
+        AbstractTeam current = scoreboard.getScoreHolderTeam(playerName);
+        if (current != null && current.getName().startsWith("!nwatch_")) {
+            scoreboard.removeScoreHolderFromTeam(playerName, (Team) current);
         }
     }
 
