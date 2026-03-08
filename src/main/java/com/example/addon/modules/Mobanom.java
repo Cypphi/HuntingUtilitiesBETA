@@ -4,6 +4,7 @@ import java.util.HashSet;
 import java.util.Set;
 
 import com.example.addon.HuntingUtilities;
+import com.example.addon.utils.GlowingRegistry;
 
 import meteordevelopment.meteorclient.events.render.Render3DEvent;
 import meteordevelopment.meteorclient.settings.BoolSetting;
@@ -150,14 +151,13 @@ public class Mobanom extends Module {
     public void onDeactivate() {
         if (mc.world != null) {
             for (int id : highlightedEntities) {
+                GlowingRegistry.remove(id);
                 Entity entity = mc.world.getEntityById(id);
-                if (entity instanceof net.minecraft.entity.LivingEntity living) {
-                    living.setGlowing(false);
-                    clearEntityTeam(entity);
-                }
+                if (entity != null) clearEntityTeam(entity);
             }
         }
         highlightedEntities.clear();
+        GlowingRegistry.clear();
     }
 
     @EventHandler
@@ -183,8 +183,8 @@ public class Mobanom extends Module {
 
                 SettingColor lineColor = getColorForAnomaly(mob, isItemAnomaly || isChestedAnomaly);
 
-                // Force client-side glow outline + team color
-                mob.setGlowing(true);
+                // Register with mixin-based glow + team color for outline tint
+                GlowingRegistry.add(mob.getId());
                 setEntityTeam(mob, getNearestColor(lineColor));
 
                 if (chatNotification.get() && notifiedEntities.add(mob.getId())) {
@@ -203,10 +203,7 @@ public class Mobanom extends Module {
             if (!currentAnomalies.contains(id)) {
                 Entity entity = mc.world.getEntityById(id);
                 if (entity != null) {
-                    if (entity instanceof net.minecraft.entity.LivingEntity living) {
-                        living.removeStatusEffect(net.minecraft.entity.effect.StatusEffects.GLOWING);
-                    }
-                    entity.setGlowing(false);
+                    GlowingRegistry.remove(id);
                     clearEntityTeam(entity);
                 }
                 return true;

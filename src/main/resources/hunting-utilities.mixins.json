@@ -12,6 +12,7 @@
     "DungeonAssistantMixin",
     "ElytraAssistantMixin",
     "ElytraAssistantSwingMixin",
+    "EntityGlowingMixin",
     "GraveyardMixin",
     "HandledScreenAccessor",
     "HandledScreenMixin",
