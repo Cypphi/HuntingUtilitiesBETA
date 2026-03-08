@@ -387,7 +387,7 @@ public class NeighbourhoodWatch extends Module {
                 case Friend -> trackFriends.get();
                 case Enemy  -> trackEnemies.get();
                 case Proxy  -> trackProxies.get();
-                case Other  -> trackOthers.get();
+                case Other  -> false; // unknown players don't get highlighted
             };
             if (!shouldHighlight) continue;
 
@@ -395,8 +395,9 @@ public class NeighbourhoodWatch extends Module {
                 case Friend -> friendColor.get();
                 case Enemy  -> enemyColor.get();
                 case Proxy  -> proxyColor.get();
-                case Other  -> otherColor.get();
+                default     -> null;
             };
+            if (color == null) continue;
 
             currentlyVisible.add(player.getId());
             highlightedPlayers.add(player.getId());
@@ -578,20 +579,26 @@ public class NeighbourhoodWatch extends Module {
     private void assignTabTeam(String playerName) {
         if (mc.world == null) return;
         PlayerStatus status = getPlayerStatus(playerName);
+
+        // Only colour players who are explicitly on a list
+        if (status == PlayerStatus.Other) return;
+
         SettingColor color = switch (status) {
             case Friend -> friendColor.get();
             case Enemy  -> enemyColor.get();
             case Proxy  -> proxyColor.get();
-            case Other  -> otherColor.get();
+            default     -> null;
         };
+        if (color == null) return;
+
+        Formatting formatting = getNearestColor(color);
         Scoreboard scoreboard = mc.world.getScoreboard();
-        String teamName = "nwatch_" + getNearestColor(color).getName();
+        String teamName = "nwatch_" + formatting.getName();
         Team team = scoreboard.getTeam(teamName);
         if (team == null) {
             team = scoreboard.addTeam(teamName);
-            team.setColor(getNearestColor(color));
+            team.setColor(formatting);
         }
-        // Only add if not already on this team
         Team existing = scoreboard.getTeam(playerName);
         if (existing == null || !existing.getName().equals(teamName)) {
             scoreboard.addScoreHolderToTeam(playerName, team);
