@@ -152,7 +152,7 @@ public class Mobanom extends Module {
             for (int id : highlightedEntities) {
                 Entity entity = mc.world.getEntityById(id);
                 if (entity instanceof net.minecraft.entity.LivingEntity living) {
-                    living.removeStatusEffect(net.minecraft.entity.effect.StatusEffects.GLOWING);
+                    living.setGlowing(false);
                     clearEntityTeam(entity);
                 }
             }
@@ -183,11 +183,8 @@ public class Mobanom extends Module {
 
                 SettingColor lineColor = getColorForAnomaly(mob, isItemAnomaly || isChestedAnomaly);
 
-                // Apply glowing effect like spectral arrow (refreshed each render tick)
-                mob.addStatusEffect(new net.minecraft.entity.effect.StatusEffectInstance(
-                    net.minecraft.entity.effect.StatusEffects.GLOWING,
-                    60, 0, false, false
-                ));
+                // Force client-side glow outline + team color
+                mob.setGlowing(true);
                 setEntityTeam(mob, getNearestColor(lineColor));
 
                 if (chatNotification.get() && notifiedEntities.add(mob.getId())) {
@@ -209,6 +206,7 @@ public class Mobanom extends Module {
                     if (entity instanceof net.minecraft.entity.LivingEntity living) {
                         living.removeStatusEffect(net.minecraft.entity.effect.StatusEffects.GLOWING);
                     }
+                    entity.setGlowing(false);
                     clearEntityTeam(entity);
                 }
                 return true;
