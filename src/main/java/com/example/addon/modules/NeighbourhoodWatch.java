@@ -588,8 +588,8 @@ public class NeighbourhoodWatch extends Module {
 
         Formatting formatting = getNearestColor(color);
         Scoreboard scoreboard = mc.world.getScoreboard();
-        // Prefix with "!" so listed players sort above everyone else in the tab list
-        String teamName = "!nwatch_" + formatting.getName();
+        // Prefix with "!" so listed players sort above everyone else in singleplayer tab list
+        String teamName = "nwatch_" + formatting.getName();
         Team team = scoreboard.getTeam(teamName);
         if (team == null) {
             team = scoreboard.addTeam(teamName);
@@ -602,7 +602,7 @@ public class NeighbourhoodWatch extends Module {
         if (mc.world == null) return;
         Scoreboard scoreboard = mc.world.getScoreboard();
         AbstractTeam current = scoreboard.getScoreHolderTeam(playerName);
-        if (current != null && current.getName().startsWith("!nwatch_")) {
+        if (current != null && current.getName().startsWith("nwatch_")) {
             scoreboard.removeScoreHolderFromTeam(playerName, (Team) current);
         }
     }
