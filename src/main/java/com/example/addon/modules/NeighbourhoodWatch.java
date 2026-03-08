@@ -322,6 +322,16 @@ public class NeighbourhoodWatch extends Module {
     public void onActivate() {
         resetState();
         updateFriendEnemySets();
+        // Colour anyone already in the tab list when the module is switched on
+        if (mc.player != null && mc.player.networkHandler != null) {
+            mc.player.networkHandler.getPlayerList().forEach(entry -> {
+                String name = entry.getProfile().getName();
+                if (name != null && !name.isEmpty()) {
+                    playersInTab.add(name);
+                    assignTabTeam(name);
+                }
+            });
+        }
     }
 
     @Override
@@ -331,6 +341,14 @@ public class NeighbourhoodWatch extends Module {
                 GlowingRegistry.remove(id);
                 Entity entity = mc.world.getEntityById(id);
                 if (entity != null) clearEntityTeam(entity);
+            }
+            // Clear tab list team assignments by name
+            Scoreboard scoreboard = mc.world.getScoreboard();
+            for (String name : playersInTab) {
+                Team team = scoreboard.getTeam(name);
+                if (team != null && team.getName().startsWith("nwatch_")) {
+                    scoreboard.removeScoreHolderFromTeam(name, team);
+                }
             }
         }
         highlightedPlayers.clear();
@@ -408,7 +426,10 @@ public class NeighbourhoodWatch extends Module {
             if (name == null || name.isEmpty()) continue;
 
             if (packet.getActions().contains(PlayerListS2CPacket.Action.ADD_PLAYER)) {
-                if (playersInTab.add(name)) handleTabListChange(name, "joined");
+                if (playersInTab.add(name)) {
+                    handleTabListChange(name, "joined");
+                    assignTabTeam(name);
+                }
             } else if (packet.getActions().contains(PlayerListS2CPacket.Action.UPDATE_LISTED) && !entry.listed()) {
                 if (playersInTab.remove(name)) handleTabListChange(name, "left");
             }
@@ -549,6 +570,33 @@ public class NeighbourhoodWatch extends Module {
     }
 
     // ── Team / Colour Helpers ─────────────────────────────────────────────────
+
+    /**
+     * Assigns a scoreboard team colour to a player by name, regardless of whether
+     * they are in render range. This colours their name in the tab list.
+     */
+    private void assignTabTeam(String playerName) {
+        if (mc.world == null) return;
+        PlayerStatus status = getPlayerStatus(playerName);
+        SettingColor color = switch (status) {
+            case Friend -> friendColor.get();
+            case Enemy  -> enemyColor.get();
+            case Proxy  -> proxyColor.get();
+            case Other  -> otherColor.get();
+        };
+        Scoreboard scoreboard = mc.world.getScoreboard();
+        String teamName = "nwatch_" + getNearestColor(color).getName();
+        Team team = scoreboard.getTeam(teamName);
+        if (team == null) {
+            team = scoreboard.addTeam(teamName);
+            team.setColor(getNearestColor(color));
+        }
+        // Only add if not already on this team
+        Team existing = scoreboard.getTeam(playerName);
+        if (existing == null || !existing.getName().equals(teamName)) {
+            scoreboard.addScoreHolderToTeam(playerName, team);
+        }
+    }
 
     private Formatting getNearestColor(SettingColor color) {
         Formatting best = Formatting.WHITE;
