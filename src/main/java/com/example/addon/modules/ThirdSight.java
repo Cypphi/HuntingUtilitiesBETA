@@ -180,6 +180,7 @@ public class ThirdSight extends Module {
     private boolean noDistanceActive = false;
     private boolean wasNoDistanceKeyPressed = false;
     private double originalFov = -1;
+    private double currentFov = 0;
 
     private Perspective previousPerspective = null;
     private boolean     wasKeyPressed       = false;
@@ -279,28 +280,14 @@ public class ThirdSight extends Module {
 
             if (isZooming) {
                 if (mc.options.getPerspective().isFirstPerson()) {
-                    if (originalFov == -1) originalFov = mc.options.getFov().getValue();
-                    mc.options.getFov().setValue(zoomFov.get().intValue());
                     targetLateralOffset = 0f;
                 } else {
-                    if (originalFov != -1) {
-                        mc.options.getFov().setValue((int) originalFov);
-                        originalFov = -1;
-                    }
                     updateLateralOffset();
                 }
             } else {
-                if (originalFov != -1) {
-                    mc.options.getFov().setValue((int) originalFov);
-                    originalFov = -1;
-                }
                 targetLateralOffset = 0f;
             }
         } else {
-            if (originalFov != -1) {
-                mc.options.getFov().setValue((int) originalFov);
-                originalFov = -1;
-            }
             if (previousPerspective == null) previousPerspective = mc.options.getPerspective();
             if (mc.options.getPerspective() != Perspective.THIRD_PERSON_BACK) {
                 mc.options.setPerspective(Perspective.THIRD_PERSON_BACK);
@@ -317,18 +304,39 @@ public class ThirdSight extends Module {
     @EventHandler
     private void onRender(Render3DEvent event) {
         double targetDist = isZooming ? zoomDistance.get() : distance.get();
+        float speed = smoothTransitions.get() ? transitionSpeed.get().floatValue() : 1.0f;
 
-        if (!smoothTransitions.get()) {
-            lateralOffset = targetLateralOffset;
-            currentDistance = targetDist;
-            return;
-        }
-        float speed = transitionSpeed.get().floatValue();
         lateralOffset += (targetLateralOffset - lateralOffset) * speed;
         if (Math.abs(targetLateralOffset - lateralOffset) < 0.001f) lateralOffset = targetLateralOffset;
 
         currentDistance += (targetDist - currentDistance) * speed;
         if (Math.abs(targetDist - currentDistance) < 0.01) currentDistance = targetDist;
+
+        // FOV Smoothing
+        if (noDistanceActive && mc.options.getPerspective().isFirstPerson()) {
+            if (isZooming) {
+                if (originalFov == -1) {
+                    originalFov = mc.options.getFov().getValue();
+                    currentFov = originalFov;
+                }
+                double targetFov = zoomFov.get();
+                currentFov += (targetFov - currentFov) * speed;
+                if (Math.abs(targetFov - currentFov) < 0.1) currentFov = targetFov;
+                mc.options.getFov().setValue((int) currentFov);
+            } else if (originalFov != -1) {
+                currentFov += (originalFov - currentFov) * speed;
+                if (Math.abs(originalFov - currentFov) < 0.1) {
+                    currentFov = originalFov;
+                    mc.options.getFov().setValue((int) originalFov);
+                    originalFov = -1;
+                } else {
+                    mc.options.getFov().setValue((int) currentFov);
+                }
+            }
+        } else if (originalFov != -1) {
+            mc.options.getFov().setValue((int) originalFov);
+            originalFov = -1;
+        }
     }
 
     // ── Helpers ───────────────────────────────────────────────────────────────

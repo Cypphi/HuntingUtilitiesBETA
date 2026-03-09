@@ -799,7 +799,7 @@ public class PortalTracker extends Module {
 
             if (component.isEmpty()) continue;
 
-            newStructures.add(new PortalStructure(structureBox.expand(0.02), isCreated, type));
+            newStructures.add(new PortalStructure(structureBox.expand(0.02), component, isCreated, type));
 
             if (isCreated && showCreatedCount.get()) {
                 String id = String.format("%s_%.1f_%.1f_%.1f",
@@ -914,7 +914,7 @@ public class PortalTracker extends Module {
 
             Box renderBox = structure.boundingBox;
             if (highlightFrame.get() && structure.type == PortalType.NETHER) {
-                renderNetherFrame(event, renderBox, color);
+                renderNetherFrame(event, structure, color);
             } else {
                 event.renderer.box(renderBox, color, color, shapeMode.get(), 0);
             }
@@ -937,71 +937,29 @@ public class PortalTracker extends Module {
      * expand by 1 in the flat axis and 1 below/above for the top and bottom bars,
      * then draw each piece individually.
      */
-    private void renderNetherFrame(Render3DEvent event, Box box, Color color) {
-        double xLen = box.maxX - box.minX;
-        double zLen = box.maxZ - box.minZ;
+    private void renderNetherFrame(Render3DEvent event, PortalStructure structure, Color color) {
+        Set<BlockPos> frameBlocks = new HashSet<>();
 
-        // Determine orientation: wider in X → N/S facing portal; wider in Z → E/W facing
-        boolean facingNS = xLen >= zLen;
+        // For each portal block, check its neighbors for obsidian
+        for (BlockPos portalPos : structure.portalBlocks) {
+            for (Direction dir : Direction.values()) {
+                BlockPos neighborPos = portalPos.offset(dir);
+                // Avoid adding portal blocks themselves to the frame
+                if (structure.portalBlocks.contains(neighborPos)) continue;
 
-        // Frame extends 1 block outside the portal air in the flat axis,
-        // and 1 block below minY and above maxY for bottom/top bars.
-        double frameMinY = box.minY - 1;
-        double frameMaxY = box.maxY + 1;
+                if (mc.world.getBlockState(neighborPos).isOf(Blocks.OBSIDIAN)) {
+                    frameBlocks.add(neighborPos);
+                }
+            }
+        }
 
-        if (facingNS) {
-            // Pillars run along Z (thin axis), left and right of the portal in X
-            double leftX  = box.minX - 1;
-            double rightX = box.maxX;
-
-            // Left pillar: from frameMinY to frameMaxY, full Z depth of portal
-            event.renderer.box(
-                new Box(leftX,  frameMinY, box.minZ, leftX  + 1, frameMaxY, box.maxZ),
-                color, color, shapeMode.get(), 0);
-
-            // Right pillar
-            event.renderer.box(
-                new Box(rightX, frameMinY, box.minZ, rightX + 1, frameMaxY, box.maxZ),
-                color, color, shapeMode.get(), 0);
-
-            // Bottom bar: spans between pillars (not including pillar columns)
-            event.renderer.box(
-                new Box(box.minX, frameMinY, box.minZ, box.maxX, box.minY, box.maxZ),
-                color, color, shapeMode.get(), 0);
-
-            // Top bar
-            event.renderer.box(
-                new Box(box.minX, box.maxY, box.minZ, box.maxX, frameMaxY, box.maxZ),
-                color, color, shapeMode.get(), 0);
-
-        } else {
-            // Pillars run along X (thin axis), front and back in Z
-            double frontZ = box.minZ - 1;
-            double backZ  = box.maxZ;
-
-            // Front pillar
-            event.renderer.box(
-                new Box(box.minX, frameMinY, frontZ,  box.maxX, frameMaxY, frontZ + 1),
-                color, color, shapeMode.get(), 0);
-
-            // Back pillar
-            event.renderer.box(
-                new Box(box.minX, frameMinY, backZ,   box.maxX, frameMaxY, backZ  + 1),
-                color, color, shapeMode.get(), 0);
-
-            // Bottom bar
-            event.renderer.box(
-                new Box(box.minX, frameMinY, box.minZ, box.maxX, box.minY, box.maxZ),
-                color, color, shapeMode.get(), 0);
-
-            // Top bar
-            event.renderer.box(
-                new Box(box.minX, box.maxY, box.minZ, box.maxX, frameMaxY, box.maxZ),
-                color, color, shapeMode.get(), 0);
+        // Render each obsidian block
+        for (BlockPos framePos : frameBlocks) {
+            event.renderer.box(framePos, color, color, shapeMode.get(), 0);
         }
 
         // Also highlight the portal interior itself
-        event.renderer.box(box, color, color, shapeMode.get(), 0);
+        event.renderer.box(structure.boundingBox, color, color, shapeMode.get(), 0);
     }
 
     private void renderBeam(Render3DEvent event, Box anchorBox, Color color) {
@@ -1110,11 +1068,13 @@ public class PortalTracker extends Module {
 
     private static class PortalStructure {
         final Box        boundingBox;
+        final Set<BlockPos> portalBlocks;
         final boolean    isCreated;
         final PortalType type;
 
-        PortalStructure(Box boundingBox, boolean isCreated, PortalType type) {
+        PortalStructure(Box boundingBox, Set<BlockPos> portalBlocks, boolean isCreated, PortalType type) {
             this.boundingBox = boundingBox;
+            this.portalBlocks = portalBlocks;
             this.isCreated   = isCreated;
             this.type        = type;
         }
