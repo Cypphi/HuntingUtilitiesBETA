@@ -325,7 +325,11 @@ public class ElytraAssistant extends Module {
             return;
         }
 
-        Rotations.rotate(mc.player.getYaw(), 90, () -> {
+        // Add small random rotation to prevent AFK kick
+        float yaw = mc.player.getYaw() + (float) (Math.random() * 0.2 - 0.1);
+        float pitch = 90 + (float) (Math.random() * 0.2 - 0.1);
+
+        Rotations.rotate(yaw, pitch, () -> {
             if (xp.isHotbar()) {
                 InvUtils.swap(xp.slot(), true);
                 for (int i = 0; i < packetsPerBurst.get(); i++) {
@@ -333,12 +337,28 @@ public class ElytraAssistant extends Module {
                 }
                 InvUtils.swapBack();
             } else {
-                int prevSlot = mc.player.getInventory().selectedSlot;
-                InvUtils.move().from(xp.slot()).toHotbar(prevSlot);
-                for (int i = 0; i < packetsPerBurst.get(); i++) {
-                    mc.interactionManager.interactItem(mc.player, Hand.MAIN_HAND);
+                int emptySlot = -1;
+                for (int i = 0; i < 9; i++) {
+                    if (mc.player.getInventory().getStack(i).isEmpty()) {
+                        emptySlot = i;
+                        break;
+                    }
                 }
-                InvUtils.move().from(prevSlot).to(xp.slot());
+
+                if (emptySlot != -1) {
+                    // Move to empty slot, use, and move back to keep hotbar clean.
+                    InvUtils.move().from(xp.slot()).toHotbar(emptySlot);
+                    InvUtils.swap(emptySlot, true);
+                    for (int i = 0; i < packetsPerBurst.get(); i++) mc.interactionManager.interactItem(mc.player, Hand.MAIN_HAND);
+                    InvUtils.swapBack();
+                    InvUtils.move().from(emptySlot).to(xp.slot());
+                } else {
+                    // No empty slot, use original logic (swap with current slot)
+                    int prevSlot = mc.player.getInventory().selectedSlot;
+                    InvUtils.move().from(xp.slot()).toHotbar(prevSlot);
+                    for (int i = 0; i < packetsPerBurst.get(); i++) mc.interactionManager.interactItem(mc.player, Hand.MAIN_HAND);
+                    InvUtils.move().from(prevSlot).to(xp.slot());
+                }
             }
         });
         mendTimer = burstDelay.get();

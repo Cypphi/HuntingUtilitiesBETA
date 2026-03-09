@@ -81,6 +81,13 @@ public class LavaMarker extends Module {
         .defaultValue(ShapeMode.Sides).build()
     );
 
+    private final Setting<Integer> maxRenderBlocks = sgGeneral.add(new IntSetting.Builder()
+        .name("max-render-blocks")
+        .description("Maximum number of blocks to render per frame to prevent crashes.")
+        .defaultValue(5000).min(100).sliderMax(20000)
+        .build()
+    );
+
     // Per-chunk result sets — replaced atomically to prevent flicker
     private final Map<ChunkPos, Set<BlockPos>> fallsByChunk = new ConcurrentHashMap<>();
     private final Set<ChunkPos> scannedChunks = ConcurrentHashMap.newKeySet();
@@ -335,8 +342,12 @@ public class LavaMarker extends Module {
     @EventHandler
     private void onRender(Render3DEvent event) {
         if (mc.world == null) return;
+        int count = 0;
+        int max = maxRenderBlocks.get();
+
         for (Set<BlockPos> set : fallsByChunk.values()) {
             for (BlockPos pos : set) {
+                if (count >= max) return;
                 FluidState fs = mc.world.getFluidState(pos);
                 if (!fs.isIn(FluidTags.LAVA)) continue;
                 if (fs.isStill()) continue;
@@ -345,6 +356,7 @@ public class LavaMarker extends Module {
                 if (isBottomBlock && mc.world.getBlockState(pos.down()).isAir()) continue;
 
                 event.renderer.box(pos, color.get(), color.get(), shapeMode.get(), 0);
+                count++;
             }
         }
     }

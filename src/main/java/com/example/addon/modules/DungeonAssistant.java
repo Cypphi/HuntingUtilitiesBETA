@@ -980,7 +980,6 @@ public class DungeonAssistant extends Module {
         int      centerChunkZ = playerPos.getZ() >> 4;
 
         cleanupDistantTargets(playerPos);
-        scanBlockEntities(centerChunkX, centerChunkZ);
         scanChestMinecarts();
         scanNewChunks(centerChunkX, centerChunkZ);
         scanEndermites();
@@ -1209,6 +1208,7 @@ public class DungeonAssistant extends Module {
         if (!mc.world.getChunkManager().isChunkLoaded(cx, cz)) return false;
 
         scanChunk(mc.world.getChunk(cx, cz));
+        scanBlockEntitiesInChunk(mc.world.getChunk(cx, cz));
         scannedChunks.add(cp);
         return true;
     }
@@ -1259,31 +1259,15 @@ public class DungeonAssistant extends Module {
         }
     }
 
-    private void scanBlockEntities(int centerChunkX, int centerChunkZ) {
-        int r   = range.get();
-        int rSq = r * r;
-
-        for (int cx = centerChunkX - r; cx <= centerChunkX + r; cx++) {
-            for (int cz = centerChunkZ - r; cz <= centerChunkZ + r; cz++) {
-                int dx = cx - centerChunkX;
-                int dz = cz - centerChunkZ;
-                if (dx * dx + dz * dz > rSq) continue;
-
-                WorldChunk chunk = mc.world.getChunkManager().getChunk(cx, cz, ChunkStatus.FULL, false);
-                if (chunk == null) continue;
-
-                for (BlockEntity be : chunk.getBlockEntities().values()) {
-                    BlockPos pos = be.getPos();
-                    if (!isWithinRange(pos)) continue;
-
-                    if ((trackSpawners.get() || autoBreakSpawners.get()) && be instanceof MobSpawnerBlockEntity) {
-                        targets.put(pos, TargetType.SPAWNER);
-                    } else if (trackChests.get()) {
-                        Block block = mc.world.getBlockState(pos).getBlock();
-                        if (block == Blocks.CHEST || block == Blocks.TRAPPED_CHEST) {
-                            targets.put(pos, TargetType.CHEST);
-                        }
-                    }
+    private void scanBlockEntitiesInChunk(WorldChunk chunk) {
+        for (BlockEntity be : chunk.getBlockEntities().values()) {
+            BlockPos pos = be.getPos();
+            if ((trackSpawners.get() || autoBreakSpawners.get()) && be instanceof MobSpawnerBlockEntity) {
+                targets.put(pos, TargetType.SPAWNER);
+            } else if (trackChests.get()) {
+                Block block = mc.world.getBlockState(pos).getBlock();
+                if (block == Blocks.CHEST || block == Blocks.TRAPPED_CHEST) {
+                    targets.put(pos, TargetType.CHEST);
                 }
             }
         }
@@ -1368,13 +1352,6 @@ public class DungeonAssistant extends Module {
             if (entry.getValue() == TargetType.CHEST_MINECART) stackedMinecartCounts.remove(pos);
             return true;
         });
-    }
-
-    private boolean isWithinRange(BlockPos pos) {
-        int rangeBlocks = range.get() * 16;
-        BlockPos playerPos = mc.player.getBlockPos();
-        return Math.abs(pos.getX() - playerPos.getX()) <= rangeBlocks
-            && Math.abs(pos.getZ() - playerPos.getZ()) <= rangeBlocks;
     }
 
     private void removeNeighborFromChecked(BlockPos pos) {
