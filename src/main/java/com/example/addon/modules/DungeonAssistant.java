@@ -553,6 +553,10 @@ public class DungeonAssistant extends Module {
 
     @Override
     public void onDeactivate() {
+        if (isBreaking && mc.interactionManager != null) {
+            mc.interactionManager.cancelBlockBreaking();
+        }
+
         targets.clear();
         stackedMinecartCounts.clear();
         brokenSpawners.clear();
@@ -768,8 +772,14 @@ public class DungeonAssistant extends Module {
                 mc.interactionManager.cancelBlockBreaking();
                 restoreSlot();
             } else {
-                int slot = (currentBreakTarget == Blocks.SPAWNER) ? findPickaxe() : findAxe();
-                if (slot != -1) mc.player.getInventory().selectedSlot = slot;
+                if (isBreakingChest) {
+                    int axeSlot = findAxe();
+                    if (axeSlot != -1) mc.player.getInventory().selectedSlot = axeSlot;
+                    // If no axe is found, the currently held item will be used.
+                } else { // Breaking a spawner
+                    int pickaxeSlot = findPickaxe();
+                    if (pickaxeSlot != -1) mc.player.getInventory().selectedSlot = pickaxeSlot;
+                }
                 Rotations.rotate(Rotations.getYaw(blockToBreak), Rotations.getPitch(blockToBreak), () -> {
                     mc.interactionManager.updateBlockBreakingProgress(blockToBreak, Direction.UP);
                     mc.player.swingHand(Hand.MAIN_HAND);
