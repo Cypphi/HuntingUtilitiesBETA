@@ -6,9 +6,12 @@ import java.util.Set;
 import com.example.addon.HuntingUtilities;
 import com.example.addon.utils.GlowingRegistry;
 
+import meteordevelopment.meteorclient.events.render.Render2DEvent;
 import meteordevelopment.meteorclient.events.render.Render3DEvent;
+import meteordevelopment.meteorclient.renderer.Renderer2D;
 import meteordevelopment.meteorclient.settings.BoolSetting;
 import meteordevelopment.meteorclient.settings.ColorSetting;
+import meteordevelopment.meteorclient.settings.EnumSetting;
 import meteordevelopment.meteorclient.settings.EntityTypeListSetting;
 import meteordevelopment.meteorclient.settings.IntSetting;
 import meteordevelopment.meteorclient.settings.Setting;
@@ -16,6 +19,7 @@ import meteordevelopment.meteorclient.settings.SettingGroup;
 import meteordevelopment.meteorclient.systems.modules.Module;
 import meteordevelopment.meteorclient.utils.render.color.SettingColor;
 import meteordevelopment.orbit.EventHandler;
+import net.minecraft.client.gui.DrawContext;
 import net.minecraft.entity.Entity;
 import net.minecraft.entity.EntityType;
 import net.minecraft.entity.mob.Angerable;
@@ -34,14 +38,27 @@ public class Illushine extends Module {
 
     private enum MobCategory { PASSIVE, NEUTRAL, HOSTILE }
 
+    public enum CrosshairMode {
+        None("None"),
+        WhiteDot("White Dot"),
+        Normal("Normal");
+
+        private final String title;
+        CrosshairMode(String title) { this.title = title; }
+
+        @Override
+        public String toString() { return title; }
+    }
+
     // ═══════════════════════════════════════════════════════════════════════════
     // Setting Groups
     // ═══════════════════════════════════════════════════════════════════════════
 
-    private final SettingGroup sgGeneral = settings.getDefaultGroup();
-    private final SettingGroup sgPassive = settings.createGroup("Passive");
-    private final SettingGroup sgNeutral = settings.createGroup("Neutral");
-    private final SettingGroup sgHostile = settings.createGroup("Hostile");
+    private final SettingGroup sgGeneral   = settings.getDefaultGroup();
+    private final SettingGroup sgCrosshair = settings.createGroup("Crosshair");
+    private final SettingGroup sgPassive   = settings.createGroup("Passive");
+    private final SettingGroup sgNeutral   = settings.createGroup("Neutral");
+    private final SettingGroup sgHostile   = settings.createGroup("Hostile");
 
     // ═══════════════════════════════════════════════════════════════════════════
     // Settings — General
@@ -60,6 +77,55 @@ public class Illushine extends Module {
         .name("ignored-entities")
         .description("Entities to ignore.")
         .defaultValue(new HashSet<>())
+        .build()
+    );
+
+    // ═══════════════════════════════════════════════════════════════════════════
+    // Settings — Crosshair
+    // ═══════════════════════════════════════════════════════════════════════════
+
+    private final Setting<CrosshairMode> crosshairMode = sgCrosshair.add(new EnumSetting.Builder<CrosshairMode>()
+        .name("crosshair-mode")
+        .description("The crosshair style to display while Illushine is active.")
+        .defaultValue(CrosshairMode.Normal)
+        .build()
+    );
+
+    private final Setting<SettingColor> crosshairColor = sgCrosshair.add(new ColorSetting.Builder()
+        .name("crosshair-color")
+        .description("Color of the Normal crosshair lines and gap dot.")
+        .defaultValue(new SettingColor(255, 255, 255, 255))
+        .visible(() -> crosshairMode.get() == CrosshairMode.Normal)
+        .build()
+    );
+
+    private final Setting<Integer> crosshairSize = sgCrosshair.add(new IntSetting.Builder()
+        .name("crosshair-size")
+        .description("Half-length of each crosshair arm in pixels.")
+        .defaultValue(5)
+        .min(1)
+        .sliderMax(20)
+        .visible(() -> crosshairMode.get() == CrosshairMode.Normal)
+        .build()
+    );
+
+    private final Setting<Integer> crosshairGap = sgCrosshair.add(new IntSetting.Builder()
+        .name("crosshair-gap")
+        .description("Gap (in pixels) between center and each arm.")
+        .defaultValue(2)
+        .min(0)
+        .sliderMax(10)
+        .visible(() -> crosshairMode.get() == CrosshairMode.Normal)
+        .build()
+    );
+
+    private final Setting<Integer> crosshairThickness = sgCrosshair.add(new IntSetting.Builder()
+        .name("crosshair-thickness")
+        .description("Thickness of the crosshair lines in pixels.")
+        .defaultValue(1)
+        .min(1)
+        .sliderMax(5)
+        .visible(() -> crosshairMode.get() == CrosshairMode.Normal)
         .build()
     );
 
@@ -156,7 +222,7 @@ public class Illushine extends Module {
     }
 
     // ═══════════════════════════════════════════════════════════════════════════
-    // Event Handler
+    // Event Handlers
     // ═══════════════════════════════════════════════════════════════════════════
 
     @EventHandler
@@ -199,6 +265,53 @@ public class Illushine extends Module {
             }
             return false;
         });
+    }
+
+    @EventHandler
+    private void onRender2D(Render2DEvent event) {
+        if (mc.options.getPerspective().isFirstPerson()
+                && mc.currentScreen == null
+                && crosshairMode.get() != CrosshairMode.None) {
+            renderCrosshair(event.drawContext);
+        }
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════════
+    // Crosshair Rendering
+    // ═══════════════════════════════════════════════════════════════════════════
+
+    private void renderCrosshair(DrawContext context) {
+        int cx = mc.getWindow().getScaledWidth()  / 2;
+        int cy = mc.getWindow().getScaledHeight() / 2;
+
+        switch (crosshairMode.get()) {
+            case WhiteDot -> {
+                // Single 2×2 white dot centered on the screen
+                context.fill(cx - 1, cy - 1, cx + 1, cy + 1, 0xFFFFFFFF);
+            }
+            case Normal -> {
+                SettingColor c   = crosshairColor.get();
+                int          col = toARGB(c);
+                int          arm = crosshairSize.get();
+                int          gap = crosshairGap.get();
+                int          th  = crosshairThickness.get();
+                int          half = th / 2;
+
+                // Horizontal left arm
+                context.fill(cx - arm - gap, cy - half,
+                             cx - gap,       cy - half + th, col);
+                // Horizontal right arm
+                context.fill(cx + gap,       cy - half,
+                             cx + arm + gap, cy - half + th, col);
+                // Vertical top arm
+                context.fill(cx - half, cy - arm - gap,
+                             cx - half + th, cy - gap,       col);
+                // Vertical bottom arm
+                context.fill(cx - half, cy + gap,
+                             cx - half + th, cy + arm + gap, col);
+            }
+            default -> { /* CrosshairMode.None — nothing drawn */ }
+        }
     }
 
     // ═══════════════════════════════════════════════════════════════════════════
@@ -254,5 +367,10 @@ public class Illushine extends Module {
         if (currentTeam != null && currentTeam.getName().startsWith("illushine_")) {
             scoreboard.removeScoreHolderFromTeam(entity.getNameForScoreboard(), currentTeam);
         }
+    }
+
+    /** Convert a SettingColor to a packed ARGB int for DrawContext.fill(). */
+    private static int toARGB(SettingColor c) {
+        return (c.a << 24) | (c.r << 16) | (c.g << 8) | c.b;
     }
 }
