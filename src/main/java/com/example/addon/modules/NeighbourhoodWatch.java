@@ -33,7 +33,15 @@ import net.minecraft.util.Formatting;
 
 public class NeighbourhoodWatch extends Module {
 
-    // ── Setting Groups ────────────────────────────────────────────────────────
+    // ═══════════════════════════════════════════════════════════════════════════
+    // Enums
+    // ═══════════════════════════════════════════════════════════════════════════
+
+    public enum PlayerStatus { Friend, Enemy, Proxy, Other }
+
+    // ═══════════════════════════════════════════════════════════════════════════
+    // Setting Groups
+    // ═══════════════════════════════════════════════════════════════════════════
 
     private final SettingGroup sgSafety     = settings.createGroup("Safety");
     private final SettingGroup sgAutoIgnore = settings.createGroup("Auto Ignore");
@@ -41,7 +49,9 @@ public class NeighbourhoodWatch extends Module {
     private final SettingGroup sgFriends    = settings.createGroup("Friends & Enemies");
     private final SettingGroup sgTabList    = settings.createGroup("Tab List Monitoring");
 
-    // ── Safety ────────────────────────────────────────────────────────────────
+    // ═══════════════════════════════════════════════════════════════════════════
+    // Settings — Safety
+    // ═══════════════════════════════════════════════════════════════════════════
 
     private final Setting<Boolean> disconnectOnPlayer = sgSafety.add(new BoolSetting.Builder()
         .name("disconnect-on-player")
@@ -76,7 +86,9 @@ public class NeighbourhoodWatch extends Module {
         .build()
     );
 
-    // ── Auto Ignore ───────────────────────────────────────────────────────────
+    // ═══════════════════════════════════════════════════════════════════════════
+    // Settings — Auto Ignore
+    // ═══════════════════════════════════════════════════════════════════════════
 
     private final Setting<Boolean> autoIgnore = sgAutoIgnore.add(new BoolSetting.Builder()
         .name("auto-ignore")
@@ -109,7 +121,9 @@ public class NeighbourhoodWatch extends Module {
         .build()
     );
 
-    // ── Player Tracking ───────────────────────────────────────────────────────
+    // ═══════════════════════════════════════════════════════════════════════════
+    // Settings — Player Tracking
+    // ═══════════════════════════════════════════════════════════════════════════
 
     private final Setting<Boolean> trackPlayers = sgTracking.add(new BoolSetting.Builder()
         .name("track-players")
@@ -184,7 +198,9 @@ public class NeighbourhoodWatch extends Module {
         .build()
     );
 
-    // ── Friends & Enemies ─────────────────────────────────────────────────────
+    // ═══════════════════════════════════════════════════════════════════════════
+    // Settings — Friends & Enemies
+    // ═══════════════════════════════════════════════════════════════════════════
 
     private final Setting<List<String>> friends = sgFriends.add(new StringListSetting.Builder()
         .name("friends")
@@ -242,7 +258,9 @@ public class NeighbourhoodWatch extends Module {
         .build()
     );
 
-    // ── Tab List Monitoring ───────────────────────────────────────────────────
+    // ═══════════════════════════════════════════════════════════════════════════
+    // Settings — Tab List Monitoring
+    // ═══════════════════════════════════════════════════════════════════════════
 
     private final Setting<Boolean> monitorTabList = sgTabList.add(new BoolSetting.Builder()
         .name("monitor-tab-list")
@@ -299,7 +317,9 @@ public class NeighbourhoodWatch extends Module {
         .build()
     );
 
-    // ── State ─────────────────────────────────────────────────────────────────
+    // ═══════════════════════════════════════════════════════════════════════════
+    // State
+    // ═══════════════════════════════════════════════════════════════════════════
 
     private final Set<Integer> notifiedPlayers    = new HashSet<>();
     private final Set<Integer> highlightedPlayers = new HashSet<>();
@@ -309,14 +329,18 @@ public class NeighbourhoodWatch extends Module {
     private final Set<String>  enemySet           = new HashSet<>();
     private final Set<String>  proxySet           = new HashSet<>();
 
-    // ── Constructor ───────────────────────────────────────────────────────────
+    // ═══════════════════════════════════════════════════════════════════════════
+    // Constructor
+    // ═══════════════════════════════════════════════════════════════════════════
 
     public NeighbourhoodWatch() {
         super(HuntingUtilities.CATEGORY, "neighbourhood-watch",
             "Manages player tracking, safety, and server monitoring.");
     }
 
-    // ── Lifecycle ─────────────────────────────────────────────────────────────
+    // ═══════════════════════════════════════════════════════════════════════════
+    // Lifecycle
+    // ═══════════════════════════════════════════════════════════════════════════
 
     @Override
     public void onActivate() {
@@ -345,15 +369,17 @@ public class NeighbourhoodWatch extends Module {
 
     @EventHandler
     private void onGameJoined(GameJoinedEvent event) {
+        cleanupScoreboardTeams();
         resetState();
     }
 
-    // ── Core Logic ────────────────────────────────────────────────────────────
+    // ═══════════════════════════════════════════════════════════════════════════
+    // Event Handlers
+    // ═══════════════════════════════════════════════════════════════════════════
 
     @EventHandler
     private void onTick(TickEvent.Pre event) {
         if (mc.player == null || mc.world == null) return;
-
         if (tickDisconnectOnPlayer()) return;
         tickPlayerTracking();
     }
@@ -369,7 +395,7 @@ public class NeighbourhoodWatch extends Module {
             if (mc.player.distanceTo(player) > trackRange.get()) continue;
 
             String name = player.getName().getString();
-            PlayerStatus status = getPlayerStatus(name);
+            PlayerStatus status = getPlayerStatusPublic(name);
 
             boolean shouldHighlight = switch (status) {
                 case Friend -> trackFriends.get();
@@ -424,15 +450,13 @@ public class NeighbourhoodWatch extends Module {
     @EventHandler
     private void onReceiveMessage(ReceiveMessageEvent event) {
         if (!autoIgnore.get() || mc.player == null || mc.player.networkHandler == null) return;
-
-        List<String> keywords = ignoreKeywords.get();
-        if (keywords.isEmpty()) return;
-
-        String raw = event.getMessage().getString();
-        parseChatMessage(raw);
+        if (ignoreKeywords.get().isEmpty()) return;
+        parseChatMessage(event.getMessage().getString());
     }
 
-    // ── Tick Logic ────────────────────────────────────────────────────────────
+    // ═══════════════════════════════════════════════════════════════════════════
+    // Tick Logic
+    // ═══════════════════════════════════════════════════════════════════════════
 
     private boolean tickDisconnectOnPlayer() {
         if (!disconnectOnPlayer.get()) return false;
@@ -459,8 +483,8 @@ public class NeighbourhoodWatch extends Module {
             if (notifiedPlayers.add(player.getId())) {
                 if (notifyChat.get()) {
                     String playerName = player.getName().getString();
-                    String status = getPlayerStatus(playerName).name().toLowerCase();
-                    String msg = customMessage.get()
+                    String status     = getPlayerStatusPublic(playerName).name().toLowerCase();
+                    String msg        = customMessage.get()
                         .replace("{player}", playerName)
                         .replace("{status}", status);
                     info(msg);
@@ -472,6 +496,10 @@ public class NeighbourhoodWatch extends Module {
         }
         notifiedPlayers.removeIf(id -> mc.world.getEntityById(id) == null);
     }
+
+    // ═══════════════════════════════════════════════════════════════════════════
+    // Chat Parsing
+    // ═══════════════════════════════════════════════════════════════════════════
 
     private void parseChatMessage(String rawMessage) {
         String sender, messageBody;
@@ -508,23 +536,12 @@ public class NeighbourhoodWatch extends Module {
         if (ignoreNotify.get()) info("Auto-ignored %s (keyword match).", sender);
     }
 
-    // ── Helpers ───────────────────────────────────────────────────────────────
-
-    private void resetState() {
-        notifiedPlayers.clear();
-        ignoredThisSession.clear();
-        playersInTab.clear();
-    }
-
-    private void disconnect(String reason) {
-        if (mc.player != null && mc.player.networkHandler != null) {
-            mc.player.networkHandler.getConnection().disconnect(Text.literal(reason));
-        }
-        this.toggle();
-    }
+    // ═══════════════════════════════════════════════════════════════════════════
+    // Tab List
+    // ═══════════════════════════════════════════════════════════════════════════
 
     private void handleTabListChange(String playerName, String action) {
-        PlayerStatus status = getPlayerStatus(playerName);
+        PlayerStatus status = getPlayerStatusPublic(playerName);
 
         boolean shouldNotify = switch (status) {
             case Friend -> tabNotifyFriends.get();
@@ -545,20 +562,13 @@ public class NeighbourhoodWatch extends Module {
         info("%s %s has %s the server.", label, playerName, action);
     }
 
-    private void updateFriendEnemySets() {
-        friendSet.clear();
-        for (String name : friends.get()) friendSet.add(name.toLowerCase());
-        enemySet.clear();
-        for (String name : enemies.get()) enemySet.add(name.toLowerCase());
-        proxySet.clear();
-        for (String name : proxies.get()) proxySet.add(name.toLowerCase());
-    }
-
-    // ── Team / Colour Helpers (in-world entity glow only) ─────────────────────
+    // ═══════════════════════════════════════════════════════════════════════════
+    // Team / Glow Helpers
+    // ═══════════════════════════════════════════════════════════════════════════
 
     private Formatting getNearestColor(SettingColor color) {
-        Formatting best = Formatting.WHITE;
-        double minDist = Double.MAX_VALUE;
+        Formatting best  = Formatting.WHITE;
+        double minDist   = Double.MAX_VALUE;
         for (Formatting f : Formatting.values()) {
             if (!f.isColor()) continue;
             Integer rgb = f.getColorValue();
@@ -596,7 +606,43 @@ public class NeighbourhoodWatch extends Module {
         }
     }
 
-    // ── Public API ────────────────────────────────────────────────────────────
+    // ═══════════════════════════════════════════════════════════════════════════
+    // General Helpers
+    // ═══════════════════════════════════════════════════════════════════════════
+
+    private void resetState() {
+        notifiedPlayers.clear();
+        ignoredThisSession.clear();
+        playersInTab.clear();
+    }
+
+    private void cleanupScoreboardTeams() {
+        if (mc.world == null) return;
+        var scoreboard = mc.world.getScoreboard();
+        new java.util.ArrayList<>(scoreboard.getTeams()).stream()
+            .filter(t -> t.getName().startsWith("nwatch_"))
+            .forEach(t -> scoreboard.removeTeam(t));
+    }
+
+    private void updateFriendEnemySets() {
+        friendSet.clear();
+        for (String name : friends.get()) friendSet.add(name.toLowerCase());
+        enemySet.clear();
+        for (String name : enemies.get()) enemySet.add(name.toLowerCase());
+        proxySet.clear();
+        for (String name : proxies.get()) proxySet.add(name.toLowerCase());
+    }
+
+    private void disconnect(String reason) {
+        if (mc.player != null && mc.player.networkHandler != null) {
+            mc.player.networkHandler.getConnection().disconnect(Text.literal(reason));
+        }
+        this.toggle();
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════════
+    // Public API
+    // ═══════════════════════════════════════════════════════════════════════════
 
     public boolean isFriend(String name) { return name != null && friendSet.contains(name.toLowerCase()); }
     public boolean isEnemy(String name)  { return name != null && enemySet.contains(name.toLowerCase()); }
@@ -608,12 +654,4 @@ public class NeighbourhoodWatch extends Module {
         if (isProxy(name))  return PlayerStatus.Proxy;
         return PlayerStatus.Other;
     }
-
-    private PlayerStatus getPlayerStatus(String name) {
-        return getPlayerStatusPublic(name);
-    }
-
-    // ── Enums ─────────────────────────────────────────────────────────────────
-
-    public enum PlayerStatus { Friend, Enemy, Proxy, Other }
 }

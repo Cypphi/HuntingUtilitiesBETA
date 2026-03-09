@@ -6,7 +6,6 @@ import com.example.addon.HuntingUtilities;
 
 import meteordevelopment.meteorclient.events.world.TickEvent;
 import meteordevelopment.meteorclient.settings.BoolSetting;
-import meteordevelopment.meteorclient.settings.DoubleSetting;
 import meteordevelopment.meteorclient.settings.EnumSetting;
 import meteordevelopment.meteorclient.settings.IntSetting;
 import meteordevelopment.meteorclient.settings.KeybindSetting;
@@ -27,17 +26,24 @@ import net.minecraft.util.Hand;
 
 public class ElytraAssistant extends Module {
 
-    public enum MiddleClickAction {
-        None,
-        Rocket,
-        Pearl
-    }
+    // ═══════════════════════════════════════════════════════════════════════════
+    // Enums
+    // ═══════════════════════════════════════════════════════════════════════════
+
+    public enum MiddleClickAction { None, Rocket, Pearl }
+
+    // ═══════════════════════════════════════════════════════════════════════════
+    // Setting Groups
+    // ═══════════════════════════════════════════════════════════════════════════
 
     private final SettingGroup sgDurability = settings.createGroup("Durability");
     private final SettingGroup sgUtilities  = settings.createGroup("Utilities");
     private final SettingGroup sgMending    = settings.createGroup("Auto Mending");
 
-    // ─── Durability ────────────────────────────────────────
+    // ═══════════════════════════════════════════════════════════════════════════
+    // Settings — Durability
+    // ═══════════════════════════════════════════════════════════════════════════
+
     private final Setting<Boolean> autoSwap = sgDurability.add(new BoolSetting.Builder()
         .name("auto-swap")
         .description("Silently swaps to a fresh elytra when current one is low on durability.")
@@ -69,7 +75,10 @@ public class ElytraAssistant extends Module {
         .build()
     );
 
-    // ─── Utilities ────────────────────────────────────────
+    // ═══════════════════════════════════════════════════════════════════════════
+    // Settings — Utilities
+    // ═══════════════════════════════════════════════════════════════════════════
+
     private final Setting<MiddleClickAction> middleClickAction = sgUtilities.add(new EnumSetting.Builder<MiddleClickAction>()
         .name("middle-click-action")
         .description("Item to use when middle clicking.")
@@ -98,25 +107,10 @@ public class ElytraAssistant extends Module {
         .build()
     );
 
-    public final Setting<Double> afkInterval = sgUtilities.add(new DoubleSetting.Builder()
-        .name("interval")
-        .description("Interval in seconds between swings.")
-        .defaultValue(15.0)
-        .min(1.0)
-        .sliderMax(60.0)
-        .visible(antiAfk::get)
-        .build()
-    );
+    // ═══════════════════════════════════════════════════════════════════════════
+    // Settings — Auto Mending
+    // ═══════════════════════════════════════════════════════════════════════════
 
-    public final Setting<Boolean> randomDelay = sgUtilities.add(new BoolSetting.Builder()
-        .name("random-delay")
-        .description("Adds randomness to the interval.")
-        .defaultValue(true)
-        .visible(antiAfk::get)
-        .build()
-    );
-
-    // ─── Auto Mending ───────────────────────────────────
     private final Setting<Boolean> autoMend = sgMending.add(new BoolSetting.Builder()
         .name("auto-mend")
         .description("Tries to mend damaged elytra with XP bottles.")
@@ -158,29 +152,46 @@ public class ElytraAssistant extends Module {
         .build()
     );
 
-    // Internal state
-    private boolean noReplacementWarned = false;
-    private boolean noUsableElytraWarned = false;
-    private boolean wasMiddlePressed = false;
-    private int mendTimer = 0;
-    private int middleClickTimer = 0;
-    private int swingTimer = 0;
-    private int autoSwapReenableTimer = 0;
+    // ═══════════════════════════════════════════════════════════════════════════
+    // State
+    // ═══════════════════════════════════════════════════════════════════════════
+
+    private static final double AFK_INTERVAL_SECONDS = 15.0;
+
+    private boolean noReplacementWarned   = false;
+    private boolean noUsableElytraWarned  = false;
+    private boolean wasMiddlePressed      = false;
+    private int     mendTimer             = 0;
+    private int     middleClickTimer      = 0;
+    private int     swingTimer            = 0;
+    private int     autoSwapReenableTimer = 0;
+
+    // ═══════════════════════════════════════════════════════════════════════════
+    // Constructor
+    // ═══════════════════════════════════════════════════════════════════════════
 
     public ElytraAssistant() {
         super(HuntingUtilities.CATEGORY, "elytra-assistant", "Smart elytra & rocket management.");
     }
 
+    // ═══════════════════════════════════════════════════════════════════════════
+    // Lifecycle
+    // ═══════════════════════════════════════════════════════════════════════════
+
     @Override
     public void onActivate() {
-        noReplacementWarned = false;
-        noUsableElytraWarned = false;
-        wasMiddlePressed = false;
-        mendTimer = 0;
-        middleClickTimer = 0;
-        swingTimer = 0;
+        noReplacementWarned   = false;
+        noUsableElytraWarned  = false;
+        wasMiddlePressed      = false;
+        mendTimer             = 0;
+        middleClickTimer      = 0;
+        swingTimer            = 0;
         autoSwapReenableTimer = 0;
     }
+
+    // ═══════════════════════════════════════════════════════════════════════════
+    // Event Handler
+    // ═══════════════════════════════════════════════════════════════════════════
 
     @EventHandler
     private void onTick(TickEvent.Pre event) {
@@ -188,17 +199,14 @@ public class ElytraAssistant extends Module {
 
         if (autoSwapReenableTimer > 0) {
             autoSwapReenableTimer--;
-            if (autoSwapReenableTimer == 0) {
-                if (!autoSwap.get()) {
-                    autoSwap.set(true);
-                    info("Auto-mend finished. Re-enabling auto-swap.");
-                }
+            if (autoSwapReenableTimer == 0 && !autoSwap.get()) {
+                autoSwap.set(true);
+                info("Auto-mend finished. Re-enabling auto-swap.");
             }
         }
 
         if (middleClickTimer > 0) middleClickTimer--;
 
-        // Middle Click Logic
         if (middleClickAction.get() != MiddleClickAction.None) {
             if (Input.isButtonPressed(GLFW.GLFW_MOUSE_BUTTON_MIDDLE)) {
                 if (!wasMiddlePressed && middleClickTimer == 0) {
@@ -214,27 +222,27 @@ public class ElytraAssistant extends Module {
         if (antiAfk.get()) {
             if (swingTimer <= 0) {
                 mc.player.swingHand(Hand.MAIN_HAND);
-                int base = (int) (afkInterval.get() * 20);
-                if (randomDelay.get()) {
-                    base += (int) ((Math.random() - 0.5) * (base * 0.4));
-                }
+                int base = (int) (AFK_INTERVAL_SECONDS * 20);
+                base += (int) ((Math.random() - 0.5) * (base * 0.4));
                 swingTimer = Math.max(1, base);
             } else {
                 swingTimer--;
             }
         }
 
-        // Priority: auto mend (can override normal behavior)
         if (autoMend.get()) {
             handleAutoMend();
             return;
         }
 
-        // Normal durability-based auto-swap
         if (autoSwap.get()) {
             handleChestplateElytraSwitch();
         }
     }
+
+    // ═══════════════════════════════════════════════════════════════════════════
+    // Durability Logic
+    // ═══════════════════════════════════════════════════════════════════════════
 
     private void handleChestplateElytraSwitch() {
         ItemStack chest = mc.player.getEquippedStack(EquipmentSlot.CHEST);
@@ -269,7 +277,7 @@ public class ElytraAssistant extends Module {
 
             int durability = stack.getMaxDamage() - stack.getDamage();
             if (durability > durabilityThreshold.get() && durability > bestDurability) {
-                bestSlot = i;
+                bestSlot       = i;
                 bestDurability = durability;
             }
         }
@@ -278,21 +286,17 @@ public class ElytraAssistant extends Module {
         return new FindItemResult(-1, 0);
     }
 
-    private int getSlotId(int slot) {
-        if (slot >= 0 && slot < 9) return 36 + slot;
-        return slot;
-    }
-
-    /**
-     * Silently equips an item from any inventory slot (hotbar or main inventory)
-     * directly into the chestplate armor slot, without opening the inventory.
-     * slot is the index into player.getInventory().main (0–35).
-     */
     private void silentEquip(int slot) {
-        // InvUtils.move() sends the required packets silently without opening any screen.
-        // Slot 0-8 = hotbar, 9-35 = main inventory. toArmor(2) = chestplate slot.
         InvUtils.move().from(getSlotId(slot)).toArmor(2);
     }
+
+    private int getSlotId(int slot) {
+        return (slot >= 0 && slot < 9) ? 36 + slot : slot;
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════════
+    // Auto Mend Logic
+    // ═══════════════════════════════════════════════════════════════════════════
 
     private void handleAutoMend() {
         if (mendTimer > 0) {
@@ -304,22 +308,19 @@ public class ElytraAssistant extends Module {
         if (!xp.found()) {
             info("No more XP bottles — disabling auto-mend.");
             autoMend.set(false);
-            autoSwapReenableTimer = 30; // 1.5 second delay
+            autoSwapReenableTimer = 30;
             return;
         }
 
         ItemStack chest = mc.player.getEquippedStack(EquipmentSlot.CHEST);
         if (!chest.isOf(Items.ELYTRA) || !chest.isDamaged()) {
-            // Try to equip damaged one if possible
-            FindItemResult damaged = InvUtils.find(stack ->
-                stack.isOf(Items.ELYTRA) && stack.isDamaged()
-            );
+            FindItemResult damaged = InvUtils.find(stack -> stack.isOf(Items.ELYTRA) && stack.isDamaged());
             if (damaged.found()) {
                 InvUtils.move().from(damaged.slot()).toArmor(2);
             } else {
                 info("All Elytras mended!");
                 autoMend.set(false);
-                autoSwapReenableTimer = 30; // 1.5 second delay
+                autoSwapReenableTimer = 30;
             }
             return;
         }
@@ -343,23 +344,25 @@ public class ElytraAssistant extends Module {
         mendTimer = burstDelay.get();
     }
 
+    // ═══════════════════════════════════════════════════════════════════════════
+    // Rocket / Middle Click Logic
+    // ═══════════════════════════════════════════════════════════════════════════
+
     private void fireRocket() {
         if (mc.player == null || mc.interactionManager == null) return;
         if (preventGroundUsage.get() && mc.player.isOnGround()) return;
 
-        // Use offhand if rocket is there
         if (mc.player.getOffHandStack().isOf(Items.FIREWORK_ROCKET)) {
             mc.interactionManager.interactItem(mc.player, Hand.OFF_HAND);
             return;
         }
 
-        // Find rocket in hotbar
         FindItemResult rocketResult = InvUtils.findInHotbar(Items.FIREWORK_ROCKET);
         if (rocketResult.found()) {
             int prevSlot = mc.player.getInventory().selectedSlot;
             InvUtils.swap(rocketResult.slot(), false);
             mc.interactionManager.interactItem(mc.player, Hand.MAIN_HAND);
-            InvUtils.swap(prevSlot, false); // swap back
+            InvUtils.swap(prevSlot, false);
         }
     }
 
@@ -378,7 +381,7 @@ public class ElytraAssistant extends Module {
 
         if (itemResult == null || !itemResult.found()) return;
 
-        int slot = itemResult.slot();
+        int slot     = itemResult.slot();
         int prevSlot = mc.player.getInventory().selectedSlot;
 
         if (slot < 9) {
@@ -394,6 +397,10 @@ public class ElytraAssistant extends Module {
         }
     }
 
+    // ═══════════════════════════════════════════════════════════════════════════
+    // Setting Callbacks
+    // ═══════════════════════════════════════════════════════════════════════════
+
     private void onAutoSwapChanged(boolean v) {
         if (v && autoMend != null && autoMend.get()) {
             autoMend.set(false);
@@ -408,13 +415,14 @@ public class ElytraAssistant extends Module {
         }
     }
 
+    // ═══════════════════════════════════════════════════════════════════════════
+    // Public API
+    // ═══════════════════════════════════════════════════════════════════════════
 
-    // Helper for addons to check if rocket should be blocked
     public boolean shouldPreventRocketUse() {
         return isActive() && preventGroundUsage.get() && mc.player.isOnGround();
     }
 
-    // Helper for addons to check silent mode
     public boolean shouldSilentRocket() {
         return isActive() && silentRocket.get();
     }

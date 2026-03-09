@@ -28,12 +28,24 @@ import net.minecraft.util.Formatting;
 
 public class Illushine extends Module {
 
+    // ═══════════════════════════════════════════════════════════════════════════
+    // Enums
+    // ═══════════════════════════════════════════════════════════════════════════
+
+    private enum MobCategory { PASSIVE, NEUTRAL, HOSTILE }
+
+    // ═══════════════════════════════════════════════════════════════════════════
+    // Setting Groups
+    // ═══════════════════════════════════════════════════════════════════════════
+
     private final SettingGroup sgGeneral = settings.getDefaultGroup();
     private final SettingGroup sgPassive = settings.createGroup("Passive");
     private final SettingGroup sgNeutral = settings.createGroup("Neutral");
     private final SettingGroup sgHostile = settings.createGroup("Hostile");
 
-    // ── General ──
+    // ═══════════════════════════════════════════════════════════════════════════
+    // Settings — General
+    // ═══════════════════════════════════════════════════════════════════════════
 
     private final Setting<Integer> range = sgGeneral.add(new IntSetting.Builder()
         .name("range")
@@ -51,7 +63,9 @@ public class Illushine extends Module {
         .build()
     );
 
-    // ── Passive ──
+    // ═══════════════════════════════════════════════════════════════════════════
+    // Settings — Passive
+    // ═══════════════════════════════════════════════════════════════════════════
 
     private final Setting<Boolean> highlightPassive = sgPassive.add(new BoolSetting.Builder()
         .name("highlight-passive")
@@ -68,7 +82,9 @@ public class Illushine extends Module {
         .build()
     );
 
-    // ── Neutral ──
+    // ═══════════════════════════════════════════════════════════════════════════
+    // Settings — Neutral
+    // ═══════════════════════════════════════════════════════════════════════════
 
     private final Setting<Boolean> highlightNeutral = sgNeutral.add(new BoolSetting.Builder()
         .name("highlight-neutral")
@@ -85,7 +101,9 @@ public class Illushine extends Module {
         .build()
     );
 
-    // ── Hostile ──
+    // ═══════════════════════════════════════════════════════════════════════════
+    // Settings — Hostile
+    // ═══════════════════════════════════════════════════════════════════════════
 
     private final Setting<Boolean> highlightHostile = sgHostile.add(new BoolSetting.Builder()
         .name("highlight-hostile")
@@ -102,13 +120,23 @@ public class Illushine extends Module {
         .build()
     );
 
-    // ── State ──
+    // ═══════════════════════════════════════════════════════════════════════════
+    // State
+    // ═══════════════════════════════════════════════════════════════════════════
 
     private final Set<Integer> highlightedEntities = new HashSet<>();
+
+    // ═══════════════════════════════════════════════════════════════════════════
+    // Constructor
+    // ═══════════════════════════════════════════════════════════════════════════
 
     public Illushine() {
         super(HuntingUtilities.CATEGORY, "illushine", "Highlights mobs with a glow outline by hostility type.");
     }
+
+    // ═══════════════════════════════════════════════════════════════════════════
+    // Lifecycle
+    // ═══════════════════════════════════════════════════════════════════════════
 
     @Override
     public void onActivate() {
@@ -126,6 +154,10 @@ public class Illushine extends Module {
         }
         highlightedEntities.clear();
     }
+
+    // ═══════════════════════════════════════════════════════════════════════════
+    // Event Handler
+    // ═══════════════════════════════════════════════════════════════════════════
 
     @EventHandler
     private void onRender(Render3DEvent event) {
@@ -169,9 +201,9 @@ public class Illushine extends Module {
         });
     }
 
-    // ── Categorisation ──
-
-    private enum MobCategory { PASSIVE, NEUTRAL, HOSTILE }
+    // ═══════════════════════════════════════════════════════════════════════════
+    // Categorisation
+    // ═══════════════════════════════════════════════════════════════════════════
 
     private MobCategory categorise(MobEntity mob) {
         if (mob instanceof Angerable)     return MobCategory.NEUTRAL;
@@ -180,11 +212,13 @@ public class Illushine extends Module {
         return MobCategory.HOSTILE;
     }
 
-    // ── Team / Colour Helpers ──
+    // ═══════════════════════════════════════════════════════════════════════════
+    // Team / Colour Helpers
+    // ═══════════════════════════════════════════════════════════════════════════
 
     private Formatting getNearestColor(SettingColor color) {
-        Formatting best = Formatting.WHITE;
-        double minDist = Double.MAX_VALUE;
+        Formatting best   = Formatting.WHITE;
+        double    minDist = Double.MAX_VALUE;
         for (Formatting f : Formatting.values()) {
             if (!f.isColor()) continue;
             Integer rgb = f.getColorValue();
@@ -202,8 +236,8 @@ public class Illushine extends Module {
 
     private void setEntityTeam(Entity entity, Formatting color) {
         Scoreboard scoreboard = mc.world.getScoreboard();
-        String teamName = "illushine_" + color.getName();
-        Team team = scoreboard.getTeam(teamName);
+        String     teamName   = "illushine_" + color.getName();
+        Team       team       = scoreboard.getTeam(teamName);
         if (team == null) {
             team = scoreboard.addTeam(teamName);
             team.setColor(color);
@@ -215,8 +249,8 @@ public class Illushine extends Module {
     }
 
     private void clearEntityTeam(Entity entity) {
-        Scoreboard scoreboard = mc.world.getScoreboard();
-        Team currentTeam = entity.getScoreboardTeam();
+        Scoreboard scoreboard   = mc.world.getScoreboard();
+        Team       currentTeam  = entity.getScoreboardTeam();
         if (currentTeam != null && currentTeam.getName().startsWith("illushine_")) {
             scoreboard.removeScoreHolderFromTeam(entity.getNameForScoreboard(), currentTeam);
         }
