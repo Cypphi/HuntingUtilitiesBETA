@@ -5,10 +5,17 @@ import java.util.Set;
 
 import com.example.addon.HuntingUtilities;
 import com.example.addon.utils.GlowingRegistry;
+import com.mojang.blaze3d.systems.RenderSystem;
+import net.minecraft.client.render.BufferBuilder;
+import net.minecraft.client.render.BufferRenderer;
+import net.minecraft.client.gl.ShaderProgramKeys;
+import net.minecraft.client.render.Tessellator;
+import net.minecraft.client.render.VertexFormat;
+import net.minecraft.client.render.VertexFormats;
+import org.joml.Matrix4f;
 
 import meteordevelopment.meteorclient.events.render.Render2DEvent;
 import meteordevelopment.meteorclient.events.render.Render3DEvent;
-import meteordevelopment.meteorclient.renderer.Renderer2D;
 import meteordevelopment.meteorclient.settings.BoolSetting;
 import meteordevelopment.meteorclient.settings.ColorSetting;
 import meteordevelopment.meteorclient.settings.EnumSetting;
@@ -19,7 +26,6 @@ import meteordevelopment.meteorclient.settings.SettingGroup;
 import meteordevelopment.meteorclient.systems.modules.Module;
 import meteordevelopment.meteorclient.utils.render.color.SettingColor;
 import meteordevelopment.orbit.EventHandler;
-import net.minecraft.client.gui.DrawContext;
 import net.minecraft.entity.Entity;
 import net.minecraft.entity.EntityType;
 import net.minecraft.entity.mob.Angerable;
@@ -93,7 +99,7 @@ public class Illushine extends Module {
 
     private final Setting<SettingColor> crosshairColor = sgCrosshair.add(new ColorSetting.Builder()
         .name("crosshair-color")
-        .description("Color of the Normal crosshair lines and gap dot.")
+        .description("Color of the Normal crosshair lines.")
         .defaultValue(new SettingColor(255, 255, 255, 255))
         .visible(() -> crosshairMode.get() == CrosshairMode.Normal)
         .build()
@@ -269,49 +275,60 @@ public class Illushine extends Module {
 
     @EventHandler
     private void onRender2D(Render2DEvent event) {
-        if (mc.options.getPerspective().isFirstPerson()
-                && mc.currentScreen == null
-                && crosshairMode.get() != CrosshairMode.None) {
-            renderCrosshair(event.drawContext);
+        CrosshairMode mode = crosshairMode.get();
+        if (mode == CrosshairMode.None) return;
+        if (!mc.options.getPerspective().isFirstPerson()) return;
+        if (mc.currentScreen != null) return;
+
+        int cx = event.screenWidth  / 2;
+        int cy = event.screenHeight / 2;
+
+        RenderSystem.enableBlend();
+        RenderSystem.defaultBlendFunc();
+        RenderSystem.setShader(ShaderProgramKeys.POSITION_COLOR);
+
+        switch (mode) {
+            case WhiteDot -> fillRect(cx - 1, cy - 1, cx + 1, cy + 1, 0xFFFFFFFF);
+            case Normal   -> drawNormalCrosshair(cx, cy);
+            default       -> {}
         }
+
+        RenderSystem.disableBlend();
     }
 
     // ═══════════════════════════════════════════════════════════════════════════
     // Crosshair Rendering
     // ═══════════════════════════════════════════════════════════════════════════
 
-    private void renderCrosshair(DrawContext context) {
-        int cx = mc.getWindow().getScaledWidth()  / 2;
-        int cy = mc.getWindow().getScaledHeight() / 2;
+    private void drawNormalCrosshair(int cx, int cy) {
+        int col  = toARGB(crosshairColor.get());
+        int arm  = crosshairSize.get();
+        int gap  = crosshairGap.get();
+        int th   = crosshairThickness.get();
+        int half = th / 2;
 
-        switch (crosshairMode.get()) {
-            case WhiteDot -> {
-                // Single 2×2 white dot centered on the screen
-                context.fill(cx - 1, cy - 1, cx + 1, cy + 1, 0xFFFFFFFF);
-            }
-            case Normal -> {
-                SettingColor c   = crosshairColor.get();
-                int          col = toARGB(c);
-                int          arm = crosshairSize.get();
-                int          gap = crosshairGap.get();
-                int          th  = crosshairThickness.get();
-                int          half = th / 2;
+        fillRect(cx - arm - gap, cy - half,      cx - gap,       cy - half + th,  col);
+        fillRect(cx + gap,       cy - half,      cx + arm + gap, cy - half + th,  col);
+        fillRect(cx - half,      cy - arm - gap, cx - half + th, cy - gap,        col);
+        fillRect(cx - half,      cy + gap,       cx - half + th, cy + arm + gap,  col);
+    }
 
-                // Horizontal left arm
-                context.fill(cx - arm - gap, cy - half,
-                             cx - gap,       cy - half + th, col);
-                // Horizontal right arm
-                context.fill(cx + gap,       cy - half,
-                             cx + arm + gap, cy - half + th, col);
-                // Vertical top arm
-                context.fill(cx - half, cy - arm - gap,
-                             cx - half + th, cy - gap,       col);
-                // Vertical bottom arm
-                context.fill(cx - half, cy + gap,
-                             cx - half + th, cy + arm + gap, col);
-            }
-            default -> { /* CrosshairMode.None — nothing drawn */ }
-        }
+    private static void fillRect(int x1, int y1, int x2, int y2, int color) {
+        float a = ((color >> 24) & 0xFF) / 255f;
+        float r = ((color >> 16) & 0xFF) / 255f;
+        float g = ((color >>  8) & 0xFF) / 255f;
+        float b = ( color        & 0xFF) / 255f;
+
+        Tessellator tess   = Tessellator.getInstance();
+        BufferBuilder buf  = tess.begin(VertexFormat.DrawMode.QUADS, VertexFormats.POSITION_COLOR);
+        Matrix4f mat       = RenderSystem.getModelViewMatrix();
+
+        buf.vertex(mat, x1, y2, 0).color(r, g, b, a);
+        buf.vertex(mat, x2, y2, 0).color(r, g, b, a);
+        buf.vertex(mat, x2, y1, 0).color(r, g, b, a);
+        buf.vertex(mat, x1, y1, 0).color(r, g, b, a);
+
+        BufferRenderer.drawWithGlobalProgram(buf.end());
     }
 
     // ═══════════════════════════════════════════════════════════════════════════
@@ -362,8 +379,8 @@ public class Illushine extends Module {
     }
 
     private void clearEntityTeam(Entity entity) {
-        Scoreboard scoreboard   = mc.world.getScoreboard();
-        Team       currentTeam  = entity.getScoreboardTeam();
+        Scoreboard scoreboard  = mc.world.getScoreboard();
+        Team       currentTeam = entity.getScoreboardTeam();
         if (currentTeam != null && currentTeam.getName().startsWith("illushine_")) {
             scoreboard.removeScoreHolderFromTeam(entity.getNameForScoreboard(), currentTeam);
         }
