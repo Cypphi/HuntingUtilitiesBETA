@@ -210,29 +210,33 @@ public class ThirdSight extends Module {
             mc.options.setPerspective(Perspective.THIRD_PERSON_BACK);
         }
 
-        // Handle shoulder toggle keybind — flip side on press, not hold.
-        if (shoulderEnabled.get()) {
-            boolean isPressed = shoulderToggleKey.get().isPressed();
-            if (isPressed && !wasKeyPressed) {
-                shoulderSide.set(
-                    shoulderSide.get() == ShoulderSide.Right
-                        ? ShoulderSide.Left
-                        : ShoulderSide.Right
-                );
+        if (mc.currentScreen == null) {
+            // Handle shoulder toggle keybind — flip side on press, not hold.
+            if (shoulderEnabled.get()) {
+                boolean isPressed = shoulderToggleKey.get().isPressed();
+                if (isPressed && !wasKeyPressed) {
+                    shoulderSide.set(
+                        shoulderSide.get() == ShoulderSide.Right
+                            ? ShoulderSide.Left
+                            : ShoulderSide.Right
+                    );
+                }
+                wasKeyPressed = isPressed;
             }
-            wasKeyPressed = isPressed;
-        }
 
-        // Handle zoom keybind
-        boolean zoomPressed = zoomKey.get().isPressed();
-        if (zoomToggle.get()) {
-            if (zoomPressed && !wasZoomKeyPressed) {
-                isZooming = !isZooming;
+            // Handle zoom keybind
+            boolean zoomPressed = zoomKey.get().isPressed();
+            if (zoomToggle.get()) {
+                if (zoomPressed && !wasZoomKeyPressed) isZooming = !isZooming;
+            } else {
+                isZooming = zoomPressed;
             }
+            wasZoomKeyPressed = zoomPressed;
         } else {
-            isZooming = zoomPressed;
+            wasKeyPressed = false;
+            wasZoomKeyPressed = false;
+            isZooming = false;
         }
-        wasZoomKeyPressed = zoomPressed;
 
         updateLateralOffset();
     }

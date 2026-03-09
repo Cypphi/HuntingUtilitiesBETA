@@ -1125,7 +1125,7 @@ public class PortalTracker extends Module {
     // ───────────────────────────────────────────────────────────────
 
     private void startPlatformBuild() {
-        if (mc.player == null) return;
+        if (mc.player == null || mc.currentScreen != null) return;
         platformPositions.clear();
         platformIndex = 0;
         platformTimer = 0;
