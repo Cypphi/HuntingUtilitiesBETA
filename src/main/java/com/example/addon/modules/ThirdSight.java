@@ -25,9 +25,16 @@ public class ThirdSight extends Module {
 
     // ── General ──────────────────────────────────────────────────────────────
 
+    private final Setting<Keybind> noDistanceKey = sgGeneral.add(new KeybindSetting.Builder()
+        .name("no-distance-key")
+        .description("Toggles a mode that disables camera distance modifications, allowing vanilla third person unless zooming.")
+        .defaultValue(Keybind.none())
+        .build()
+    );
+
     public final Setting<CameraMode> cameraMode = sgGeneral.add(new EnumSetting.Builder<CameraMode>()
         .name("camera-mode")
-        .description("ThirdPerson: standard over-the-shoulder. BirdsEye: camera below looking up at the player's back.")
+        .description("ThirdPerson: over-the-shoulder. BirdsEye: camera below looking up.")
         .defaultValue(CameraMode.ThirdPerson)
         .build()
     );
@@ -124,6 +131,18 @@ public class ThirdSight extends Module {
         .min(0.5)
         .max(30.0)
         .sliderRange(0.5, 10.0)
+        .visible(() -> cameraMode.get() != CameraMode.BirdsEye)
+        .build()
+    );
+
+    public final Setting<Double> zoomFov = sgZoom.add(new DoubleSetting.Builder()
+        .name("zoom-fov")
+        .description("Field of View when zooming in First Person.")
+        .defaultValue(30.0)
+        .min(1.0)
+        .max(110.0)
+        .sliderRange(10.0, 110.0)
+        .visible(() -> cameraMode.get() != CameraMode.BirdsEye)
         .build()
     );
 
@@ -131,6 +150,7 @@ public class ThirdSight extends Module {
         .name("zoom-key")
         .description("Key to activate zoom.")
         .defaultValue(Keybind.none())
+        .visible(() -> cameraMode.get() != CameraMode.BirdsEye)
         .build()
     );
 
@@ -138,6 +158,7 @@ public class ThirdSight extends Module {
         .name("toggle-mode")
         .description("If true, press to toggle zoom. If false, hold to zoom.")
         .defaultValue(false)
+        .visible(() -> cameraMode.get() != CameraMode.BirdsEye)
         .build()
     );
 
@@ -156,6 +177,9 @@ public class ThirdSight extends Module {
     private double currentDistance = 4.0;
     private boolean isZooming = false;
     private boolean wasZoomKeyPressed = false;
+    private boolean noDistanceActive = false;
+    private boolean wasNoDistanceKeyPressed = false;
+    private double originalFov = -1;
 
     private Perspective previousPerspective = null;
     private boolean     wasKeyPressed       = false;
@@ -170,26 +194,38 @@ public class ThirdSight extends Module {
     @Override
     public void onActivate() {
         if (mc.player == null || mc.options == null) return;
+
         cameraYaw   = mc.player.getYaw();
         cameraPitch = mc.player.getPitch();
+
         previousPerspective = mc.options.getPerspective();
-        mc.options.setPerspective(Perspective.THIRD_PERSON_BACK);
+        if (previousPerspective == Perspective.FIRST_PERSON) mc.options.setPerspective(Perspective.THIRD_PERSON_BACK);
         updateLateralOffset();
         if (smoothTransitions.get()) lateralOffset = 0f;
 
         currentDistance = distance.get();
         isZooming = false;
         wasZoomKeyPressed = false;
+        noDistanceActive = false;
+        wasNoDistanceKeyPressed = false;
+        originalFov = -1;
     }
 
     @Override
     public void onDeactivate() {
-        if (mc.options != null && previousPerspective != null) {
-            mc.options.setPerspective(previousPerspective);
+        if (mc.options != null) {
+            if (previousPerspective != null) {
+                mc.options.setPerspective(previousPerspective);
+            }
+            if (originalFov != -1) {
+                mc.options.getFov().setValue((int) originalFov);
+            }
         }
+
         previousPerspective = null;
         lateralOffset = 0f;
         shoulderEnabled.set(false);
+        originalFov = -1;
     }
 
     // ── Tick ──────────────────────────────────────────────────────────────────
@@ -198,47 +234,84 @@ public class ThirdSight extends Module {
     private void onTick(TickEvent.Pre event) {
         if (mc.player == null || mc.options == null) return;
 
-        if (cameraMode.get() == CameraMode.BirdsEye) {
-            // Lock pitch downward — camera sits below and behind the player,
-            // looking up at the back of their head toward the sky.
-            cameraYaw   = mc.player.getYaw();
-            cameraPitch = 90f;
-        }
-
-        // Re-enforce perspective in case setting changed or F5 was pressed.
-        if (mc.options.getPerspective() != Perspective.THIRD_PERSON_BACK) {
-            mc.options.setPerspective(Perspective.THIRD_PERSON_BACK);
-        }
-
         if (mc.currentScreen == null) {
+            // No Distance toggle
+            boolean noDistPressed = noDistanceKey.get().isPressed();
+            if (noDistPressed && !wasNoDistanceKeyPressed) {
+                noDistanceActive = !noDistanceActive;
+                info("No Distance mode %s.", noDistanceActive ? "§aenabled" : "§cdisabled");
+            }
+            wasNoDistanceKeyPressed = noDistPressed;
+
             // Handle shoulder toggle keybind — flip side on press, not hold.
             if (shoulderEnabled.get()) {
                 boolean isPressed = shoulderToggleKey.get().isPressed();
                 if (isPressed && !wasKeyPressed) {
-                    shoulderSide.set(
-                        shoulderSide.get() == ShoulderSide.Right
-                            ? ShoulderSide.Left
-                            : ShoulderSide.Right
-                    );
+                    shoulderSide.set(shoulderSide.get() == ShoulderSide.Right ? ShoulderSide.Left : ShoulderSide.Right);
                 }
                 wasKeyPressed = isPressed;
             }
 
             // Handle zoom keybind
             boolean zoomPressed = zoomKey.get().isPressed();
-            if (zoomToggle.get()) {
-                if (zoomPressed && !wasZoomKeyPressed) isZooming = !isZooming;
+            if (cameraMode.get() != CameraMode.BirdsEye) {
+                if (zoomToggle.get()) {
+                    if (zoomPressed && !wasZoomKeyPressed) isZooming = !isZooming;
+                } else {
+                    isZooming = zoomPressed;
+                }
             } else {
-                isZooming = zoomPressed;
+                isZooming = false;
             }
             wasZoomKeyPressed = zoomPressed;
         } else {
+            wasNoDistanceKeyPressed = false;
             wasKeyPressed = false;
             wasZoomKeyPressed = false;
-            isZooming = false;
+            if (!zoomToggle.get()) isZooming = false;
         }
 
-        updateLateralOffset();
+        if (noDistanceActive) {
+            if (previousPerspective != null) {
+                mc.options.setPerspective(previousPerspective);
+                previousPerspective = null;
+            }
+
+            if (isZooming) {
+                if (mc.options.getPerspective().isFirstPerson()) {
+                    if (originalFov == -1) originalFov = mc.options.getFov().getValue();
+                    mc.options.getFov().setValue(zoomFov.get().intValue());
+                    targetLateralOffset = 0f;
+                } else {
+                    if (originalFov != -1) {
+                        mc.options.getFov().setValue((int) originalFov);
+                        originalFov = -1;
+                    }
+                    updateLateralOffset();
+                }
+            } else {
+                if (originalFov != -1) {
+                    mc.options.getFov().setValue((int) originalFov);
+                    originalFov = -1;
+                }
+                targetLateralOffset = 0f;
+            }
+        } else {
+            if (originalFov != -1) {
+                mc.options.getFov().setValue((int) originalFov);
+                originalFov = -1;
+            }
+            if (previousPerspective == null) previousPerspective = mc.options.getPerspective();
+            if (mc.options.getPerspective() != Perspective.THIRD_PERSON_BACK) {
+                mc.options.setPerspective(Perspective.THIRD_PERSON_BACK);
+            }
+
+            if (cameraMode.get() == CameraMode.BirdsEye) {
+                cameraYaw   = mc.player.getYaw();
+                cameraPitch = 90f;
+            }
+            updateLateralOffset();
+        }
     }
 
     @EventHandler
@@ -274,14 +347,24 @@ public class ThirdSight extends Module {
         return currentDistance;
     }
 
+    public boolean isZooming() {
+        return isZooming;
+    }
+
+    public boolean isNoDistanceActive() {
+        return noDistanceActive;
+    }
+
     /**
      * Called by ThirdSightMouseMixin — mouse delta should only apply in
      * ThirdPerson mode with free-look on. BirdsEye drives cameraYaw itself.
      */
     public boolean isFreeLookActive() {
-        return isActive() && (
-            (cameraMode.get() == CameraMode.ThirdPerson && freeLook.get()) ||
-            cameraMode.get() == CameraMode.BirdsEye
-        );
+        if (!isActive()) return false;
+        if (mc.options.getPerspective().isFirstPerson()) return false;
+        // In "No Distance" mode, free-look is only active if we are also zooming.
+        if (noDistanceActive && !isZooming()) return false;
+        return (cameraMode.get() == CameraMode.ThirdPerson && freeLook.get())
+            || (cameraMode.get() == CameraMode.BirdsEye);
     }
 }

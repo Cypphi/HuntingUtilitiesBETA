@@ -20,7 +20,7 @@ public class ThirdSightMouseMixin {
     @Inject(method = "updateMouse", at = @At("HEAD"), cancellable = true)
     private void onUpdateMouse(CallbackInfo ci) {
         ThirdSight module = Modules.get().get(ThirdSight.class);
-        if (module == null || !module.isActive() || !module.freeLook.get()) return;
+        if (module == null || !module.isFreeLookActive()) return;
         if (client.player == null || client.currentScreen != null) return;
 
         ci.cancel();
