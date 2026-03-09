@@ -1334,31 +1334,24 @@ public class RocketPilot extends Module {
     private void fireRocket() {
         if (mc.player == null || mc.interactionManager == null) return;
 
-        int selected   = mc.player.getInventory().selectedSlot;
         int rocketSlot = -1;
 
         for (int i = 0; i < 9; i++) {
             if (mc.player.getInventory().getStack(i).isOf(Items.FIREWORK_ROCKET)) { rocketSlot = i; break; }
         }
-        if (rocketSlot == -1 && mc.player.getOffHandStack().isOf(Items.FIREWORK_ROCKET)) rocketSlot = 40;
-        if (rocketSlot == -1) return;
-
-        if (rocketSlot < 9) {
-            mc.player.getInventory().selectedSlot = rocketSlot;
-            if (silentRockets.get()) {
-                mc.player.networkHandler.sendPacket(
-                    new net.minecraft.network.packet.c2s.play.PlayerInteractItemC2SPacket(
-                        Hand.MAIN_HAND, 0,
-                        mc.player.getYaw(), mc.player.getPitch()
-                    )
-                );
-            } else {
-                mc.interactionManager.interactItem(mc.player, Hand.MAIN_HAND);
+        
+        if (rocketSlot == -1) {
+            if (mc.player.getOffHandStack().isOf(Items.FIREWORK_ROCKET)) {
+                mc.interactionManager.interactItem(mc.player, Hand.OFF_HAND);
+                if (!silentRockets.get()) mc.player.swingHand(Hand.OFF_HAND);
             }
-            mc.player.getInventory().selectedSlot = selected;
-        } else {
-            mc.interactionManager.interactItem(mc.player, Hand.OFF_HAND);
+            return;
         }
+
+        InvUtils.swap(rocketSlot, true);
+        mc.interactionManager.interactItem(mc.player, Hand.MAIN_HAND);
+        if (!silentRockets.get()) mc.player.swingHand(Hand.MAIN_HAND);
+        InvUtils.swapBack();
     }
 
     private void disconnect(String reason) {
