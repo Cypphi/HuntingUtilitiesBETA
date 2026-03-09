@@ -73,10 +73,6 @@ public class LootLens extends Module {
     private static final int DIMENSION_CHANGE_COOLDOWN_TICKS = 40;
     private int dimensionChangeCooldown = 0;
 
-    /**
-     * FIX: cleanupDistantContainers was running every tick. Now throttled to
-     * every CLEANUP_INTERVAL ticks to reduce per-tick overhead.
-     */
     private static final int CLEANUP_INTERVAL = 40;
     private int cleanupTimer = 0;
 
@@ -177,7 +173,6 @@ public class LootLens extends Module {
         .build()
     );
 
-    // FIX: ShulkerBoxBlock placed in the world is now a tracked StorageType.
     private final Setting<Boolean> scanShulkerBoxes = sgStorage.add(new BoolSetting.Builder()
         .name("shulker-boxes")
         .description("Detect shulker boxes placed in the world.")
@@ -221,7 +216,6 @@ public class LootLens extends Module {
         .build()
     );
 
-    // Moved from sgGeneral to fix forward reference
     private final Setting<Integer> beamWidth = sgGeneral.add(new IntSetting.Builder()
         .name("beam-width")
         .description("Beam width (in hundredths of a block).")
@@ -352,7 +346,7 @@ public class LootLens extends Module {
         .build()
     );
 
-    private final Setting<Boolean> scanItemFrames = sgDecorative.add(new BoolSetting.Builder()
+    private final Setting<Boolean> scanItemFramesSetting = sgDecorative.add(new BoolSetting.Builder()
         .name("item-frames")
         .description("Detect item frames and glow item frames holding shulker boxes or custom items.")
         .defaultValue(true)
@@ -361,7 +355,7 @@ public class LootLens extends Module {
     private final Setting<SettingColor> itemFrameColor = sgDecorative.add(new ColorSetting.Builder()
         .name("item-frame-color")
         .defaultValue(new SettingColor(255, 100, 255, 150))
-        .visible(scanItemFrames::get)
+        .visible(scanItemFramesSetting::get)
         .build()
     );
 
@@ -428,7 +422,6 @@ public class LootLens extends Module {
             }
         } catch (Exception ignored) { return; }
 
-        // FIX: Cleanup now throttled — only runs every CLEANUP_INTERVAL ticks.
         if (++cleanupTimer >= CLEANUP_INTERVAL) {
             cleanupTimer = 0;
             cleanupDistantContainers();
@@ -481,19 +474,11 @@ public class LootLens extends Module {
 
     // ─────────────────────────── Mixin-facing API ───────────────────────────
 
-    /**
-     * Called by LootLensInteractMixin — records the block the player clicked
-     * before the server responds with an OpenScreen packet.
-     */
     public void setLastInteractedPos(BlockPos pos) {
         lastOpenedContainer    = pos;
         screenInventoryChecked = false;
     }
 
-    /**
-     * Called by LootLensMixin on OpenScreenS2CPacket arrival — confirms that
-     * a screen open followed the interaction and resets the per-screen flag.
-     */
     public void onOpenScreenPacket() {
         screenInventoryChecked = false;
     }
@@ -586,9 +571,6 @@ public class LootLens extends Module {
         }
     }
 
-    /**
-     * FIX: ShulkerBoxBlock placed in the world is now classified as SHULKER_BOX.
-     */
     private StorageType classifyBlock(Block block) {
         if (block == Blocks.CHEST             && scanChests.get())        return StorageType.CHEST;
         if (block == Blocks.TRAPPED_CHEST     && scanTrappedChests.get()) return StorageType.TRAPPED_CHEST;
@@ -627,7 +609,6 @@ public class LootLens extends Module {
         stackedMinecartCounts.clear();
         stackedMinecartCounts.putAll(minecartCountMap);
 
-        // FIX: Ghost minecart positions removed when no longer present.
         containers.entrySet().removeIf(entry -> {
             if (entry.getValue() != StorageType.CHEST_MINECART) return false;
             BlockPos pos = entry.getKey();
@@ -641,12 +622,8 @@ public class LootLens extends Module {
         });
     }
 
-    /**
-     * FIX: Item frame maps are now diffed rather than cleared and rebuilt from
-     * scratch every tick. Only entries that are no longer in the world are removed.
-     */
     private void scanItemFrames() {
-        if (!scanItemFrames.get()) return;
+        if (!scanItemFramesSetting.get()) return;
 
         BlockPos playerPos = mc.player.getBlockPos();
         int scanRange = range.get();
@@ -683,7 +660,6 @@ public class LootLens extends Module {
             }
         }
 
-        // Remove stale entries that are no longer in range or no longer valid.
         itemFrameEntities.entrySet().removeIf(e -> !currentFramePositions.contains(e.getKey()));
         glowItemFrameEntities.entrySet().removeIf(e -> !currentFramePositions.contains(e.getKey()));
         notifiedItemFrames.removeIf(pos ->
@@ -766,10 +742,10 @@ public class LootLens extends Module {
     private void onRender(Render3DEvent event) {
         if (mc.player == null || mc.world == null) return;
 
-        ShapeMode    mode               = shapeMode.get();
-        Set<BlockPos> toRemove          = new HashSet<>();
+        ShapeMode    mode                  = shapeMode.get();
+        Set<BlockPos> toRemove             = new HashSet<>();
         Set<BlockPos> renderedDoubleChests = new HashSet<>();
-        List<BeamData> beamsToRender    = new ArrayList<>();
+        List<BeamData> beamsToRender       = new ArrayList<>();
 
         renderItemFrames(event, beamsToRender);
 
@@ -790,8 +766,8 @@ public class LootLens extends Module {
                 }
                 renderBox = getMinecartChestBox(minecarts.get(0));
             } else {
-                Block currentBlock = mc.world.getBlockState(pos).getBlock();
-                if (!validateBlockType(currentBlock, type)) {
+                BlockState currentState = mc.world.getBlockState(pos);
+                if (!validateBlockType(currentState.getBlock(), type)) {
                     toRemove.add(pos);
                     continue;
                 }
@@ -800,6 +776,8 @@ public class LootLens extends Module {
                 if (adjacentPos != null) {
                     renderBox = createPaddedDoubleChestBox(pos, adjacentPos);
                     renderedDoubleChests.add(adjacentPos);
+                } else if (type == StorageType.SHULKER_BOX) {
+                    renderBox = createShulkerBox(pos, currentState);
                 } else {
                     renderBox = createPaddedBox(pos);
                 }
@@ -808,7 +786,7 @@ public class LootLens extends Module {
             SettingColor color;
             if (shulkerContainers.contains(pos)) {
                 color = shulkerFoundColor.get();
-                event.renderer.box(renderBox, color, color, ShapeMode.Both, 0);
+                event.renderer.box(renderBox, color, color, mode, 0);
                 if (showBeam.get()) beamsToRender.add(new BeamData(renderBox, color));
             } else {
                 boolean isStacked = type == StorageType.CHEST_MINECART
@@ -818,7 +796,6 @@ public class LootLens extends Module {
                 color = isStacked ? stackedMinecartColor.get() : getColor(type);
                 if (color != null) {
                     event.renderer.box(renderBox, color, color, mode, 0);
-                    // Automatically render a beam for stacked minecarts to improve visibility
                     if (isStacked) beamsToRender.add(new BeamData(renderBox, color));
                 }
             }
@@ -880,7 +857,7 @@ public class LootLens extends Module {
     }
 
     private void renderItemFrames(Render3DEvent event, List<BeamData> beams) {
-        SettingColor color    = itemFrameColor.get();
+        SettingColor color = itemFrameColor.get();
 
         for (ItemFrameEntity frame : itemFrameEntities.values()) {
             if (frame == null || frame.isRemoved()) continue;
@@ -899,26 +876,15 @@ public class LootLens extends Module {
 
     private Box getMinecartChestBox(ChestMinecartEntity minecart) {
         Box entityBox = minecart.getBoundingBox();
-        // A standard chest is 14/16 blocks wide/deep.
-        double chestSize = 14.0 / 16.0; // 0.875
-        // A minecart is 0.98 blocks wide. Center the chest box.
+        double chestSize = 14.0 / 16.0;
         double xPadding = (entityBox.getLengthX() - chestSize) / 2.0;
         double zPadding = (entityBox.getLengthZ() - chestSize) / 2.0;
-
-        // The chest model is roughly 10/16 blocks high.
-        double chestHeight = 10.0 / 16.0; // 0.625
-
-        // The chest sits in the top portion of the minecart's bounding box.
+        double chestHeight = 10.0 / 16.0;
         double minY = entityBox.maxY - chestHeight;
         double maxY = entityBox.maxY;
-
         return new Box(
-            entityBox.minX + xPadding,
-            minY,
-            entityBox.minZ + zPadding,
-            entityBox.maxX - xPadding,
-            maxY,
-            entityBox.maxZ - zPadding
+            entityBox.minX + xPadding, minY, entityBox.minZ + zPadding,
+            entityBox.maxX - xPadding, maxY, entityBox.maxZ - zPadding
         );
     }
 
@@ -926,6 +892,34 @@ public class LootLens extends Module {
         double p = 0.0625;
         return new Box(pos.getX() + p, pos.getY() + p, pos.getZ() + p,
                        pos.getX() + 1 - p, pos.getY() + 1 - p, pos.getZ() + 1 - p);
+    }
+
+    /**
+     * Builds a render box that matches the actual shulker box block model.
+     * The vanilla shulker box model is 16x16x16 on the base but the lid extends
+     * outward by 2px (2/16) in the direction it faces when open. When closed
+     * (animation progress 0) it is a perfect unit cube, so we use the block's
+     * own outline shape queried from the world, expanded by 0.5 px on every
+     * side so the highlight sits just outside the model rather than z-fighting
+     * with it. Falling back to a full unit cube ensures nothing breaks if the
+     * shape lookup fails.
+     */
+    private Box createShulkerBox(BlockPos pos, BlockState state) {
+        try {
+            Box shape = state.getOutlineShape(mc.world, pos).getBoundingBox();
+            double p = 0.5 / 16.0; // 0.03125 — half a pixel outward
+            return new Box(
+                pos.getX() + shape.minX - p,
+                pos.getY() + shape.minY - p,
+                pos.getZ() + shape.minZ - p,
+                pos.getX() + shape.maxX + p,
+                pos.getY() + shape.maxY + p,
+                pos.getZ() + shape.maxZ + p
+            );
+        } catch (Exception ignored) {
+            // Fallback: full block with standard padding
+            return createPaddedBox(pos);
+        }
     }
 
     private Box createPaddedDoubleChestBox(BlockPos pos1, BlockPos pos2) {

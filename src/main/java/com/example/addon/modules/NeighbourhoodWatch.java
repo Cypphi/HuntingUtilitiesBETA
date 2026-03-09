@@ -25,7 +25,6 @@ import meteordevelopment.orbit.EventHandler;
 import net.minecraft.entity.Entity;
 import net.minecraft.entity.player.PlayerEntity;
 import net.minecraft.network.packet.s2c.play.PlayerListS2CPacket;
-import net.minecraft.scoreboard.AbstractTeam;
 import net.minecraft.scoreboard.Scoreboard;
 import net.minecraft.scoreboard.Team;
 import net.minecraft.sound.SoundEvents;
@@ -323,14 +322,10 @@ public class NeighbourhoodWatch extends Module {
     public void onActivate() {
         resetState();
         updateFriendEnemySets();
-        // Colour anyone already in the tab list when the module is switched on
         if (mc.player != null && mc.player.networkHandler != null) {
             mc.player.networkHandler.getPlayerList().forEach(entry -> {
                 String name = entry.getProfile().getName();
-                if (name != null && !name.isEmpty()) {
-                    playersInTab.add(name);
-                    assignTabTeam(name);
-                }
+                if (name != null && !name.isEmpty()) playersInTab.add(name);
             });
         }
     }
@@ -342,10 +337,6 @@ public class NeighbourhoodWatch extends Module {
                 GlowingRegistry.remove(id);
                 Entity entity = mc.world.getEntityById(id);
                 if (entity != null) clearEntityTeam(entity);
-            }
-            // Clear tab list team assignments by name
-            for (String name : playersInTab) {
-                clearTabTeam(name);
             }
         }
         highlightedPlayers.clear();
@@ -384,7 +375,7 @@ public class NeighbourhoodWatch extends Module {
                 case Friend -> trackFriends.get();
                 case Enemy  -> trackEnemies.get();
                 case Proxy  -> trackProxies.get();
-                case Other  -> false; // unknown players don't get highlighted
+                case Other  -> false;
             };
             if (!shouldHighlight) continue;
 
@@ -402,7 +393,6 @@ public class NeighbourhoodWatch extends Module {
             setEntityTeam(player, getNearestColor(color));
         }
 
-        // Remove glow from players no longer in range
         highlightedPlayers.removeIf(id -> {
             if (!currentlyVisible.contains(id)) {
                 GlowingRegistry.remove(id);
@@ -424,10 +414,7 @@ public class NeighbourhoodWatch extends Module {
             if (name == null || name.isEmpty()) continue;
 
             if (packet.getActions().contains(PlayerListS2CPacket.Action.ADD_PLAYER)) {
-                if (playersInTab.add(name)) {
-                    handleTabListChange(name, "joined");
-                    assignTabTeam(name);
-                }
+                if (playersInTab.add(name)) handleTabListChange(name, "joined");
             } else if (packet.getActions().contains(PlayerListS2CPacket.Action.UPDATE_LISTED) && !entry.listed()) {
                 if (playersInTab.remove(name)) handleTabListChange(name, "left");
             }
@@ -567,45 +554,7 @@ public class NeighbourhoodWatch extends Module {
         for (String name : proxies.get()) proxySet.add(name.toLowerCase());
     }
 
-    // ── Team / Colour Helpers ─────────────────────────────────────────────────
-
-    /**
-     * Assigns a scoreboard team colour to a player by name, regardless of whether
-     * they are in render range. This colours their name in the tab list.
-     */
-    private void assignTabTeam(String playerName) {
-        if (mc.world == null) return;
-        PlayerStatus status = getPlayerStatus(playerName);
-        if (status == PlayerStatus.Other) return;
-
-        SettingColor color = switch (status) {
-            case Friend -> friendColor.get();
-            case Enemy  -> enemyColor.get();
-            case Proxy  -> proxyColor.get();
-            default     -> null;
-        };
-        if (color == null) return;
-
-        Formatting formatting = getNearestColor(color);
-        Scoreboard scoreboard = mc.world.getScoreboard();
-        // Prefix with "!" so listed players sort above everyone else in singleplayer tab list
-        String teamName = "nwatch_" + formatting.getName();
-        Team team = scoreboard.getTeam(teamName);
-        if (team == null) {
-            team = scoreboard.addTeam(teamName);
-            team.setColor(formatting);
-        }
-        scoreboard.addScoreHolderToTeam(playerName, team);
-    }
-
-    private void clearTabTeam(String playerName) {
-        if (mc.world == null) return;
-        Scoreboard scoreboard = mc.world.getScoreboard();
-        AbstractTeam current = scoreboard.getScoreHolderTeam(playerName);
-        if (current != null && current.getName().startsWith("nwatch_")) {
-            scoreboard.removeScoreHolderFromTeam(playerName, (Team) current);
-        }
-    }
+    // ── Team / Colour Helpers (in-world entity glow only) ─────────────────────
 
     private Formatting getNearestColor(SettingColor color) {
         Formatting best = Formatting.WHITE;
@@ -653,11 +602,15 @@ public class NeighbourhoodWatch extends Module {
     public boolean isEnemy(String name)  { return name != null && enemySet.contains(name.toLowerCase()); }
     public boolean isProxy(String name)  { return name != null && proxySet.contains(name.toLowerCase()); }
 
-    private PlayerStatus getPlayerStatus(String name) {
+    public PlayerStatus getPlayerStatusPublic(String name) {
         if (isFriend(name)) return PlayerStatus.Friend;
         if (isEnemy(name))  return PlayerStatus.Enemy;
         if (isProxy(name))  return PlayerStatus.Proxy;
         return PlayerStatus.Other;
+    }
+
+    private PlayerStatus getPlayerStatus(String name) {
+        return getPlayerStatusPublic(name);
     }
 
     // ── Enums ─────────────────────────────────────────────────────────────────

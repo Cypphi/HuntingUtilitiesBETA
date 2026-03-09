@@ -141,7 +141,6 @@ public class RocketPilot extends Module {
         .defaultValue(FlightMode.Normal)
         .onChanged(v -> {
             if (!isActive() || mc.world == null) return;
-            // Reset pattern state when switching modes so origin is re-anchored cleanly
             resetPatternState();
             switch (v) {
                 case Oscillation -> info("Oscillation mode enabled.");
@@ -517,7 +516,7 @@ public class RocketPilot extends Module {
     private boolean ascentMode               = false;
     private boolean pitch40Climbing          = false;
     private boolean pitch40Rocketing         = false;
-    private long    pitch40BelowMinStartTime = -1;   // -1 = not tracking
+    private long    pitch40BelowMinStartTime = -1;
 
     private float   targetPitch              = 0;
     private int     waveTicks                = 0;
@@ -530,6 +529,13 @@ public class RocketPilot extends Module {
     private int     takeoffTimer             = 0;
     private boolean panicLanding             = false;
 
+    /**
+     * Counts how many ticks we have been gliding during takeoff without a rocket
+     * being available in the hotbar yet. Once a rocket lands in the hotbar,
+     * we fire immediately rather than waiting for the next rocketDelay window.
+     */
+    private int takeoffWaitTicks = 0;
+
     // Pattern flight state
     private boolean paused         = false;
     private Vec3d   origin         = null;
@@ -538,7 +544,7 @@ public class RocketPilot extends Module {
     // Grid state
     private int gridStep       = 1;
     private int gridStepsInLeg = 0;
-    private int gridDirection  = 0;  // 0:E, 1:N, 2:W, 3:S
+    private int gridDirection  = 0;
 
     // ZigZag state
     private float   zigzagCurrentYaw = 0;
@@ -619,6 +625,7 @@ public class RocketPilot extends Module {
         emergencyLanding         = false;
         takeoffTimer             = 0;
         panicLanding             = false;
+        takeoffWaitTicks         = 0;
 
         resetPatternState();
 
@@ -657,7 +664,8 @@ public class RocketPilot extends Module {
     @Override
     public void onDeactivate() {
         needsTakeoffRocket = false;
-        panicLanding = false;
+        takeoffWaitTicks   = 0;
+        panicLanding       = false;
         resetPatternState();
     }
 
@@ -714,6 +722,7 @@ public class RocketPilot extends Module {
             mc.player.setPitch(targetPitch);
             if (mc.player.isOnGround()) mc.player.jump();
             needsTakeoffRocket = true;
+            takeoffWaitTicks   = 0;
             info("Re-launching!");
         }
 
@@ -760,7 +769,7 @@ public class RocketPilot extends Module {
         // Priority 2: emergency landing (elytra critical, no swap)
         if (desiredPitch == null && emergencyLanding) {
             desiredPitch = handleEmergencyLanding();
-            if (desiredPitch == null) return; // module was toggled inside
+            if (desiredPitch == null) return;
         }
 
         // Priority 3: collision avoidance
@@ -780,12 +789,11 @@ public class RocketPilot extends Module {
             }
 
             desiredPitch = switch (flightMode.get()) {
-                case Pitch40             -> handlePitch40Mode();
-                case Oscillation         -> handleOscillationMode();
-                default                  -> handleNormalMode();
+                case Pitch40     -> handlePitch40Mode();
+                case Oscillation -> handleOscillationMode();
+                default          -> handleNormalMode();
             };
 
-            // Drunk mode adjusts yaw independently; runs alongside any pitch mode
             if (drunkMode.get() && !isPatternMode()) {
                 double yDiff = Math.abs(mc.player.getY() - targetY.get());
                 if (yDiff <= flightTolerance.get()) handleDrunkMode();
@@ -800,18 +808,45 @@ public class RocketPilot extends Module {
     private void handleTakeoff() {
         if (mc.player.isOnGround()) {
             mc.player.jump();
-        } else if (mc.player.isGliding()) {
-            if (shouldFireRocket() && countFireworks() > 0) {
-                fireRocket();
-                lastRocketTime = System.currentTimeMillis();
-            }
-            needsTakeoffRocket = false;
-            takeoffTimer = TAKEOFF_GRACE_TICKS;
-        } else if (mc.player.getVelocity().y < -0.04 && mc.player.networkHandler != null) {
-            mc.player.networkHandler.sendPacket(
-                new ClientCommandC2SPacket(mc.player, ClientCommandC2SPacket.Mode.START_FALL_FLYING)
-            );
+            return;
         }
+
+        if (!mc.player.isGliding()) {
+            // Not yet gliding — try to open the elytra
+            if (mc.player.networkHandler != null) {
+                mc.player.networkHandler.sendPacket(
+                    new ClientCommandC2SPacket(mc.player, ClientCommandC2SPacket.Mode.START_FALL_FLYING)
+                );
+            }
+            return;
+        }
+
+        // Now gliding — wait until a rocket is actually present in the hotbar,
+        // since replenishRockets() may have only queued the move this tick.
+        boolean rocketInHotbar = hotbarHasRocket();
+        if (!rocketInHotbar) {
+            takeoffWaitTicks++;
+            // Safety: if no rocket appears in the hotbar after 10 ticks, give up waiting
+            // (countFireworks covers offhand too, so fire from there if available)
+            if (takeoffWaitTicks < 10) return;
+        }
+
+        if (shouldFireRocket() && countFireworks() > 0) {
+            fireRocket();
+            lastRocketTime = System.currentTimeMillis();
+        }
+
+        needsTakeoffRocket = false;
+        takeoffWaitTicks   = 0;
+        takeoffTimer       = TAKEOFF_GRACE_TICKS;
+    }
+
+    /** Returns true if any hotbar slot (0–8) contains a firework rocket. */
+    private boolean hotbarHasRocket() {
+        for (int i = 0; i < 9; i++) {
+            if (mc.player.getInventory().getStack(i).isOf(Items.FIREWORK_ROCKET)) return true;
+        }
+        return false;
     }
 
     // ─── Elytra Health ───────────────────────────────────────────────────────────
@@ -902,12 +937,9 @@ public class RocketPilot extends Module {
     }
 
     private Float handlePanicLanding() {
-        // When far from ground, pitch down to descend
         if (getDistanceToGround() > landingHeight.get()) {
             return MathHelper.lerp(0.05f, mc.player.getPitch(), 20.0f);
-        }
-        // When close to ground, level out to land softly
-        else {
+        } else {
             return MathHelper.lerp(0.1f, mc.player.getPitch(), -10.0f);
         }
     }
@@ -943,7 +975,6 @@ public class RocketPilot extends Module {
             }
         }
 
-        // tanh S-curve: gentle angles for small diffs, approaches ±45° for large diffs
         float calculatedPitch;
         if (Math.abs(diff) < 0.5) {
             calculatedPitch = 0.0f;
@@ -1006,20 +1037,12 @@ public class RocketPilot extends Module {
     }
 
     // ─── Pattern Flight ───────────────────────────────────────────────────────────
-    /**
-     * Handles Grid, ZigZag, and Circle modes.
-     * Returns a desired pitch like all other mode handlers so limitRotationSpeed
-     * and applyPitch() are respected consistently.
-     * Height maintenance uses the same tanh/target-Y logic as Normal mode.
-     */
     private void handlePatternYaw() {
         if (paused) return;
 
         if (flightPattern.get() != FlightPattern.None) {
-            // Anchor origin on first run
             if (origin == null) origin = mc.player.getPos();
 
-            // Initialise or advance waypoint
             if (currentTarget == null) {
                 calculateNextTarget();
             } else {
@@ -1031,7 +1054,6 @@ public class RocketPilot extends Module {
                 }
             }
 
-            // ── Yaw toward waypoint ──
             if (currentTarget != null) {
                 double dx = currentTarget.x - mc.player.getX();
                 double dz = currentTarget.z - mc.player.getZ();
@@ -1053,20 +1075,6 @@ public class RocketPilot extends Module {
         }
     }
 
-    /**
-     * Calculates the next waypoint.
-     *
-     * FIX Grid:   gridStepsInLeg incremented AFTER placing waypoint, not before.
-     *             First leg no longer immediately skips.
-     *             gridStep increments after directions 0 and 2 (not 1 and 3) so the
-     *             spiral expands correctly every two legs.
-     *
-     * FIX ZigZag: First leg flies straight (no turn). Subsequent legs alternate
-     *             2× angle left/right so coverage stays symmetric.
-     *
-     * FIX Circle: First waypoint is placed at circleAngle=0 (straight ahead), then
-     *             angle is advanced for the next call — no off-axis turn on start.
-     */
     private void calculateNextTarget() {
         if (origin == null) origin = mc.player.getPos();
 
@@ -1083,20 +1091,16 @@ public class RocketPilot extends Module {
             int spacing = gridSpacing.get() * 16;
 
             if (currentTarget == null) {
-                // First leg: head South from origin
                 gridDirection  = 3;
                 gridStepsInLeg = 0;
                 Vec3d offset = getGridDirectionOffset(gridDirection, spacing);
                 nextX = origin.x + offset.x;
                 nextZ = origin.z + offset.z;
-                // Count this leg step AFTER placing the waypoint
                 gridStepsInLeg = 1;
             } else {
-                // Check if this leg is done
                 if (gridStepsInLeg >= gridStep) {
                     gridDirection  = (gridDirection + 1) % 4;
                     gridStepsInLeg = 0;
-                    // Expand the spiral after completing directions 0 (E) and 2 (W)
                     if (gridDirection == 0 || gridDirection == 2) gridStep++;
                 }
                 Vec3d offset = getGridDirectionOffset(gridDirection, spacing);
@@ -1109,17 +1113,14 @@ public class RocketPilot extends Module {
             double legLength = zigzagLegLength.get() * 16.0;
 
             if (currentTarget == null) {
-                // Initialise: capture player's current heading, first leg is straight
                 zigzagCurrentYaw = mc.player.getYaw();
                 zigzagTurnRight  = true;
                 zigzagFirstLeg   = true;
             }
 
             if (zigzagFirstLeg) {
-                // No turn on the very first leg — fly straight ahead
                 zigzagFirstLeg = false;
             } else {
-                // Alternate left/right with the full 2× angle
                 double turnAmount = zigzagAngle.get() * 2.0;
                 zigzagCurrentYaw = MathHelper.wrapDegrees(
                     zigzagCurrentYaw + (float)(zigzagTurnRight ? turnAmount : -turnAmount)
@@ -1136,30 +1137,15 @@ public class RocketPilot extends Module {
             double legLength = lawnmowerLegLength.get() * 16.0;
             double spacing = lawnmowerSpacing.get() * 16.0;
 
-            // Waypoints are corners of the lawnmower path.
-            // Path: E, N, W, N, E, N, W, N ...
             int step = lawnmowerWaypoint % 4;
             int row = lawnmowerWaypoint / 4;
-
             double zOffset = row * 2 * spacing;
 
             switch (step) {
-                case 0: // End of East leg
-                    nextX = origin.x + legLength;
-                    nextZ = origin.z + zOffset;
-                    break;
-                case 1: // End of North shift
-                    nextX = origin.x + legLength;
-                    nextZ = origin.z + zOffset + spacing;
-                    break;
-                case 2: // End of West leg
-                    nextX = origin.x;
-                    nextZ = origin.z + zOffset + spacing;
-                    break;
-                default: // case 3, End of next North shift
-                    nextX = origin.x;
-                    nextZ = origin.z + zOffset + 2 * spacing;
-                    break;
+                case 0: nextX = origin.x + legLength; nextZ = origin.z + zOffset; break;
+                case 1: nextX = origin.x + legLength; nextZ = origin.z + zOffset + spacing; break;
+                case 2: nextX = origin.x;             nextZ = origin.z + zOffset + spacing; break;
+                default: nextX = origin.x;            nextZ = origin.z + zOffset + 2 * spacing; break;
             }
             lawnmowerWaypoint++;
 
@@ -1167,22 +1153,19 @@ public class RocketPilot extends Module {
             double r = figureEightRadius.get() * 16.0;
             double x_off, z_off;
 
-            // 8 waypoints to approximate a figure-eight centered on origin
             switch (figureEightWaypoint) {
-                case 0: x_off =  r; z_off =  r; break;
-                case 1: x_off =  0; z_off =  2*r; break;
-                case 2: x_off = -r; z_off =  r; break;
-                case 3: x_off =  0; z_off =  0; break; // Crossover
-                case 4: x_off = -r; z_off = -r; break;
-                case 5: x_off =  0; z_off = -2*r; break;
-                case 6: x_off =  r; z_off = -r; break;
-                default: // case 7
-                    x_off = 0; z_off = 0; break; // Crossover
+                case 0: x_off =  r; z_off =  r;    break;
+                case 1: x_off =  0; z_off =  2*r;  break;
+                case 2: x_off = -r; z_off =  r;    break;
+                case 3: x_off =  0; z_off =  0;    break;
+                case 4: x_off = -r; z_off = -r;    break;
+                case 5: x_off =  0; z_off = -2*r;  break;
+                case 6: x_off =  r; z_off = -r;    break;
+                default: x_off = 0; z_off =  0;    break;
             }
 
             nextX = origin.x + x_off;
             nextZ = origin.z + z_off;
-
             figureEightWaypoint = (figureEightWaypoint + 1) % 8;
 
         } else if (pattern == FlightPattern.Circle) {
@@ -1191,7 +1174,6 @@ public class RocketPilot extends Module {
             double b               = expansionBlocks / (2.0 * Math.PI);
             double radius          = b * circleAngle;
 
-            // Place waypoint at current angle, then advance for the next call
             nextX = origin.x + radius * Math.cos(circleAngle);
             nextZ = origin.z + radius * Math.sin(circleAngle);
             circleAngle += angleStep;
@@ -1205,10 +1187,10 @@ public class RocketPilot extends Module {
 
     private Vec3d getGridDirectionOffset(int dir, int dist) {
         return switch (dir) {
-            case 0 -> new Vec3d( dist, 0,    0);  // East  (+X)
-            case 1 -> new Vec3d(   0, 0, -dist);  // North (-Z)
-            case 2 -> new Vec3d(-dist, 0,    0);  // West  (-X)
-            case 3 -> new Vec3d(   0, 0,  dist);  // South (+Z)
+            case 0 -> new Vec3d( dist, 0,    0);
+            case 1 -> new Vec3d(   0, 0, -dist);
+            case 2 -> new Vec3d(-dist, 0,    0);
+            case 3 -> new Vec3d(   0, 0,  dist);
             default -> Vec3d.ZERO;
         };
     }
@@ -1219,14 +1201,13 @@ public class RocketPilot extends Module {
             float intensity = drunkIntensity.get().floatValue();
 
             if (positiveCoordsOnly.get()) {
-                // Minecraft yaw: 0°=South(+Z), -90°=East(+X), 90°=West(-X), ±180°=North(-Z)
                 double px = mc.player.getX();
                 double pz = mc.player.getZ();
                 float minYaw, maxYaw;
-                if      (px >= 0 && pz >= 0) { minYaw = -90f; maxYaw =   0f; } // SE (+X, +Z)
-                else if (px <  0 && pz >= 0) { minYaw =   0f; maxYaw =  90f; } // SW (-X, +Z)
-                else if (px <  0)            { minYaw =  90f; maxYaw = 180f; } // NW (-X, -Z)
-                else                         { minYaw = -180f; maxYaw = -90f;} // NE (+X, -Z)
+                if      (px >= 0 && pz >= 0) { minYaw = -90f; maxYaw =   0f; }
+                else if (px <  0 && pz >= 0) { minYaw =   0f; maxYaw =  90f; }
+                else if (px <  0)            { minYaw =  90f; maxYaw = 180f; }
+                else                         { minYaw = -180f; maxYaw = -90f; }
                 targetDrunkYaw = minYaw + (float)(Math.random() * (maxYaw - minYaw));
             } else {
                 targetDrunkYaw = mc.player.getYaw()
@@ -1311,10 +1292,6 @@ public class RocketPilot extends Module {
         return count;
     }
 
-    /**
-     * Swaps to the highest-durability elytra in inventory.
-     * Passes raw inventory index (0–35) to InvUtils.move().from() — no slot remapping.
-     */
     private Integer swapToFreshElytra() {
         int bestSlot = -1, bestDurability = -1;
         for (int i = 0; i < 36; i++) {
@@ -1343,7 +1320,6 @@ public class RocketPilot extends Module {
         return false;
     }
 
-    /** Starts at i=1 (one block below feet) to avoid a spurious return of 0. */
     private int getDistanceToGround() {
         if (mc.player == null || mc.world == null) return 999;
         BlockPos.Mutable pos = new BlockPos.Mutable();
@@ -1385,7 +1361,6 @@ public class RocketPilot extends Module {
         }
     }
 
-    /** Disconnects from the server with the given reason and toggles the module. */
     private void disconnect(String reason) {
         if (mc.player != null && mc.player.networkHandler != null) {
             mc.player.networkHandler.getConnection().disconnect(Text.literal(reason));
