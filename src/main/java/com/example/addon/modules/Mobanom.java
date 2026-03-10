@@ -6,6 +6,7 @@ import java.util.Set;
 import com.example.addon.HuntingUtilities;
 
 import meteordevelopment.meteorclient.events.render.Render3DEvent;
+import meteordevelopment.meteorclient.events.world.TickEvent;
 import meteordevelopment.meteorclient.renderer.ShapeMode;
 import meteordevelopment.meteorclient.settings.BoolSetting;
 import meteordevelopment.meteorclient.settings.ColorSetting;
@@ -214,18 +215,14 @@ public class Mobanom extends Module {
         highlightedEntities.clear();
     }
 
-    // ═══════════════════════════════════════════════════════════════════════════
-    // Render
-    // ═══════════════════════════════════════════════════════════════════════════
-
     @EventHandler
-    private void onRender(Render3DEvent event) {
+    private void onTick(TickEvent.Post event) {
         if (mc.world == null || mc.player == null) return;
 
+        highlightedEntities.clear();
         notifiedEntities.removeIf(id -> mc.world.getEntityById(id) == null);
 
         String dim = mc.world.getRegistryKey().getValue().toString();
-        Set<Integer> currentAnomalies = new HashSet<>();
 
         for (Entity entity : mc.world.getEntities()) {
             if (!(entity instanceof MobEntity mob)) continue;
@@ -236,28 +233,34 @@ public class Mobanom extends Module {
             boolean isItemAnomaly      = detectUnnaturalItems.get() && hasUnnaturalItems(mob);
             boolean isChestedAnomaly   = detectChestedAnimals.get() && hasChestAttachment(mob);
 
-            if (!isDimensionAnomaly && !isItemAnomaly && !isChestedAnomaly) continue;
+            if (isDimensionAnomaly || isItemAnomaly || isChestedAnomaly) {
+                highlightedEntities.add(mob.getId());
 
-            currentAnomalies.add(mob.getId());
-            highlightedEntities.add(mob.getId());
+                if (chatNotification.get() && notifiedEntities.add(mob.getId())) {
+                    if (isChestedAnomaly)      info("Chested animal detected: " + mob.getType().getName().getString());
+                    else if (isItemAnomaly)    info("Item anomaly detected: "   + mob.getType().getName().getString());
+                    else                       info("Dimension anomaly detected: " + mob.getType().getName().getString());
+                }
+            }
+        }
+    }
+
+    @EventHandler
+    private void onRender(Render3DEvent event) {
+        if (mc.world == null || mc.player == null || highlightedEntities.isEmpty()) return;
+
+        for (int entityId : highlightedEntities) {
+            Entity entity = mc.world.getEntityById(entityId);
+            if (entity == null || !(entity instanceof MobEntity mob)) continue;
+
+            boolean isItemAnomaly      = detectUnnaturalItems.get() && hasUnnaturalItems(mob);
+            boolean isChestedAnomaly   = detectChestedAnimals.get() && hasChestAttachment(mob);
 
             SettingColor color = getColorForAnomaly(mob, isItemAnomaly || isChestedAnomaly);
 
-            // Render bloom layers around the mob's bounding box
             renderGlowLayers(event, mob.getBoundingBox(), color);
-
-            // Solid outline on top of bloom
             event.renderer.box(mob.getBoundingBox(), withAlpha(color, 0), color, ShapeMode.Lines, 0);
-
-            if (chatNotification.get() && notifiedEntities.add(mob.getId())) {
-                if (isChestedAnomaly)      info("Chested animal detected: " + mob.getType().getName().getString());
-                else if (isItemAnomaly)    info("Item anomaly detected: "   + mob.getType().getName().getString());
-                else                       info("Dimension anomaly detected: " + mob.getType().getName().getString());
-            }
         }
-
-        // Clean up entities that are no longer anomalies or have despawned
-        highlightedEntities.removeIf(id -> !currentAnomalies.contains(id));
     }
 
     // ═══════════════════════════════════════════════════════════════════════════

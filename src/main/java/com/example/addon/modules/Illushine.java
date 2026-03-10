@@ -308,12 +308,11 @@ public class Illushine extends Module {
 
     @EventHandler
     private void onRender(Render3DEvent event) {
-        if (mc.world == null || mc.player == null) return;
-        if (activelyOutlined.isEmpty()) return;
+        if (mc.world == null || mc.player == null || activelyOutlined.isEmpty()) return;
 
-        for (Entity entity : mc.world.getEntities()) {
-            if (!activelyOutlined.contains(entity.getId())) continue;
-            if (!(entity instanceof MobEntity mob)) continue;
+        for (int entityId : activelyOutlined) {
+            Entity entity = mc.world.getEntityById(entityId);
+            if (entity == null || !(entity instanceof MobEntity mob)) continue;
 
             MobCategory  category = categorise(mob);
             SettingColor color    = switch (category) {

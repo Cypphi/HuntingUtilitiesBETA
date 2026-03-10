@@ -9,7 +9,9 @@ import java.util.HashSet;
 import java.util.Iterator;
 import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.LinkedList;
 import java.util.Map;
+import java.util.Queue;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentLinkedQueue;
@@ -38,6 +40,7 @@ import net.minecraft.block.Blocks;
 import net.minecraft.util.math.BlockPos;
 import net.minecraft.util.math.Box;
 import net.minecraft.util.math.ChunkPos;
+import net.minecraft.util.math.Direction;
 import net.minecraft.world.chunk.ChunkSection;
 import net.minecraft.world.chunk.WorldChunk;
 
@@ -91,6 +94,13 @@ public class Tunnelers extends Module {
         .defaultValue(true)
         .build());
 
+    private final Setting<Integer> min1x1Length = sg1x1.add(new IntSetting.Builder()
+        .name("min-length")
+        .description("Minimum length of a 1x1 tunnel to be rendered.")
+        .defaultValue(8).min(1).sliderMax(64)
+        .visible(find1x1::get)
+        .build());
+
     private final Setting<SettingColor> color1x1 = sg1x1.add(new ColorSetting.Builder()
         .name("color-1x1")
         .defaultValue(new SettingColor(255, 255, 0, 75))
@@ -112,6 +122,13 @@ public class Tunnelers extends Module {
         .visible(find1x2::get)
         .build());
 
+    private final Setting<Integer> min1x2Length = sg1x2.add(new IntSetting.Builder()
+        .name("min-length")
+        .description("Minimum length of a 1x2 tunnel to be rendered.")
+        .defaultValue(4).min(1).sliderMax(64)
+        .visible(find1x2::get)
+        .build());
+
     // ------------------------------------------------------------------ //
     //  2x2 Tunnels                                                         //
     // ------------------------------------------------------------------ //
@@ -119,6 +136,13 @@ public class Tunnelers extends Module {
     private final Setting<Boolean> find2x2 = sg2x2.add(new BoolSetting.Builder()
         .name("find-2x2-tunnels")
         .defaultValue(true)
+        .build());
+
+    private final Setting<Integer> min2x2Length = sg2x2.add(new IntSetting.Builder()
+        .name("min-length")
+        .description("Minimum length of a 2x2 tunnel to be rendered.")
+        .defaultValue(2).min(1).sliderMax(64)
+        .visible(find2x2::get)
         .build());
 
     private final Setting<SettingColor> color2x2 = sg2x2.add(new ColorSetting.Builder()
@@ -359,10 +383,13 @@ public class Tunnelers extends Module {
         final Map<BlockPos, TunnelType> locSnapshot = new HashMap<>(locations);
         final int px = snapPX, py = snapPY, pz = snapPZ;
         final double maxDistSq = (double)(range.get() * 16) * (range.get() * 16);
+        final int minLength1x1 = min1x1Length.get();
+        final int minLength1x2 = min1x2Length.get();
+        final int minLength2x2 = min2x2Length.get();
 
         executor.submit(() -> {
             try {
-                List<MergedBox> merged = buildMergedBoxes(locSnapshot, px, py, pz, maxDistSq);
+                List<MergedBox> merged = buildMergedBoxes(locSnapshot, px, py, pz, maxDistSq, minLength1x1, minLength1x2, minLength2x2);
                 renderSnapshot = merged;
             } finally {
                 mergeScheduled.set(false);
@@ -377,7 +404,8 @@ public class Tunnelers extends Module {
     private static List<MergedBox> buildMergedBoxes(
             Map<BlockPos, TunnelType> locs,
             int px, int py, int pz,
-            double maxDistSq
+            double maxDistSq, int minLength1x1,
+            int minLength1x2, int minLength2x2
     ) {
         if (locs.isEmpty()) return Collections.emptyList();
 
@@ -394,6 +422,11 @@ public class Tunnelers extends Module {
             remaining.get(t).add(pack(p.getX(), p.getY(), p.getZ()));
             coordsByType.get(t).add(new int[]{ p.getX(), p.getY(), p.getZ() });
         }
+
+        // Filter tunnels by length
+        filterTunnelTypeByLength(TunnelType.TUNNEL_1x1, minLength1x1, coordsByType, remaining);
+        filterTunnelTypeByLength(TunnelType.TUNNEL_1x2, minLength1x2, coordsByType, remaining);
+        filterTunnelTypeByLength(TunnelType.TUNNEL_2x2, minLength2x2, coordsByType, remaining);
 
         List<MergedBox> boxes = new ArrayList<>();
 
@@ -432,6 +465,51 @@ public class Tunnelers extends Module {
 
         boxes.sort(Comparator.comparingDouble(b -> b.distSq));
         return boxes;
+    }
+
+    private static void filterTunnelTypeByLength(TunnelType type, int minLength,
+            EnumMap<TunnelType, List<int[]>> coordsByType, EnumMap<TunnelType, Set<Long>> remaining) {
+        if (minLength <= 1) return;
+
+        List<int[]> coords = coordsByType.get(type);
+        if (coords == null || coords.isEmpty()) return;
+
+        Set<BlockPos> allBlocks = new HashSet<>(coords.size());
+        for (int[] c : coords) allBlocks.add(new BlockPos(c[0], c[1], c[2]));
+
+        Set<BlockPos> blocksToKeep = new HashSet<>();
+        Set<BlockPos> visited = new HashSet<>();
+
+        for (BlockPos startPos : allBlocks) {
+            if (visited.contains(startPos)) continue;
+
+            List<BlockPos> component = new ArrayList<>();
+            Queue<BlockPos> queue = new LinkedList<>();
+
+            queue.add(startPos);
+            visited.add(startPos);
+
+            while (!queue.isEmpty()) {
+                BlockPos current = queue.poll();
+                component.add(current);
+
+                for (Direction dir : Direction.values()) {
+                    BlockPos neighbor = current.offset(dir);
+                    if (allBlocks.contains(neighbor) && visited.add(neighbor)) {
+                        queue.add(neighbor);
+                    }
+                }
+            }
+
+            if (component.size() >= minLength) {
+                blocksToKeep.addAll(component);
+            }
+        }
+
+        coordsByType.get(type).removeIf(c -> !blocksToKeep.contains(new BlockPos(c[0], c[1], c[2])));
+        Set<Long> newRemaining = new HashSet<>(blocksToKeep.size());
+        for (BlockPos pos : blocksToKeep) newRemaining.add(pack(pos.getX(), pos.getY(), pos.getZ()));
+        remaining.put(type, newRemaining);
     }
 
     private static boolean canExtendZ(Set<Long> rem, int ox, int x2, int y, int z) {
@@ -666,51 +744,52 @@ public class Tunnelers extends Module {
     }
 
     private boolean is1x1Tunnel(int x, int y, int z, ScanContext ctx) {
-        // A 1x1 tunnel requires a solid floor, a 1-block high air space, and a solid ceiling.
+        // Check for solid floor, air tunnel space, and solid ceiling.
         if (!ctx.isSolid(x, y, z) || !ctx.isAir(x, y + 1, z) || !ctx.isSolid(x, y + 2, z)) {
             return false;
         }
 
-        // As per your request, we are looking for a structure with 5 solid faces,
-        // which means a dead-end tunnel (floor, ceiling, and 3 horizontal walls).
         boolean northSolid = ctx.isSolid(x, y + 1, z - 1);
         boolean southSolid = ctx.isSolid(x, y + 1, z + 1);
         boolean eastSolid = ctx.isSolid(x + 1, y + 1, z);
         boolean westSolid = ctx.isSolid(x - 1, y + 1, z);
 
-        int solidHorizontalSides = 0;
-        if (northSolid) solidHorizontalSides++;
-        if (southSolid) solidHorizontalSides++;
-        if (eastSolid) solidHorizontalSides++;
-        if (westSolid) solidHorizontalSides++;
+        int solidHorizontalSides = (northSolid ? 1 : 0) + (southSolid ? 1 : 0) + (eastSolid ? 1 : 0) + (westSolid ? 1 : 0);
 
-        if (solidHorizontalSides != 3) return false;
-
-        // To prevent highlighting pockets that open into larger caves, we also check
-        // the blocks that frame the 1x1 opening. They must also be solid.
-        if (!southSolid) { // Opening is to the South
-            return ctx.isSolid(x - 1, y + 1, z + 1) && ctx.isSolid(x + 1, y + 1, z + 1);
-        } else if (!northSolid) { // Opening is to the North
-            return ctx.isSolid(x - 1, y + 1, z - 1) && ctx.isSolid(x + 1, y + 1, z - 1);
-        } else if (!westSolid) { // Opening is to the West
-            return ctx.isSolid(x - 1, y + 1, z - 1) && ctx.isSolid(x - 1, y + 1, z + 1);
-        } else if (!eastSolid) { // Opening is to the East
-            return ctx.isSolid(x + 1, y + 1, z - 1) && ctx.isSolid(x + 1, y + 1, z + 1);
+        // A tunnel segment should be enclosed on 2 or 3 sides horizontally.
+        // This was too permissive and highlighted corners in open caves.
+        // The new logic only allows dead-ends (3 walls) or straight passages (2 opposing walls).
+        if (solidHorizontalSides == 3) return true;
+        if (solidHorizontalSides == 2) {
+            return (northSolid && southSolid) || (eastSolid && westSolid);
         }
-
-        return false; // Should be unreachable
+        return false;
     }
 
     private boolean is1x2Tunnel(int x, int y, int z, ScanContext ctx) {
+        // Check for the vertical 1x2 air column with floor and ceiling
         if (!is1x2Slice(x, y, z, ctx)) return false;
+
+        // Optional: ignore tunnels that look like mineshafts
         if (isMineshaftBlock(ctx.get(x,y,z)) || isMineshaftBlock(ctx.get(x,y+3,z))) return false;
-        boolean isZ = true;
-        for (int dy = 1; dy <= 2; dy++)
-            if (!ctx.isSolid(x-1,y+dy,z) || !ctx.isSolid(x+1,y+dy,z)) { isZ = false; break; }
-        if (isZ) return is1x2Slice(x, y, z-1, ctx) && is1x2Slice(x, y, z+1, ctx);
-        for (int dy = 1; dy <= 2; dy++)
-            if (!ctx.isSolid(x,y+dy,z-1) || !ctx.isSolid(x,y+dy,z+1)) return false;
-        return is1x2Slice(x-1, y, z, ctx) && is1x2Slice(x+1, y, z, ctx);
+
+        // Check horizontal walls for both layers of the tunnel
+        boolean northSolid = ctx.isSolid(x, y + 1, z - 1) && ctx.isSolid(x, y + 2, z - 1);
+        boolean southSolid = ctx.isSolid(x, y + 1, z + 1) && ctx.isSolid(x, y + 2, z + 1);
+        boolean eastSolid  = ctx.isSolid(x + 1, y + 1, z) && ctx.isSolid(x + 1, y + 2, z);
+        boolean westSolid  = ctx.isSolid(x - 1, y + 1, z) && ctx.isSolid(x - 1, y + 2, z);
+
+        int solidWalls = (northSolid ? 1 : 0) + (southSolid ? 1 : 0) + (eastSolid ? 1 : 0) + (westSolid ? 1 : 0);
+
+        // A dead-end has 3 solid walls.
+        if (solidWalls == 3) return true;
+
+        // A straight tunnel segment has 2 opposing solid walls.
+        if (solidWalls == 2) {
+            return (northSolid && southSolid) || (eastSolid && westSolid);
+        }
+
+        return false;
     }
 
     private boolean is1x2Slice(int x, int y, int z, ScanContext ctx) {
@@ -718,15 +797,65 @@ public class Tunnelers extends Module {
     }
 
     private boolean is2x2Tunnel(int x, int y, int z, ScanContext ctx) {
-        for (int fx = 0; fx < 2; fx++) for (int fz = 0; fz < 2; fz++)
-            if (!ctx.isSolid(x+fx,y,z+fz) || !ctx.isSolid(x+fx,y+3,z+fz)) return false;
-        for (int fx = 0; fx < 2; fx++) for (int fy = 1; fy <= 2; fy++) for (int fz = 0; fz < 2; fz++)
-            if (!ctx.isAir(x+fx,y+fy,z+fz)) return false;
-        for (int fx = 0; fx < 2; fx++) for (int fy = 1; fy <= 2; fy++)
-            if (!ctx.isSolid(x+fx,y+fy,z-1) || !ctx.isSolid(x+fx,y+fy,z+2)) return false;
-        for (int fz = 0; fz < 2; fz++) for (int fy = 1; fy <= 2; fy++)
-            if (!ctx.isSolid(x-1,y+fy,z+fz) || !ctx.isSolid(x+2,y+fy,z+fz)) return false;
-        return true;
+        // Check for 2x2 floor, 2x2x2 air space, and 2x2 ceiling
+        for (int dx = 0; dx < 2; dx++) {
+            for (int dz = 0; dz < 2; dz++) {
+                if (!ctx.isSolid(x + dx, y, z + dz) || !ctx.isSolid(x + dx, y + 3, z + dz)) return false;
+                if (!ctx.isAir(x + dx, y + 1, z + dz) || !ctx.isAir(x + dx, y + 2, z + dz)) return false;
+            }
+        }
+
+        // Check for walls. A wall is solid if all its blocks are solid.
+        boolean northSolid = true;
+        outer: for (int dx = 0; dx < 2; dx++) {
+            for (int dy = 1; dy <= 2; dy++) {
+                if (!ctx.isSolid(x + dx, y + dy, z - 1)) {
+                    northSolid = false;
+                    break outer;
+                }
+            }
+        }
+
+        boolean southSolid = true;
+        outer: for (int dx = 0; dx < 2; dx++) {
+            for (int dy = 1; dy <= 2; dy++) {
+                if (!ctx.isSolid(x + dx, y + dy, z + 2)) {
+                    southSolid = false;
+                    break outer;
+                }
+            }
+        }
+
+        boolean eastSolid = true;
+        outer: for (int dz = 0; dz < 2; dz++) {
+            for (int dy = 1; dy <= 2; dy++) {
+                if (!ctx.isSolid(x + 2, y + dy, z + dz)) {
+                    eastSolid = false;
+                    break outer;
+                }
+            }
+        }
+
+        boolean westSolid = true;
+        outer: for (int dz = 0; dz < 2; dz++) {
+            for (int dy = 1; dy <= 2; dy++) {
+                if (!ctx.isSolid(x - 1, y + dy, z + dz)) {
+                    westSolid = false;
+                    break outer;
+                }
+            }
+        }
+
+        int solidWalls = (northSolid ? 1 : 0) + (southSolid ? 1 : 0) + (eastSolid ? 1 : 0) + (westSolid ? 1 : 0);
+
+        // A dead-end has 3 solid walls.
+        if (solidWalls == 3) return true;
+
+        // A straight tunnel segment has 2 opposing solid walls.
+        if (solidWalls == 2) {
+            return (northSolid && southSolid) || (eastSolid && westSolid);
+        }
+        return false;
     }
 
     private int getAbnormalTunnelSize(int x, int y, int z, ScanContext ctx) {
