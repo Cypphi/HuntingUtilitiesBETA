@@ -24,6 +24,7 @@
     "ServerHealthcareSystemMixin",
     "ThirdSightCameraMixin",
     "ThirdSightMouseMixin",
+    "InGameHudMixin",
     "TunnelersMixin"
   ],
   "injectors": {

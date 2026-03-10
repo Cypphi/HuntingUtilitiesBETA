@@ -5,27 +5,19 @@ import java.util.Set;
 
 import com.example.addon.HuntingUtilities;
 import com.example.addon.utils.GlowingRegistry;
-import com.mojang.blaze3d.systems.RenderSystem;
-import net.minecraft.client.render.BufferBuilder;
-import net.minecraft.client.render.BufferRenderer;
-import net.minecraft.client.gl.ShaderProgramKeys;
-import net.minecraft.client.render.Tessellator;
-import net.minecraft.client.render.VertexFormat;
-import net.minecraft.client.render.VertexFormats;
-import org.joml.Matrix4f;
 
-import meteordevelopment.meteorclient.events.render.Render2DEvent;
 import meteordevelopment.meteorclient.events.render.Render3DEvent;
 import meteordevelopment.meteorclient.settings.BoolSetting;
 import meteordevelopment.meteorclient.settings.ColorSetting;
-import meteordevelopment.meteorclient.settings.EnumSetting;
 import meteordevelopment.meteorclient.settings.EntityTypeListSetting;
+import meteordevelopment.meteorclient.settings.EnumSetting;
 import meteordevelopment.meteorclient.settings.IntSetting;
 import meteordevelopment.meteorclient.settings.Setting;
 import meteordevelopment.meteorclient.settings.SettingGroup;
 import meteordevelopment.meteorclient.systems.modules.Module;
 import meteordevelopment.meteorclient.utils.render.color.SettingColor;
 import meteordevelopment.orbit.EventHandler;
+import net.minecraft.client.gui.DrawContext;
 import net.minecraft.entity.Entity;
 import net.minecraft.entity.EntityType;
 import net.minecraft.entity.mob.Angerable;
@@ -207,24 +199,48 @@ public class Illushine extends Module {
     }
 
     // ═══════════════════════════════════════════════════════════════════════════
-    // Lifecycle
+    // Public Getters
     // ═══════════════════════════════════════════════════════════════════════════
 
-    @Override
-    public void onActivate() {
-        highlightedEntities.clear();
+    public CrosshairMode getCrosshairMode() {
+        return crosshairMode.get();
     }
 
-    @Override
-    public void onDeactivate() {
-        if (mc.world != null) {
-            for (int id : highlightedEntities) {
-                GlowingRegistry.remove(id);
-                Entity entity = mc.world.getEntityById(id);
-                if (entity != null) clearEntityTeam(entity);
-            }
+    // ═══════════════════════════════════════════════════════════════════════════
+    // Crosshair Drawing (called from mixin with the real DrawContext)
+    // ═══════════════════════════════════════════════════════════════════════════
+
+    public void drawCrosshair(DrawContext context) {
+        if (!mc.options.getPerspective().isFirstPerson()) return;
+        if (mc.currentScreen != null) return;
+
+        // DrawContext coordinates are always in GUI-scaled screen space —
+        // scaledWidth/Height are exactly what vanilla uses for its own crosshair.
+        int cx = mc.getWindow().getScaledWidth()  / 2;
+        int cy = mc.getWindow().getScaledHeight() / 2;
+
+        switch (crosshairMode.get()) {
+            case WhiteDot -> context.fill(cx - 1, cy - 1, cx + 1, cy + 1, 0xFFFFFFFF);
+            case Normal   -> drawNormalCrosshair(context, cx, cy);
+            default       -> {}
         }
-        highlightedEntities.clear();
+    }
+
+    private void drawNormalCrosshair(DrawContext context, int cx, int cy) {
+        int arm  = crosshairSize.get();
+        int gap  = crosshairGap.get();
+        int th   = crosshairThickness.get();
+        int half = th / 2;
+        int col  = toARGB(crosshairColor.get());
+
+        // Horizontal left arm
+        context.fill(cx - arm - gap, cy - half,      cx - gap,       cy - half + th, col);
+        // Horizontal right arm
+        context.fill(cx + gap,       cy - half,      cx + arm + gap, cy - half + th, col);
+        // Vertical top arm
+        context.fill(cx - half,      cy - arm - gap, cx - half + th, cy - gap,       col);
+        // Vertical bottom arm
+        context.fill(cx - half,      cy + gap,       cx - half + th, cy + arm + gap, col);
     }
 
     // ═══════════════════════════════════════════════════════════════════════════
@@ -271,64 +287,6 @@ public class Illushine extends Module {
             }
             return false;
         });
-    }
-
-    @EventHandler
-    private void onRender2D(Render2DEvent event) {
-        CrosshairMode mode = crosshairMode.get();
-        if (mode == CrosshairMode.None) return;
-        if (!mc.options.getPerspective().isFirstPerson()) return;
-        if (mc.currentScreen != null) return;
-
-        int cx = event.screenWidth  / 2;
-        int cy = event.screenHeight / 2;
-
-        RenderSystem.enableBlend();
-        RenderSystem.defaultBlendFunc();
-        RenderSystem.setShader(ShaderProgramKeys.POSITION_COLOR);
-
-        switch (mode) {
-            case WhiteDot -> fillRect(cx - 1, cy - 1, cx + 1, cy + 1, 0xFFFFFFFF);
-            case Normal   -> drawNormalCrosshair(cx, cy);
-            default       -> {}
-        }
-
-        RenderSystem.disableBlend();
-    }
-
-    // ═══════════════════════════════════════════════════════════════════════════
-    // Crosshair Rendering
-    // ═══════════════════════════════════════════════════════════════════════════
-
-    private void drawNormalCrosshair(int cx, int cy) {
-        int col  = toARGB(crosshairColor.get());
-        int arm  = crosshairSize.get();
-        int gap  = crosshairGap.get();
-        int th   = crosshairThickness.get();
-        int half = th / 2;
-
-        fillRect(cx - arm - gap, cy - half,      cx - gap,       cy - half + th,  col);
-        fillRect(cx + gap,       cy - half,      cx + arm + gap, cy - half + th,  col);
-        fillRect(cx - half,      cy - arm - gap, cx - half + th, cy - gap,        col);
-        fillRect(cx - half,      cy + gap,       cx - half + th, cy + arm + gap,  col);
-    }
-
-    private static void fillRect(int x1, int y1, int x2, int y2, int color) {
-        float a = ((color >> 24) & 0xFF) / 255f;
-        float r = ((color >> 16) & 0xFF) / 255f;
-        float g = ((color >>  8) & 0xFF) / 255f;
-        float b = ( color        & 0xFF) / 255f;
-
-        Tessellator tess   = Tessellator.getInstance();
-        BufferBuilder buf  = tess.begin(VertexFormat.DrawMode.QUADS, VertexFormats.POSITION_COLOR);
-        Matrix4f mat       = RenderSystem.getModelViewMatrix();
-
-        buf.vertex(mat, x1, y2, 0).color(r, g, b, a);
-        buf.vertex(mat, x2, y2, 0).color(r, g, b, a);
-        buf.vertex(mat, x2, y1, 0).color(r, g, b, a);
-        buf.vertex(mat, x1, y1, 0).color(r, g, b, a);
-
-        BufferRenderer.drawWithGlobalProgram(buf.end());
     }
 
     // ═══════════════════════════════════════════════════════════════════════════
@@ -386,7 +344,6 @@ public class Illushine extends Module {
         }
     }
 
-    /** Convert a SettingColor to a packed ARGB int for DrawContext.fill(). */
     private static int toARGB(SettingColor c) {
         return (c.a << 24) | (c.r << 16) | (c.g << 8) | c.b;
     }
