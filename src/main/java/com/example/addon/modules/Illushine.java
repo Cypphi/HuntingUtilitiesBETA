@@ -4,11 +4,12 @@ import java.util.HashSet;
 import java.util.Set;
 
 import com.example.addon.HuntingUtilities;
-import com.example.addon.utils.GlowingRegistry;
 
 import meteordevelopment.meteorclient.events.render.Render3DEvent;
+import meteordevelopment.meteorclient.renderer.ShapeMode;
 import meteordevelopment.meteorclient.settings.BoolSetting;
 import meteordevelopment.meteorclient.settings.ColorSetting;
+import meteordevelopment.meteorclient.settings.DoubleSetting;
 import meteordevelopment.meteorclient.settings.EntityTypeListSetting;
 import meteordevelopment.meteorclient.settings.EnumSetting;
 import meteordevelopment.meteorclient.settings.IntSetting;
@@ -24,9 +25,7 @@ import net.minecraft.entity.mob.Angerable;
 import net.minecraft.entity.mob.HostileEntity;
 import net.minecraft.entity.mob.MobEntity;
 import net.minecraft.entity.passive.PassiveEntity;
-import net.minecraft.scoreboard.Scoreboard;
-import net.minecraft.scoreboard.Team;
-import net.minecraft.util.Formatting;
+import net.minecraft.util.math.Box;
 
 public class Illushine extends Module {
 
@@ -57,6 +56,7 @@ public class Illushine extends Module {
     private final SettingGroup sgPassive   = settings.createGroup("Passive");
     private final SettingGroup sgNeutral   = settings.createGroup("Neutral");
     private final SettingGroup sgHostile   = settings.createGroup("Hostile");
+    private final SettingGroup sgGlow      = settings.createGroup("Glow");
 
     // ═══════════════════════════════════════════════════════════════════════════
     // Settings — General
@@ -185,6 +185,37 @@ public class Illushine extends Module {
     );
 
     // ═══════════════════════════════════════════════════════════════════════════
+    // Settings — Glow
+    // ═══════════════════════════════════════════════════════════════════════════
+
+    private final Setting<Integer> glowLayers = sgGlow.add(new IntSetting.Builder()
+        .name("glow-layers")
+        .description("Number of bloom layers rendered around each mob.")
+        .defaultValue(4)
+        .min(1)
+        .sliderMax(8)
+        .build()
+    );
+
+    private final Setting<Double> glowSpread = sgGlow.add(new DoubleSetting.Builder()
+        .name("glow-spread")
+        .description("How far each bloom layer expands outward (in blocks).")
+        .defaultValue(0.05)
+        .min(0.01)
+        .sliderMax(0.2)
+        .build()
+    );
+
+    private final Setting<Integer> glowBaseAlpha = sgGlow.add(new IntSetting.Builder()
+        .name("glow-base-alpha")
+        .description("Alpha of the innermost glow layer (0-255).")
+        .defaultValue(60)
+        .min(10)
+        .sliderMax(150)
+        .build()
+    );
+
+    // ═══════════════════════════════════════════════════════════════════════════
     // State
     // ═══════════════════════════════════════════════════════════════════════════
 
@@ -207,6 +238,20 @@ public class Illushine extends Module {
     }
 
     // ═══════════════════════════════════════════════════════════════════════════
+    // Lifecycle
+    // ═══════════════════════════════════════════════════════════════════════════
+
+    @Override
+    public void onActivate() {
+        highlightedEntities.clear();
+    }
+
+    @Override
+    public void onDeactivate() {
+        highlightedEntities.clear();
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════════
     // Crosshair Drawing (called from mixin with the real DrawContext)
     // ═══════════════════════════════════════════════════════════════════════════
 
@@ -214,8 +259,6 @@ public class Illushine extends Module {
         if (!mc.options.getPerspective().isFirstPerson()) return;
         if (mc.currentScreen != null) return;
 
-        // DrawContext coordinates are always in GUI-scaled screen space —
-        // scaledWidth/Height are exactly what vanilla uses for its own crosshair.
         int cx = mc.getWindow().getScaledWidth()  / 2;
         int cy = mc.getWindow().getScaledHeight() / 2;
 
@@ -274,19 +317,40 @@ public class Illushine extends Module {
 
             currentlyVisible.add(mob.getId());
             highlightedEntities.add(mob.getId());
-            GlowingRegistry.add(mob.getId());
-            setEntityTeam(mob, getNearestColor(color));
+
+            // Bloom layers around mob bounding box
+            renderGlowLayers(event, mob.getBoundingBox(), color);
+
+            // Solid outline on top
+            event.renderer.box(mob.getBoundingBox(), withAlpha(color, 0), color, ShapeMode.Lines, 0);
         }
 
-        highlightedEntities.removeIf(id -> {
-            if (!currentlyVisible.contains(id)) {
-                GlowingRegistry.remove(id);
-                Entity entity = mc.world.getEntityById(id);
-                if (entity != null) clearEntityTeam(entity);
-                return true;
-            }
-            return false;
-        });
+        highlightedEntities.removeIf(id -> !currentlyVisible.contains(id));
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════════
+    // Bloom Rendering
+    // ═══════════════════════════════════════════════════════════════════════════
+
+    /**
+     * Renders layered expanding filled boxes to simulate a soft bloom/glow halo.
+     * Outermost layers are most transparent, innermost are most opaque.
+     */
+    private void renderGlowLayers(Render3DEvent event, Box box, SettingColor color) {
+        int    layers    = glowLayers.get();
+        double spread    = glowSpread.get();
+        int    baseAlpha = glowBaseAlpha.get();
+
+        for (int i = layers; i >= 1; i--) {
+            double expansion = spread * i;
+            int    layerAlpha = Math.max(4, (int) (baseAlpha * (1.0 - (double)(i - 1) / layers)));
+            event.renderer.box(
+                box.expand(expansion),
+                withAlpha(color, layerAlpha),
+                withAlpha(color, 0),
+                ShapeMode.Sides, 0
+            );
+        }
     }
 
     // ═══════════════════════════════════════════════════════════════════════════
@@ -301,47 +365,11 @@ public class Illushine extends Module {
     }
 
     // ═══════════════════════════════════════════════════════════════════════════
-    // Team / Colour Helpers
+    // Color Helpers
     // ═══════════════════════════════════════════════════════════════════════════
 
-    private Formatting getNearestColor(SettingColor color) {
-        Formatting best   = Formatting.WHITE;
-        double    minDist = Double.MAX_VALUE;
-        for (Formatting f : Formatting.values()) {
-            if (!f.isColor()) continue;
-            Integer rgb = f.getColorValue();
-            if (rgb == null) continue;
-            int r = (rgb >> 16) & 0xFF;
-            int g = (rgb >>  8) & 0xFF;
-            int b =  rgb        & 0xFF;
-            double dist = Math.pow(r - color.r, 2)
-                        + Math.pow(g - color.g, 2)
-                        + Math.pow(b - color.b, 2);
-            if (dist < minDist) { minDist = dist; best = f; }
-        }
-        return best;
-    }
-
-    private void setEntityTeam(Entity entity, Formatting color) {
-        Scoreboard scoreboard = mc.world.getScoreboard();
-        String     teamName   = "illushine_" + color.getName();
-        Team       team       = scoreboard.getTeam(teamName);
-        if (team == null) {
-            team = scoreboard.addTeam(teamName);
-            team.setColor(color);
-        }
-        if (entity.getScoreboardTeam() == null
-                || !entity.getScoreboardTeam().getName().equals(teamName)) {
-            scoreboard.addScoreHolderToTeam(entity.getNameForScoreboard(), team);
-        }
-    }
-
-    private void clearEntityTeam(Entity entity) {
-        Scoreboard scoreboard  = mc.world.getScoreboard();
-        Team       currentTeam = entity.getScoreboardTeam();
-        if (currentTeam != null && currentTeam.getName().startsWith("illushine_")) {
-            scoreboard.removeScoreHolderFromTeam(entity.getNameForScoreboard(), currentTeam);
-        }
+    private SettingColor withAlpha(SettingColor color, int alpha) {
+        return new SettingColor(color.r, color.g, color.b, Math.min(255, Math.max(0, alpha)));
     }
 
     private static int toARGB(SettingColor c) {

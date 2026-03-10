@@ -5,15 +5,16 @@ import java.util.List;
 import java.util.Set;
 
 import com.example.addon.HuntingUtilities;
-import com.example.addon.utils.GlowingRegistry;
 
 import meteordevelopment.meteorclient.events.game.GameJoinedEvent;
 import meteordevelopment.meteorclient.events.game.ReceiveMessageEvent;
 import meteordevelopment.meteorclient.events.packets.PacketEvent;
 import meteordevelopment.meteorclient.events.render.Render3DEvent;
 import meteordevelopment.meteorclient.events.world.TickEvent;
+import meteordevelopment.meteorclient.renderer.ShapeMode;
 import meteordevelopment.meteorclient.settings.BoolSetting;
 import meteordevelopment.meteorclient.settings.ColorSetting;
+import meteordevelopment.meteorclient.settings.DoubleSetting;
 import meteordevelopment.meteorclient.settings.IntSetting;
 import meteordevelopment.meteorclient.settings.Setting;
 import meteordevelopment.meteorclient.settings.SettingGroup;
@@ -22,14 +23,11 @@ import meteordevelopment.meteorclient.settings.StringSetting;
 import meteordevelopment.meteorclient.systems.modules.Module;
 import meteordevelopment.meteorclient.utils.render.color.SettingColor;
 import meteordevelopment.orbit.EventHandler;
-import net.minecraft.entity.Entity;
 import net.minecraft.entity.player.PlayerEntity;
 import net.minecraft.network.packet.s2c.play.PlayerListS2CPacket;
-import net.minecraft.scoreboard.Scoreboard;
-import net.minecraft.scoreboard.Team;
 import net.minecraft.sound.SoundEvents;
 import net.minecraft.text.Text;
-import net.minecraft.util.Formatting;
+import net.minecraft.util.math.Box;
 
 public class NeighbourhoodWatch extends Module {
 
@@ -48,6 +46,7 @@ public class NeighbourhoodWatch extends Module {
     private final SettingGroup sgTracking   = settings.createGroup("Player Tracking");
     private final SettingGroup sgFriends    = settings.createGroup("Friends & Enemies");
     private final SettingGroup sgTabList    = settings.createGroup("Tab List Monitoring");
+    private final SettingGroup sgGlow       = settings.createGroup("Glow");
 
     // ═══════════════════════════════════════════════════════════════════════════
     // Settings — Safety
@@ -63,9 +62,7 @@ public class NeighbourhoodWatch extends Module {
     private final Setting<Integer> playerDetectionRange = sgSafety.add(new IntSetting.Builder()
         .name("player-detection-range")
         .description("Distance within which a player triggers a disconnect.")
-        .defaultValue(32)
-        .min(1)
-        .sliderMax(128)
+        .defaultValue(32).min(1).sliderMax(128)
         .visible(disconnectOnPlayer::get)
         .build()
     );
@@ -135,50 +132,38 @@ public class NeighbourhoodWatch extends Module {
     private final Setting<Integer> trackRange = sgTracking.add(new IntSetting.Builder()
         .name("track-range")
         .description("Distance within which players are tracked.")
-        .defaultValue(128)
-        .min(1)
-        .sliderMax(256)
+        .defaultValue(128).min(1).sliderMax(256)
         .visible(trackPlayers::get)
         .build()
     );
 
     private final Setting<Boolean> trackFriends = sgTracking.add(new BoolSetting.Builder()
-        .name("track-friends")
-        .description("Highlight friends in range.")
-        .defaultValue(true)
-        .visible(trackPlayers::get)
+        .name("track-friends").description("Highlight friends in range.")
+        .defaultValue(true).visible(trackPlayers::get)
         .build()
     );
 
     private final Setting<Boolean> trackEnemies = sgTracking.add(new BoolSetting.Builder()
-        .name("track-enemies")
-        .description("Highlight enemies in range.")
-        .defaultValue(true)
-        .visible(trackPlayers::get)
+        .name("track-enemies").description("Highlight enemies in range.")
+        .defaultValue(true).visible(trackPlayers::get)
         .build()
     );
 
     private final Setting<Boolean> trackProxies = sgTracking.add(new BoolSetting.Builder()
-        .name("track-proxies")
-        .description("Highlight proxy accounts in range.")
-        .defaultValue(true)
-        .visible(trackPlayers::get)
+        .name("track-proxies").description("Highlight proxy accounts in range.")
+        .defaultValue(true).visible(trackPlayers::get)
         .build()
     );
 
     private final Setting<Boolean> trackOthers = sgTracking.add(new BoolSetting.Builder()
-        .name("track-others")
-        .description("Highlight unknown players in range.")
-        .defaultValue(true)
-        .visible(trackPlayers::get)
+        .name("track-others").description("Highlight unknown players in range.")
+        .defaultValue(true).visible(trackPlayers::get)
         .build()
     );
 
     private final Setting<Boolean> notifyChat = sgTracking.add(new BoolSetting.Builder()
-        .name("notify-chat")
-        .description("Send a chat message when a player enters range.")
-        .defaultValue(true)
-        .visible(trackPlayers::get)
+        .name("notify-chat").description("Send a chat message when a player enters range.")
+        .defaultValue(true).visible(trackPlayers::get)
         .build()
     );
 
@@ -191,10 +176,8 @@ public class NeighbourhoodWatch extends Module {
     );
 
     private final Setting<Boolean> playSound = sgTracking.add(new BoolSetting.Builder()
-        .name("play-sound")
-        .description("Play a sound when a player enters range.")
-        .defaultValue(false)
-        .visible(trackPlayers::get)
+        .name("play-sound").description("Play a sound when a player enters range.")
+        .defaultValue(false).visible(trackPlayers::get)
         .build()
     );
 
@@ -203,59 +186,45 @@ public class NeighbourhoodWatch extends Module {
     // ═══════════════════════════════════════════════════════════════════════════
 
     private final Setting<List<String>> friends = sgFriends.add(new StringListSetting.Builder()
-        .name("friends")
-        .description("Players treated as friends. Case-insensitive.")
-        .defaultValue(List.of())
-        .onChanged(l -> updateFriendEnemySets())
+        .name("friends").description("Players treated as friends. Case-insensitive.")
+        .defaultValue(List.of()).onChanged(l -> updateFriendEnemySets())
         .build()
     );
 
     private final Setting<List<String>> enemies = sgFriends.add(new StringListSetting.Builder()
-        .name("enemies")
-        .description("Players treated as enemies. Case-insensitive.")
-        .defaultValue(List.of())
-        .onChanged(l -> updateFriendEnemySets())
+        .name("enemies").description("Players treated as enemies. Case-insensitive.")
+        .defaultValue(List.of()).onChanged(l -> updateFriendEnemySets())
         .build()
     );
 
     private final Setting<List<String>> proxies = sgFriends.add(new StringListSetting.Builder()
-        .name("proxies")
-        .description("Players treated as proxies. Case-insensitive.")
-        .defaultValue(List.of())
-        .onChanged(l -> updateFriendEnemySets())
+        .name("proxies").description("Players treated as proxies. Case-insensitive.")
+        .defaultValue(List.of()).onChanged(l -> updateFriendEnemySets())
         .build()
     );
 
     private final Setting<SettingColor> friendColor = sgFriends.add(new ColorSetting.Builder()
-        .name("friend-color")
-        .description("Highlight color for friends.")
+        .name("friend-color").description("Highlight color for friends.")
         .defaultValue(new SettingColor(0, 255, 0, 255))
-        .visible(trackPlayers::get)
-        .build()
+        .visible(trackPlayers::get).build()
     );
 
     private final Setting<SettingColor> enemyColor = sgFriends.add(new ColorSetting.Builder()
-        .name("enemy-color")
-        .description("Highlight color for enemies.")
+        .name("enemy-color").description("Highlight color for enemies.")
         .defaultValue(new SettingColor(255, 0, 0, 255))
-        .visible(trackPlayers::get)
-        .build()
+        .visible(trackPlayers::get).build()
     );
 
     private final Setting<SettingColor> proxyColor = sgFriends.add(new ColorSetting.Builder()
-        .name("proxy-color")
-        .description("Highlight color for proxies.")
+        .name("proxy-color").description("Highlight color for proxies.")
         .defaultValue(new SettingColor(255, 140, 0, 255))
-        .visible(trackPlayers::get)
-        .build()
+        .visible(trackPlayers::get).build()
     );
 
     private final Setting<SettingColor> otherColor = sgFriends.add(new ColorSetting.Builder()
-        .name("other-color")
-        .description("Highlight color for unknown players.")
+        .name("other-color").description("Highlight color for unknown players.")
         .defaultValue(new SettingColor(139, 0, 0, 255))
-        .visible(trackPlayers::get)
-        .build()
+        .visible(trackPlayers::get).build()
     );
 
     // ═══════════════════════════════════════════════════════════════════════════
@@ -265,55 +234,58 @@ public class NeighbourhoodWatch extends Module {
     private final Setting<Boolean> monitorTabList = sgTabList.add(new BoolSetting.Builder()
         .name("monitor-tab-list")
         .description("Notifies when players join or leave the server via the tab list.")
-        .defaultValue(false)
-        .build()
+        .defaultValue(false).build()
     );
 
     private final Setting<Boolean> notifyOnJoin = sgTabList.add(new BoolSetting.Builder()
-        .name("notify-on-join")
-        .description("Notify when a player joins the server.")
-        .defaultValue(true)
-        .visible(monitorTabList::get)
-        .build()
+        .name("notify-on-join").description("Notify when a player joins the server.")
+        .defaultValue(true).visible(monitorTabList::get).build()
     );
 
     private final Setting<Boolean> notifyOnLeave = sgTabList.add(new BoolSetting.Builder()
-        .name("notify-on-leave")
-        .description("Notify when a player leaves the server.")
-        .defaultValue(true)
-        .visible(monitorTabList::get)
-        .build()
+        .name("notify-on-leave").description("Notify when a player leaves the server.")
+        .defaultValue(true).visible(monitorTabList::get).build()
     );
 
     private final Setting<Boolean> tabNotifyFriends = sgTabList.add(new BoolSetting.Builder()
-        .name("notify-friends")
-        .description("Notify when a friend joins or leaves.")
-        .defaultValue(true)
-        .visible(monitorTabList::get)
-        .build()
+        .name("notify-friends").description("Notify when a friend joins or leaves.")
+        .defaultValue(true).visible(monitorTabList::get).build()
     );
 
     private final Setting<Boolean> tabNotifyEnemies = sgTabList.add(new BoolSetting.Builder()
-        .name("notify-enemies")
-        .description("Notify when an enemy joins or leaves.")
-        .defaultValue(true)
-        .visible(monitorTabList::get)
-        .build()
+        .name("notify-enemies").description("Notify when an enemy joins or leaves.")
+        .defaultValue(true).visible(monitorTabList::get).build()
     );
 
     private final Setting<Boolean> tabNotifyProxies = sgTabList.add(new BoolSetting.Builder()
-        .name("notify-proxies")
-        .description("Notify when a proxy joins or leaves.")
-        .defaultValue(true)
-        .visible(monitorTabList::get)
-        .build()
+        .name("notify-proxies").description("Notify when a proxy joins or leaves.")
+        .defaultValue(true).visible(monitorTabList::get).build()
     );
 
     private final Setting<Boolean> tabNotifyOthers = sgTabList.add(new BoolSetting.Builder()
-        .name("notify-others")
-        .description("Notify when an unknown player joins or leaves.")
-        .defaultValue(false)
-        .visible(monitorTabList::get)
+        .name("notify-others").description("Notify when an unknown player joins or leaves.")
+        .defaultValue(false).visible(monitorTabList::get).build()
+    );
+
+    // ═══════════════════════════════════════════════════════════════════════════
+    // Settings — Glow
+    // ═══════════════════════════════════════════════════════════════════════════
+
+    private final Setting<Integer> glowLayers = sgGlow.add(new IntSetting.Builder()
+        .name("glow-layers").description("Number of bloom layers rendered around each player.")
+        .defaultValue(4).min(1).sliderMax(8)
+        .build()
+    );
+
+    private final Setting<Double> glowSpread = sgGlow.add(new DoubleSetting.Builder()
+        .name("glow-spread").description("How far each bloom layer expands outward (in blocks).")
+        .defaultValue(0.05).min(0.01).sliderMax(0.2)
+        .build()
+    );
+
+    private final Setting<Integer> glowBaseAlpha = sgGlow.add(new IntSetting.Builder()
+        .name("glow-base-alpha").description("Alpha of the innermost glow layer (0-255).")
+        .defaultValue(60).min(10).sliderMax(150)
         .build()
     );
 
@@ -356,20 +328,12 @@ public class NeighbourhoodWatch extends Module {
 
     @Override
     public void onDeactivate() {
-        if (mc.world != null) {
-            for (int id : highlightedPlayers) {
-                GlowingRegistry.remove(id);
-                Entity entity = mc.world.getEntityById(id);
-                if (entity != null) clearEntityTeam(entity);
-            }
-        }
         highlightedPlayers.clear();
         resetState();
     }
 
     @EventHandler
     private void onGameJoined(GameJoinedEvent event) {
-        cleanupScoreboardTeams();
         resetState();
     }
 
@@ -394,14 +358,14 @@ public class NeighbourhoodWatch extends Module {
             if (player == mc.player || player.isSpectator()) continue;
             if (mc.player.distanceTo(player) > trackRange.get()) continue;
 
-            String name = player.getName().getString();
+            String       name   = player.getName().getString();
             PlayerStatus status = getPlayerStatusPublic(name);
 
             boolean shouldHighlight = switch (status) {
                 case Friend -> trackFriends.get();
                 case Enemy  -> trackEnemies.get();
                 case Proxy  -> trackProxies.get();
-                case Other  -> false;
+                case Other  -> trackOthers.get();
             };
             if (!shouldHighlight) continue;
 
@@ -409,25 +373,20 @@ public class NeighbourhoodWatch extends Module {
                 case Friend -> friendColor.get();
                 case Enemy  -> enemyColor.get();
                 case Proxy  -> proxyColor.get();
-                default     -> null;
+                case Other  -> otherColor.get();
             };
-            if (color == null) continue;
 
             currentlyVisible.add(player.getId());
             highlightedPlayers.add(player.getId());
-            GlowingRegistry.add(player.getId());
-            setEntityTeam(player, getNearestColor(color));
+
+            // Bloom layers around player bounding box
+            renderGlowLayers(event, player.getBoundingBox(), color);
+
+            // Solid outline on top
+            event.renderer.box(player.getBoundingBox(), withAlpha(color, 0), color, ShapeMode.Lines, 0);
         }
 
-        highlightedPlayers.removeIf(id -> {
-            if (!currentlyVisible.contains(id)) {
-                GlowingRegistry.remove(id);
-                Entity entity = mc.world.getEntityById(id);
-                if (entity != null) clearEntityTeam(entity);
-                return true;
-            }
-            return false;
-        });
+        highlightedPlayers.removeIf(id -> !currentlyVisible.contains(id));
     }
 
     @EventHandler
@@ -563,46 +522,23 @@ public class NeighbourhoodWatch extends Module {
     }
 
     // ═══════════════════════════════════════════════════════════════════════════
-    // Team / Glow Helpers
+    // Bloom Rendering
     // ═══════════════════════════════════════════════════════════════════════════
 
-    private Formatting getNearestColor(SettingColor color) {
-        Formatting best  = Formatting.WHITE;
-        double minDist   = Double.MAX_VALUE;
-        for (Formatting f : Formatting.values()) {
-            if (!f.isColor()) continue;
-            Integer rgb = f.getColorValue();
-            if (rgb == null) continue;
-            int r = (rgb >> 16) & 0xFF;
-            int g = (rgb >>  8) & 0xFF;
-            int b =  rgb        & 0xFF;
-            double dist = Math.pow(r - color.r, 2)
-                        + Math.pow(g - color.g, 2)
-                        + Math.pow(b - color.b, 2);
-            if (dist < minDist) { minDist = dist; best = f; }
-        }
-        return best;
-    }
+    private void renderGlowLayers(Render3DEvent event, Box box, SettingColor color) {
+        int    layers    = glowLayers.get();
+        double spread    = glowSpread.get();
+        int    baseAlpha = glowBaseAlpha.get();
 
-    private void setEntityTeam(Entity entity, Formatting color) {
-        Scoreboard scoreboard = mc.world.getScoreboard();
-        String teamName = "nwatch_" + color.getName();
-        Team team = scoreboard.getTeam(teamName);
-        if (team == null) {
-            team = scoreboard.addTeam(teamName);
-            team.setColor(color);
-        }
-        if (entity.getScoreboardTeam() == null
-                || !entity.getScoreboardTeam().getName().equals(teamName)) {
-            scoreboard.addScoreHolderToTeam(entity.getNameForScoreboard(), team);
-        }
-    }
-
-    private void clearEntityTeam(Entity entity) {
-        Scoreboard scoreboard = mc.world.getScoreboard();
-        Team currentTeam = entity.getScoreboardTeam();
-        if (currentTeam != null && currentTeam.getName().startsWith("nwatch_")) {
-            scoreboard.removeScoreHolderFromTeam(entity.getNameForScoreboard(), currentTeam);
+        for (int i = layers; i >= 1; i--) {
+            double expansion = spread * i;
+            int    layerAlpha = Math.max(4, (int) (baseAlpha * (1.0 - (double)(i - 1) / layers)));
+            event.renderer.box(
+                box.expand(expansion),
+                withAlpha(color, layerAlpha),
+                withAlpha(color, 0),
+                ShapeMode.Sides, 0
+            );
         }
     }
 
@@ -614,14 +550,6 @@ public class NeighbourhoodWatch extends Module {
         notifiedPlayers.clear();
         ignoredThisSession.clear();
         playersInTab.clear();
-    }
-
-    private void cleanupScoreboardTeams() {
-        if (mc.world == null) return;
-        var scoreboard = mc.world.getScoreboard();
-        new java.util.ArrayList<>(scoreboard.getTeams()).stream()
-            .filter(t -> t.getName().startsWith("nwatch_"))
-            .forEach(t -> scoreboard.removeTeam(t));
     }
 
     private void updateFriendEnemySets() {
@@ -638,6 +566,10 @@ public class NeighbourhoodWatch extends Module {
             mc.player.networkHandler.getConnection().disconnect(Text.literal(reason));
         }
         this.toggle();
+    }
+
+    private SettingColor withAlpha(SettingColor color, int alpha) {
+        return new SettingColor(color.r, color.g, color.b, Math.min(255, Math.max(0, alpha)));
     }
 
     // ═══════════════════════════════════════════════════════════════════════════

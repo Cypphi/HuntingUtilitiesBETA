@@ -58,11 +58,16 @@ import net.minecraft.util.math.Direction;
 import net.minecraft.util.math.Vec3d;
 
 public class SignScanner extends Module {
-    private final SettingGroup sgGeneral = settings.getDefaultGroup();
-    private final SettingGroup sgAutoSign = settings.createGroup("Auto Sign");
-    private final SettingGroup sgRender = settings.createGroup("Render");
-    private final SettingGroup sgFilter = settings.createGroup("Filter");
+    private final SettingGroup sgGeneral      = settings.getDefaultGroup();
+    private final SettingGroup sgAutoSign     = settings.createGroup("Auto Sign");
+    private final SettingGroup sgRender       = settings.createGroup("Render");
+    private final SettingGroup sgGlow         = settings.createGroup("Glow");
+    private final SettingGroup sgFilter       = settings.createGroup("Filter");
     private final SettingGroup sgOptimization = settings.createGroup("Optimization");
+
+    // ═══════════════════════════════════════════════════════════════════════════
+    // Settings — General
+    // ═══════════════════════════════════════════════════════════════════════════
 
     private final Setting<Integer> chunks = sgGeneral.add(new IntSetting.Builder()
         .name("chunks")
@@ -80,7 +85,10 @@ public class SignScanner extends Module {
         .build()
     );
 
-    // --- Auto Sign ---
+    // ═══════════════════════════════════════════════════════════════════════════
+    // Settings — Auto Sign
+    // ═══════════════════════════════════════════════════════════════════════════
+
     private final Setting<Boolean> autoSign = sgAutoSign.add(new BoolSetting.Builder()
         .name("auto-sign")
         .description("Enables the auto-sign feature to write on signs automatically when placed.")
@@ -129,6 +137,10 @@ public class SignScanner extends Module {
         .build()
     );
 
+    // ═══════════════════════════════════════════════════════════════════════════
+    // Settings — Render
+    // ═══════════════════════════════════════════════════════════════════════════
+
     private final Setting<Double> scale = sgRender.add(new DoubleSetting.Builder()
         .name("scale")
         .description("Scale of the rendered text.")
@@ -166,7 +178,7 @@ public class SignScanner extends Module {
         .visible(background::get)
         .build()
     );
-    
+
     private final Setting<Boolean> merge = sgRender.add(new BoolSetting.Builder()
         .name("merge")
         .description("Merge signs that are close together.")
@@ -184,6 +196,59 @@ public class SignScanner extends Module {
         .build()
     );
 
+    // ═══════════════════════════════════════════════════════════════════════════
+    // Settings — Glow
+    // ═══════════════════════════════════════════════════════════════════════════
+
+    private final Setting<Boolean> glowEnabled = sgGlow.add(new BoolSetting.Builder()
+        .name("glow")
+        .description("Render a bloom glow around the sign background panel.")
+        .defaultValue(true)
+        .build()
+    );
+
+    private final Setting<Integer> glowLayers = sgGlow.add(new IntSetting.Builder()
+        .name("glow-layers")
+        .description("Number of bloom layers rendered around the background panel.")
+        .defaultValue(4)
+        .min(1)
+        .sliderMax(8)
+        .visible(glowEnabled::get)
+        .build()
+    );
+
+    private final Setting<Double> glowSpread = sgGlow.add(new DoubleSetting.Builder()
+        .name("glow-spread")
+        .description("How far each bloom layer expands outward (in pixels).")
+        .defaultValue(3.0)
+        .min(0.5)
+        .sliderMax(12.0)
+        .visible(glowEnabled::get)
+        .build()
+    );
+
+    private final Setting<Integer> glowBaseAlpha = sgGlow.add(new IntSetting.Builder()
+        .name("glow-base-alpha")
+        .description("Alpha of the innermost glow layer (0-255).")
+        .defaultValue(60)
+        .min(4)
+        .sliderMax(150)
+        .visible(glowEnabled::get)
+        .build()
+    );
+
+    private final Setting<SettingColor> glowColor = sgGlow.add(new ColorSetting.Builder()
+        .name("glow-color")
+        .description("Color of the bloom glow. Alpha is controlled by glow-base-alpha.")
+        .defaultValue(new SettingColor(100, 180, 255, 255))
+        .visible(glowEnabled::get)
+        .build()
+    );
+
+    // ═══════════════════════════════════════════════════════════════════════════
+    // Settings — Filter
+    // ═══════════════════════════════════════════════════════════════════════════
+
     private final Setting<Boolean> ignoreEmpty = sgFilter.add(new BoolSetting.Builder()
         .name("ignore-empty")
         .description("Ignore signs with no text.")
@@ -197,6 +262,18 @@ public class SignScanner extends Module {
         .defaultValue(true)
         .build()
     );
+
+    private final Setting<List<String>> badWords = sgFilter.add(new StringListSetting.Builder()
+        .name("Banned Words")
+        .description("List of words to censor.")
+        .defaultValue(List.of("badword1", "badword2"))
+        .visible(censorship::get)
+        .build()
+    );
+
+    // ═══════════════════════════════════════════════════════════════════════════
+    // Settings — Optimization
+    // ═══════════════════════════════════════════════════════════════════════════
 
     private final Setting<Boolean> cacheSignText = sgOptimization.add(new BoolSetting.Builder()
         .name("cache-sign-text")
@@ -215,13 +292,9 @@ public class SignScanner extends Module {
         .build()
     );
 
-    private final Setting<List<String>> badWords = sgFilter.add(new StringListSetting.Builder()
-        .name("Banned Words")
-        .description("List of words to censor.")
-        .defaultValue(List.of("badword1", "badword2"))
-        .visible(censorship::get)
-        .build()
-    );
+    // ═══════════════════════════════════════════════════════════════════════════
+    // State
+    // ═══════════════════════════════════════════════════════════════════════════
 
     private final Map<BlockPos, List<Text>> signs = new ConcurrentHashMap<>();
     private final Set<BlockPos> notified = new HashSet<>();
@@ -231,9 +304,17 @@ public class SignScanner extends Module {
     private int editTimer = 0;
     private AbstractSignEditScreen currentScreen = null;
 
+    // ═══════════════════════════════════════════════════════════════════════════
+    // Constructor
+    // ═══════════════════════════════════════════════════════════════════════════
+
     public SignScanner() {
         super(HuntingUtilities.CATEGORY, "sign-scanner", "Scans and displays sign text.");
     }
+
+    // ═══════════════════════════════════════════════════════════════════════════
+    // Lifecycle
+    // ═══════════════════════════════════════════════════════════════════════════
 
     @Override
     public void onActivate() {
@@ -244,11 +325,14 @@ public class SignScanner extends Module {
         currentScreen = null;
     }
 
+    // ═══════════════════════════════════════════════════════════════════════════
+    // Tick — AutoSign
+    // ═══════════════════════════════════════════════════════════════════════════
+
     @EventHandler
     private void onTick(TickEvent.Pre event) {
         if (!autoSign.get()) return;
 
-        // If we are currently editing a sign (waiting for delay), handle that
         if (currentScreen != null) {
             editTimer++;
             if (editTimer >= editorDelay.get()) {
@@ -264,12 +348,14 @@ public class SignScanner extends Module {
         if (event.screen instanceof AbstractSignEditScreen screen) {
             currentScreen = screen;
             editTimer = 0;
-            // We do NOT cancel the event, allowing the screen to "open" visually/logically
-            // so the delay feels natural before we close it.
         } else {
             currentScreen = null;
         }
     }
+
+    // ═══════════════════════════════════════════════════════════════════════════
+    // Tick — Sign Scanning
+    // ═══════════════════════════════════════════════════════════════════════════
 
     @EventHandler
     private void onTick(TickEvent.Post event) {
@@ -332,6 +418,10 @@ public class SignScanner extends Module {
 
         } catch (Exception ignored) {}
     }
+
+    // ═══════════════════════════════════════════════════════════════════════════
+    // Sign Text Helpers
+    // ═══════════════════════════════════════════════════════════════════════════
 
     private void readSignText(SignText signText, List<Text> output) {
         int color = signText.getColor().getSignColor();
@@ -396,6 +486,10 @@ public class SignScanner extends Module {
         return text.getString();
     }
 
+    // ═══════════════════════════════════════════════════════════════════════════
+    // Render 2D
+    // ═══════════════════════════════════════════════════════════════════════════
+
     @EventHandler
     private void onRender2D(Render2DEvent event) {
         if (mc.player == null) return;
@@ -411,14 +505,12 @@ public class SignScanner extends Module {
                 BlockEntity be = mc.world.getBlockEntity(pos);
                 Vec3d vec;
                 if (be instanceof HangingSignBlockEntity) {
-                    // Hanging signs are positioned lower than standard signs, so we adjust the render position downwards.
                     vec = Vec3d.ofCenter(pos).add(0, -0.2, 0);
                 } else {
-                    // Default position for standard signs.
                     vec = Vec3d.ofCenter(pos).add(0, 0.5, 0);
                 }
                 Vector3d pos3d = new Vector3d(vec.x, vec.y, vec.z);
-                
+
                 if (!NametagUtils.to2D(pos3d, scale.get())) continue;
 
                 entries.add(new SignEntry(pos, lines, pos3d));
@@ -461,6 +553,10 @@ public class SignScanner extends Module {
         } catch (Exception ignored) {}
     }
 
+    // ═══════════════════════════════════════════════════════════════════════════
+    // Sign Rendering
+    // ═══════════════════════════════════════════════════════════════════════════
+
     private void renderSign(SignEntry entry, Render2DEvent event, TextRenderer tr) {
         NametagUtils.begin(entry.pos3d, event.drawContext);
         RenderSystem.disableDepthTest();
@@ -473,19 +569,50 @@ public class SignScanner extends Module {
 
         double lh = tr.getHeight();
 
-        // Background
+        // Compute background bounds once — shared by both glow and background draws
+        double maxWidth = 0;
+        for (Text t : linesToRender) maxWidth = Math.max(maxWidth, tr.getWidth(getTextContent(t)));
+        double totalH = linesToRender.size() * lh;
+
+        double pad = 4.0;
+        double bw = maxWidth + pad * 2;
+        double bh = totalH + pad * 2;
+        double bx = -bw / 2.0;
+        double by = -totalH / 2.0 - pad;
+
+        // Bloom glow — drawn before the background so it sits behind the panel.
+        // Each layer expands the panel bounds outward and uses a quadratic falloff
+        // so the glow is bright at the edge of the panel and fades quickly outward,
+        // matching the sharp-fill aesthetic of the background quad rather than a
+        // slow linear gradient smear.
+        if (glowEnabled.get() && background.get()) {
+            int    layers    = glowLayers.get();
+            double spread    = glowSpread.get();
+            int    baseAlpha = glowBaseAlpha.get();
+            SettingColor gc  = glowColor.get();
+
+            Renderer2D.COLOR.begin();
+            for (int i = layers; i >= 1; i--) {
+                double expansion = spread * i;
+
+                // t=0 is innermost (brightest), t=1 is outermost (most transparent).
+                // Squaring t keeps the core bright and drops off sharply at the edges.
+                double t          = (double)(i - 1) / layers;
+                int    layerAlpha = Math.max(4, (int)(baseAlpha * (1.0 - t * t)));
+
+                double gx = bx - expansion;
+                double gy = by - expansion;
+                double gw = bw + expansion * 2;
+                double gh = bh + expansion * 2;
+
+                Renderer2D.COLOR.quad(gx, gy, gw, gh, withAlpha(gc, layerAlpha));
+            }
+            Renderer2D.COLOR.render(null);
+        }
+
+        // Solid background panel on top of glow layers
         if (background.get()) {
             Renderer2D.COLOR.begin();
-            double maxWidth = 0;
-            for (Text t : linesToRender) maxWidth = Math.max(maxWidth, tr.getWidth(getTextContent(t)));
-            double totalH = linesToRender.size() * lh;
-
-            double pad = 4.0;
-            double bw = maxWidth + pad * 2;
-            double bh = totalH + pad * 2;
-            double bx = -bw / 2.0;
-            double by = -totalH / 2.0 - pad;
-
             Renderer2D.COLOR.quad(bx, by, bw, bh, backgroundColor.get());
             Renderer2D.COLOR.render(null);
         }
@@ -530,6 +657,18 @@ public class SignScanner extends Module {
         NametagUtils.end(event.drawContext);
     }
 
+    // ═══════════════════════════════════════════════════════════════════════════
+    // Color Helper
+    // ═══════════════════════════════════════════════════════════════════════════
+
+    private SettingColor withAlpha(SettingColor color, int alpha) {
+        return new SettingColor(color.r, color.g, color.b, Math.min(255, Math.max(0, alpha)));
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════════
+    // AutoSign — Finish Editing
+    // ═══════════════════════════════════════════════════════════════════════════
+
     private void finishEditing() {
         if (currentScreen == null) return;
 
@@ -551,7 +690,7 @@ public class SignScanner extends Module {
 
                     BlockHitResult hit = new BlockHitResult(
                         Vec3d.ofCenter(sign.getPos()),
-                        Direction.UP, // The side doesn't matter for applying glow ink sac
+                        Direction.UP,
                         sign.getPos(),
                         false
                     );
@@ -574,7 +713,7 @@ public class SignScanner extends Module {
 
                     BlockHitResult hit = new BlockHitResult(
                         Vec3d.ofCenter(sign.getPos()),
-                        Direction.UP, // The side doesn't matter for applying dye
+                        Direction.UP,
                         sign.getPos(),
                         false
                     );
@@ -605,6 +744,11 @@ public class SignScanner extends Module {
         }
         return null;
     }
+
+    // ═══════════════════════════════════════════════════════════════════════════
+    // SignEntry
+    // ═══════════════════════════════════════════════════════════════════════════
+
     private static class SignEntry {
         BlockPos pos;
         List<Text> lines;

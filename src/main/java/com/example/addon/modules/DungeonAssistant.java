@@ -18,6 +18,7 @@ import meteordevelopment.meteorclient.renderer.ShapeMode;
 import meteordevelopment.meteorclient.settings.BlockListSetting;
 import meteordevelopment.meteorclient.settings.BoolSetting;
 import meteordevelopment.meteorclient.settings.ColorSetting;
+import meteordevelopment.meteorclient.settings.DoubleSetting;
 import meteordevelopment.meteorclient.settings.EnumSetting;
 import meteordevelopment.meteorclient.settings.IntSetting;
 import meteordevelopment.meteorclient.settings.ItemListSetting;
@@ -58,7 +59,6 @@ import net.minecraft.util.math.Direction;
 import net.minecraft.util.math.Direction.Axis;
 import net.minecraft.util.math.Vec3d;
 import net.minecraft.world.chunk.ChunkSection;
-import net.minecraft.world.chunk.ChunkStatus;
 import net.minecraft.world.chunk.WorldChunk;
 
 public class DungeonAssistant extends Module {
@@ -135,6 +135,7 @@ public class DungeonAssistant extends Module {
     private final SettingGroup sgChests        = settings.createGroup("Chests");
     private final SettingGroup sgClutterBlocks = settings.createGroup("Clutter Blocks");
     private final SettingGroup sgEndermites    = settings.createGroup("Endermites");
+    private final SettingGroup sgGlow          = settings.createGroup("Glow");
     private final SettingGroup sgSafety        = settings.createGroup("Safety");
 
     // ═══════════════════════════════════════════════════════════════════════════
@@ -144,40 +145,24 @@ public class DungeonAssistant extends Module {
     private final Setting<Integer> range = sgGeneral.add(new IntSetting.Builder()
         .name("range")
         .description("Detection range in chunks (1 chunk = 16 blocks). High values impact performance.")
-        .defaultValue(16)
-        .min(1)
-        .max(128)
-        .sliderMin(1)
-        .sliderMax(64)
+        .defaultValue(16).min(1).max(128).sliderMin(1).sliderMax(64)
         .build()
     );
 
     private final Setting<Integer> minYSetting = sgGeneral.add(new IntSetting.Builder()
-        .name("min-y")
-        .description("Minimum Y-level to scan.")
-        .defaultValue(-64)
-        .min(-64)
-        .max(320)
-        .sliderMin(-64)
-        .sliderMax(320)
+        .name("min-y").description("Minimum Y-level to scan.")
+        .defaultValue(-64).min(-64).max(320).sliderMin(-64).sliderMax(320)
         .build()
     );
 
     private final Setting<Integer> maxYSetting = sgGeneral.add(new IntSetting.Builder()
-        .name("max-y")
-        .description("Maximum Y-level to scan.")
-        .defaultValue(320)
-        .min(-64)
-        .max(320)
-        .sliderMin(-64)
-        .sliderMax(320)
+        .name("max-y").description("Maximum Y-level to scan.")
+        .defaultValue(320).min(-64).max(320).sliderMin(-64).sliderMax(320)
         .build()
     );
 
     private final Setting<ShapeMode> shapeMode = sgGeneral.add(new EnumSetting.Builder<ShapeMode>()
-        .name("shape-mode")
-        .description("Render style.")
-        .defaultValue(ShapeMode.Both)
+        .name("shape-mode").description("Render style.").defaultValue(ShapeMode.Both)
         .build()
     );
 
@@ -186,36 +171,26 @@ public class DungeonAssistant extends Module {
     // ═══════════════════════════════════════════════════════════════════════════
 
     private final Setting<Boolean> autoOpen = sgAutoOpen.add(new BoolSetting.Builder()
-        .name("auto-open")
-        .description("Automatically open, check, and close containers.")
-        .defaultValue(true)
+        .name("auto-open").description("Automatically open, check, and close containers.").defaultValue(true)
         .build()
     );
 
     private final Setting<Boolean> silentMode = sgAutoOpen.add(new BoolSetting.Builder()
         .name("silent-mode")
-        .description("Open containers invisibly — GUI is suppressed, inventory is read server-side, then the break-delay fires if no whitelisted items are found.")
-        .defaultValue(true)
-        .visible(autoOpen::get)
+        .description("Open containers invisibly — GUI is suppressed, inventory is read server-side.")
+        .defaultValue(true).visible(autoOpen::get)
         .build()
     );
 
     private final Setting<Boolean> autoBreak = sgAutoOpen.add(new BoolSetting.Builder()
-        .name("auto-break")
-        .description("Break empty containers after checking.")
-        .defaultValue(true)
-        .visible(autoOpen::get)
+        .name("auto-break").description("Break empty containers after checking.")
+        .defaultValue(true).visible(autoOpen::get)
         .build()
     );
 
     private final Setting<Integer> breakDelay = sgAutoOpen.add(new IntSetting.Builder()
-        .name("break-delay")
-        .description("Ticks to wait before breaking an empty container.")
-        .defaultValue(5)
-        .min(0)
-        .max(40)
-        .sliderMin(0)
-        .sliderMax(20)
+        .name("break-delay").description("Ticks to wait before breaking an empty container.")
+        .defaultValue(5).min(0).max(40).sliderMin(0).sliderMax(20)
         .visible(() -> autoOpen.get() && autoBreak.get())
         .build()
     );
@@ -223,8 +198,7 @@ public class DungeonAssistant extends Module {
     private final Setting<Boolean> silentSwitch = sgAutoOpen.add(new BoolSetting.Builder()
         .name("silent-switch")
         .description("Switch to axe (chest) or sword (chest minecart) for breaking, then restore the previous hotbar slot.")
-        .defaultValue(true)
-        .visible(() -> autoOpen.get() && autoBreak.get())
+        .defaultValue(true).visible(() -> autoOpen.get() && autoBreak.get())
         .build()
     );
 
@@ -253,71 +227,49 @@ public class DungeonAssistant extends Module {
     // ═══════════════════════════════════════════════════════════════════════════
 
     private final Setting<Boolean> trackSpawners = sgSpawners.add(new BoolSetting.Builder()
-        .name("track-spawners")
-        .description("Highlight monster spawners.")
-        .defaultValue(true)
+        .name("track-spawners").description("Highlight monster spawners.").defaultValue(true)
         .build()
     );
 
     private final Setting<SettingColor> spawnerColor = sgSpawners.add(new ColorSetting.Builder()
-        .name("spawner-color")
-        .description("Monster spawner highlight color.")
-        .defaultValue(new SettingColor(255, 0, 0, 100))
-        .visible(trackSpawners::get)
-        .build()
+        .name("spawner-color").description("Monster spawner highlight color.")
+        .defaultValue(new SettingColor(255, 0, 0, 255))
+        .visible(trackSpawners::get).build()
     );
 
     private final Setting<SettingColor> brokenSpawnerColor = sgSpawners.add(new ColorSetting.Builder()
-        .name("broken-spawner-color")
-        .description("Color of the broken spawner beam.")
-        .defaultValue(new SettingColor(255, 0, 0, 150))
-        .visible(trackSpawners::get)
-        .build()
+        .name("broken-spawner-color").description("Color of the broken spawner beam.")
+        .defaultValue(new SettingColor(255, 0, 0, 200))
+        .visible(trackSpawners::get).build()
     );
 
     private final Setting<Integer> brokenSpawnerDuration = sgSpawners.add(new IntSetting.Builder()
-        .name("broken-beam-duration")
-        .description("How long the beam remains (in seconds).")
-        .defaultValue(10)
-        .min(1)
-        .sliderMax(60)
-        .visible(trackSpawners::get)
-        .build()
+        .name("broken-beam-duration").description("How long the beam remains (in seconds).")
+        .defaultValue(10).min(1).sliderMax(60)
+        .visible(trackSpawners::get).build()
     );
 
     private final Setting<Boolean> autoBreakSpawners = sgSpawners.add(new BoolSetting.Builder()
-        .name("auto-break")
-        .description("Automatically break spawners in range.")
-        .defaultValue(false)
+        .name("auto-break").description("Automatically break spawners in range.").defaultValue(false)
         .build()
     );
 
     private final Setting<Integer> spawnerBreakRange = sgSpawners.add(new IntSetting.Builder()
-        .name("break-range")
-        .description("Range in blocks to break spawners.")
-        .defaultValue(5)
-        .min(1)
-        .max(10)
-        .sliderRange(1, 10)
-        .visible(autoBreakSpawners::get)
-        .build()
+        .name("break-range").description("Range in blocks to break spawners.")
+        .defaultValue(5).min(1).max(10).sliderRange(1, 10)
+        .visible(autoBreakSpawners::get).build()
     );
 
     private final Setting<Integer> spawnerBreakDelay = sgSpawners.add(new IntSetting.Builder()
-        .name("break-delay")
-        .description("Ticks to wait before breaking a spawner.")
-        .defaultValue(5)
-        .min(0)
-        .max(20)
-        .visible(autoBreakSpawners::get)
-        .build()
+        .name("break-delay").description("Ticks to wait before breaking a spawner.")
+        .defaultValue(5).min(0).max(20)
+        .visible(autoBreakSpawners::get).build()
     );
 
     private final Setting<Boolean> prioritizeSpawners = sgAutoOpen.add(new BoolSetting.Builder()
         .name("prioritize-spawners")
         .description("Break spawners before opening chests when both auto-break and auto-open are active.")
-        .defaultValue(true)
-        .visible(() -> autoOpen.get() && autoBreakSpawners.get())
+        .defaultValue(true).visible(() -> autoOpen.get() && autoBreakSpawners.get())
         .build()
     );
 
@@ -326,67 +278,48 @@ public class DungeonAssistant extends Module {
     // ═══════════════════════════════════════════════════════════════════════════
 
     private final Setting<Boolean> trackChests = sgChests.add(new BoolSetting.Builder()
-        .name("track-chests")
-        .description("Highlight chests.")
-        .defaultValue(true)
+        .name("track-chests").description("Highlight chests.").defaultValue(true)
         .build()
     );
 
     private final Setting<SettingColor> chestColor = sgChests.add(new ColorSetting.Builder()
-        .name("chest-color")
-        .description("Chest highlight color.")
-        .defaultValue(new SettingColor(255, 215, 0, 80))
-        .visible(trackChests::get)
-        .build()
+        .name("chest-color").description("Chest highlight color.")
+        .defaultValue(new SettingColor(255, 215, 0, 255))
+        .visible(trackChests::get).build()
     );
 
     private final Setting<Boolean> trackChestMinecarts = sgChests.add(new BoolSetting.Builder()
-        .name("track-chest-minecarts")
-        .description("Highlight chest minecarts.")
-        .defaultValue(true)
+        .name("track-chest-minecarts").description("Highlight chest minecarts.").defaultValue(true)
         .build()
     );
 
     private final Setting<SettingColor> chestMinecartColor = sgChests.add(new ColorSetting.Builder()
-        .name("chest-minecart-color")
-        .description("Chest minecart highlight color.")
-        .defaultValue(new SettingColor(255, 180, 0, 80))
-        .visible(trackChestMinecarts::get)
-        .build()
+        .name("chest-minecart-color").description("Chest minecart highlight color.")
+        .defaultValue(new SettingColor(255, 180, 0, 255))
+        .visible(trackChestMinecarts::get).build()
     );
 
     private final Setting<Boolean> highlightStacked = sgChests.add(new BoolSetting.Builder()
-        .name("highlight-stacked-minecarts")
-        .description("Use different color for stacked chest minecarts.")
-        .defaultValue(true)
-        .visible(trackChestMinecarts::get)
+        .name("highlight-stacked-minecarts").description("Use different color for stacked chest minecarts.")
+        .defaultValue(true).visible(trackChestMinecarts::get)
         .build()
     );
 
     private final Setting<Integer> stackedMinecartThreshold = sgChests.add(new IntSetting.Builder()
-        .name("stacked-threshold")
-        .description("How many minecarts at the same block position count as 'stacked'.")
-        .defaultValue(2)
-        .min(2)
-        .max(10)
-        .sliderRange(2, 5)
-        .visible(() -> trackChestMinecarts.get() && highlightStacked.get())
-        .build()
+        .name("stacked-threshold").description("How many minecarts at the same block position count as 'stacked'.")
+        .defaultValue(2).min(2).max(10).sliderRange(2, 5)
+        .visible(() -> trackChestMinecarts.get() && highlightStacked.get()).build()
     );
 
     private final Setting<SettingColor> stackedMinecartColor = sgChests.add(new ColorSetting.Builder()
-        .name("stacked-minecart-color")
-        .description("Highlight color for stacked chest minecarts.")
-        .defaultValue(new SettingColor(255, 0, 255, 180))
-        .visible(() -> trackChestMinecarts.get() && highlightStacked.get())
-        .build()
+        .name("stacked-minecart-color").description("Highlight color for stacked chest minecarts.")
+        .defaultValue(new SettingColor(255, 0, 255, 255))
+        .visible(() -> trackChestMinecarts.get() && highlightStacked.get()).build()
     );
 
     private final Setting<Boolean> brokenChestCounter = sgChests.add(new BoolSetting.Builder()
-        .name("broken-chest-counter")
-        .description("Counts and displays how many chests have been broken.")
-        .defaultValue(true)
-        .build()
+        .name("broken-chest-counter").description("Counts and displays how many chests have been broken.")
+        .defaultValue(true).build()
     );
 
     // ═══════════════════════════════════════════════════════════════════════════
@@ -394,65 +327,53 @@ public class DungeonAssistant extends Module {
     // ═══════════════════════════════════════════════════════════════════════════
 
     private final Setting<Boolean> scanCustomBlocks = sgClutterBlocks.add(new BoolSetting.Builder()
-        .name("scan-blocks")
-        .description("Highlight selected blocks in the surrounding area.")
+        .name("scan-blocks").description("Highlight selected blocks in the surrounding area.")
         .defaultValue(true)
         .onChanged(v -> { targets.entrySet().removeIf(e -> e.getValue() == TargetType.CUSTOM_BLOCK); scannedChunks.clear(); })
         .build()
     );
 
     private final Setting<List<Block>> filterBlocks = sgClutterBlocks.add(new BlockListSetting.Builder()
-        .name("blocks")
-        .description("Blocks to search for and highlight in the world.")
+        .name("blocks").description("Blocks to search for and highlight in the world.")
         .defaultValue(List.of(Blocks.COBBLESTONE, Blocks.MOSSY_COBBLESTONE, Blocks.COBBLED_DEEPSLATE, Blocks.NETHERRACK))
         .onChanged(v -> { targets.entrySet().removeIf(e -> e.getValue() == TargetType.CUSTOM_BLOCK); scannedChunks.clear(); })
-        .visible(scanCustomBlocks::get)
-        .build()
+        .visible(scanCustomBlocks::get).build()
     );
 
     private final Setting<SettingColor> customBlockColor = sgClutterBlocks.add(new ColorSetting.Builder()
-        .name("block-color")
-        .description("Highlight color for the selected blocks.")
-        .defaultValue(new SettingColor(128, 200, 128, 60))
-        .visible(scanCustomBlocks::get)
-        .build()
+        .name("block-color").description("Highlight color for the selected blocks.")
+        .defaultValue(new SettingColor(128, 200, 128, 255))
+        .visible(scanCustomBlocks::get).build()
     );
 
     private final Setting<Boolean> trackMisrotatedDeepslate = sgClutterBlocks.add(new BoolSetting.Builder()
         .name("misrotated-deepslate")
-        .description("Highlights Deepslate blocks facing the wrong direction (axis ≠ Y). Indicates player-placed or tampered blocks.")
+        .description("Highlights Deepslate blocks facing the wrong direction (axis ≠ Y).")
         .defaultValue(false)
         .onChanged(v -> { targets.entrySet().removeIf(e -> e.getValue() == TargetType.MISROTATED_DEEPSLATE); scannedChunks.clear(); })
         .build()
     );
 
     private final Setting<SettingColor> misrotatedDeepslateColor = sgClutterBlocks.add(new ColorSetting.Builder()
-        .name("misrotated-deepslate-color")
-        .description("Highlight color for misrotated Deepslate blocks.")
-        .defaultValue(new SettingColor(0, 180, 255, 100))
-        .visible(trackMisrotatedDeepslate::get)
-        .build()
+        .name("misrotated-deepslate-color").description("Highlight color for misrotated Deepslate blocks.")
+        .defaultValue(new SettingColor(0, 180, 255, 255))
+        .visible(trackMisrotatedDeepslate::get).build()
     );
 
     private final Setting<Boolean> highlightSpawnerTorches = sgClutterBlocks.add(new BoolSetting.Builder()
-        .name("highlight-spawner-torches")
-        .description("Highlights torches within 5 blocks of a spawner.")
-        .defaultValue(true)
-        .visible(trackSpawners::get)
+        .name("highlight-spawner-torches").description("Highlights torches within 5 blocks of a spawner.")
+        .defaultValue(true).visible(trackSpawners::get)
         .build()
     );
 
     private final Setting<SettingColor> spawnerTorchColor = sgClutterBlocks.add(new ColorSetting.Builder()
-        .name("spawner-torch-color")
-        .description("Color for torches near spawners.")
-        .defaultValue(new SettingColor(255, 255, 0, 150))
-        .visible(() -> trackSpawners.get() && highlightSpawnerTorches.get())
-        .build()
+        .name("spawner-torch-color").description("Color for torches near spawners.")
+        .defaultValue(new SettingColor(255, 255, 0, 255))
+        .visible(() -> trackSpawners.get() && highlightSpawnerTorches.get()).build()
     );
 
     private final Setting<Keybind> toggleBlocksKey = sgClutterBlocks.add(new KeybindSetting.Builder()
-        .name("toggle-key")
-        .description("Key to toggle custom block scanning on/off.")
+        .name("toggle-key").description("Key to toggle custom block scanning on/off.")
         .defaultValue(Keybind.none())
         .action(() -> {
             if (mc.currentScreen != null) return;
@@ -468,27 +389,41 @@ public class DungeonAssistant extends Module {
     // ═══════════════════════════════════════════════════════════════════════════
 
     private final Setting<Boolean> trackEndermites = sgEndermites.add(new BoolSetting.Builder()
-        .name("track-endermites")
-        .description("Highlights Endermites in the Overworld.")
-        .defaultValue(false)
+        .name("track-endermites").description("Highlights Endermites in the Overworld.").defaultValue(false)
         .build()
     );
 
     private final Setting<SettingColor> endermiteColor = sgEndermites.add(new ColorSetting.Builder()
-        .name("endermite-color")
-        .description("The highlight color for Endermites.")
-        .defaultValue(new SettingColor(138, 43, 226, 150))
-        .visible(trackEndermites::get)
-        .build()
+        .name("endermite-color").description("The highlight color for Endermites.")
+        .defaultValue(new SettingColor(138, 43, 226, 255))
+        .visible(trackEndermites::get).build()
     );
 
     private final Setting<Integer> endermiteBeamWidth = sgEndermites.add(new IntSetting.Builder()
-        .name("beam-width")
-        .description("The width of the beam.")
-        .defaultValue(15)
-        .min(5)
-        .max(50)
-        .visible(trackEndermites::get)
+        .name("beam-width").description("The width of the beam.")
+        .defaultValue(15).min(5).max(50)
+        .visible(trackEndermites::get).build()
+    );
+
+    // ═══════════════════════════════════════════════════════════════════════════
+    // Settings — Glow
+    // ═══════════════════════════════════════════════════════════════════════════
+
+    private final Setting<Integer> glowLayers = sgGlow.add(new IntSetting.Builder()
+        .name("glow-layers").description("Number of bloom layers rendered around each target.")
+        .defaultValue(4).min(1).sliderMax(8)
+        .build()
+    );
+
+    private final Setting<Double> glowSpread = sgGlow.add(new DoubleSetting.Builder()
+        .name("glow-spread").description("How far each bloom layer expands outward (in blocks).")
+        .defaultValue(0.04).min(0.01).sliderMax(0.15)
+        .build()
+    );
+
+    private final Setting<Integer> glowBaseAlpha = sgGlow.add(new IntSetting.Builder()
+        .name("glow-base-alpha").description("Alpha of the innermost glow layer (0-255).")
+        .defaultValue(60).min(10).sliderMax(150)
         .build()
     );
 
@@ -499,19 +434,13 @@ public class DungeonAssistant extends Module {
     private final Setting<Boolean> autoDisableOnLowHealth = sgSafety.add(new BoolSetting.Builder()
         .name("auto-disable-on-low-health")
         .description("Automatically disables the module if health is critically low with a totem equipped.")
-        .defaultValue(true)
-        .build()
+        .defaultValue(true).build()
     );
 
     private final Setting<Integer> lowHealthThreshold = sgSafety.add(new IntSetting.Builder()
-        .name("low-health-threshold")
-        .description("Health level (in hearts) to trigger auto-disable.")
-        .defaultValue(3)
-        .min(1)
-        .max(10)
-        .sliderRange(1, 5)
-        .visible(autoDisableOnLowHealth::get)
-        .build()
+        .name("low-health-threshold").description("Health level (in hearts) to trigger auto-disable.")
+        .defaultValue(3).min(1).max(10).sliderRange(1, 5)
+        .visible(autoDisableOnLowHealth::get).build()
     );
 
     // ═══════════════════════════════════════════════════════════════════════════
@@ -599,7 +528,7 @@ public class DungeonAssistant extends Module {
             } else if (hit.getType() == HitResult.Type.ENTITY) {
                 EntityHitResult entityHit = (EntityHitResult) hit;
                 if (entityHit.getEntity() instanceof ChestMinecartEntity) {
-                    lastOpenedEntity = entityHit.getEntity();
+                    lastOpenedEntity    = entityHit.getEntity();
                     lastOpenedContainer = null;
                 }
             }
@@ -619,12 +548,11 @@ public class DungeonAssistant extends Module {
     private void onRender(Render3DEvent event) {
         if (mc.player == null || mc.world == null) return;
 
-        ShapeMode mode = shapeMode.get();
         Set<BlockPos> toRemove = new HashSet<>();
 
         for (Map.Entry<BlockPos, TargetType> entry : targets.entrySet()) {
-            BlockPos   pos   = entry.getKey();
-            TargetType type  = entry.getValue();
+            BlockPos   pos  = entry.getKey();
+            TargetType type = entry.getValue();
             Box renderBox;
             SettingColor color;
 
@@ -632,7 +560,6 @@ public class DungeonAssistant extends Module {
                 Box queryBox = new Box(pos).expand(0.5);
                 List<ChestMinecartEntity> minecarts = mc.world.getEntitiesByClass(
                     ChestMinecartEntity.class, queryBox, entity -> true);
-
                 if (minecarts.isEmpty()) { toRemove.add(pos); continue; }
 
                 renderBox = getMinecartChestBox(minecarts.get(0));
@@ -655,7 +582,12 @@ public class DungeonAssistant extends Module {
                 color = getColor(type);
             }
 
-            if (color != null) event.renderer.box(renderBox, color, color, mode, 0);
+            if (color == null) continue;
+
+            // Bloom layers
+            renderGlowLayers(event, renderBox, color);
+            // Solid outline on top
+            event.renderer.box(renderBox, withAlpha(color, 0), color, ShapeMode.Lines, 0);
         }
 
         // Process removals and track broken spawners
@@ -669,19 +601,20 @@ public class DungeonAssistant extends Module {
 
         // Render broken spawner beams
         if (!brokenSpawners.isEmpty()) {
-            long now = System.currentTimeMillis();
-            brokenSpawners.entrySet().removeIf(e -> now > e.getValue());
-
-            SettingColor color   = brokenSpawnerColor.get();
+            long         now      = System.currentTimeMillis();
+            SettingColor color    = brokenSpawnerColor.get();
             int          worldBot = mc.world.getBottomY();
             int          worldTop = worldBot + mc.world.getHeight();
 
+            brokenSpawners.entrySet().removeIf(e -> now > e.getValue());
+
             for (BlockPos pos : brokenSpawners.keySet()) {
-                event.renderer.box(
-                    new Box(pos.getX() + 0.4, worldBot, pos.getZ() + 0.4,
-                            pos.getX() + 0.6, worldTop, pos.getZ() + 0.6),
-                    color, color, ShapeMode.Both, 0
+                Box beamBox = new Box(
+                    pos.getX() + 0.4, worldBot, pos.getZ() + 0.4,
+                    pos.getX() + 0.6, worldTop, pos.getZ() + 0.6
                 );
+                renderGlowLayers(event, beamBox, color);
+                event.renderer.box(beamBox, withAlpha(color, 80), color, ShapeMode.Both, 0);
             }
         }
 
@@ -690,15 +623,18 @@ public class DungeonAssistant extends Module {
             SettingColor color = endermiteColor.get();
             for (EndermiteEntity endermite : endermiteTargets) {
                 if (!endermite.isAlive()) continue;
-                event.renderer.box(endermite.getBoundingBox(), color, color, mode, 0);
+
+                renderGlowLayers(event, endermite.getBoundingBox(), color);
+                event.renderer.box(endermite.getBoundingBox(), withAlpha(color, 0), color, ShapeMode.Lines, 0);
 
                 double beamSize = endermiteBeamWidth.get() / 100.0;
                 Vec3d  epos     = endermite.getPos();
-                event.renderer.box(
-                    new Box(epos.x - beamSize, epos.y, epos.z - beamSize,
-                            epos.x + beamSize, mc.world.getHeight(), epos.z + beamSize),
-                    color, color, ShapeMode.Both, 0
+                Box    beamBox  = new Box(
+                    epos.x - beamSize, epos.y, epos.z - beamSize,
+                    epos.x + beamSize, mc.world.getHeight(), epos.z + beamSize
                 );
+                renderGlowLayers(event, beamBox, color);
+                event.renderer.box(beamBox, withAlpha(color, 60), color, ShapeMode.Both, 0);
             }
         }
 
@@ -706,8 +642,35 @@ public class DungeonAssistant extends Module {
         if (!spawnerTorches.isEmpty()) {
             SettingColor color = spawnerTorchColor.get();
             for (BlockPos pos : spawnerTorches) {
-                event.renderer.box(pos, color, color, mode, 0);
+                Box torchBox = createPaddedBox(pos);
+                renderGlowLayers(event, torchBox, color);
+                event.renderer.box(torchBox, withAlpha(color, 0), color, ShapeMode.Lines, 0);
             }
+        }
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════════
+    // Bloom Rendering
+    // ═══════════════════════════════════════════════════════════════════════════
+
+    /**
+     * Renders layered expanding filled boxes to simulate a soft bloom/glow halo.
+     * Outermost layers are most transparent, innermost are most opaque.
+     */
+    private void renderGlowLayers(Render3DEvent event, Box box, SettingColor color) {
+        int    layers    = glowLayers.get();
+        double spread    = glowSpread.get();
+        int    baseAlpha = glowBaseAlpha.get();
+
+        for (int i = layers; i >= 1; i--) {
+            double expansion = spread * i;
+            int    layerAlpha = Math.max(4, (int) (baseAlpha * (1.0 - (double)(i - 1) / layers)));
+            event.renderer.box(
+                box.expand(expansion),
+                withAlpha(color, layerAlpha),
+                withAlpha(color, 0),
+                ShapeMode.Sides, 0
+            );
         }
     }
 
@@ -775,8 +738,7 @@ public class DungeonAssistant extends Module {
                 if (isBreakingChest) {
                     int axeSlot = findAxe();
                     if (axeSlot != -1) mc.player.getInventory().selectedSlot = axeSlot;
-                    // If no axe is found, the currently held item will be used.
-                } else { // Breaking a spawner
+                } else {
                     int pickaxeSlot = findPickaxe();
                     if (pickaxeSlot != -1) mc.player.getInventory().selectedSlot = pickaxeSlot;
                 }
@@ -823,7 +785,6 @@ public class DungeonAssistant extends Module {
             }
         }
 
-        // Silent mode: read screen slots, then close
         if (silentOpenPending && mc.currentScreen instanceof HandledScreen
                 && !(mc.currentScreen instanceof InventoryScreen)) {
 
@@ -859,7 +820,6 @@ public class DungeonAssistant extends Module {
             }
         }
 
-        // Pending break decision after silent close
         if (pendingBreakCheck && mc.currentScreen == null && !silentOpenPending) {
             pendingBreakCheck = false;
             wasAutoOpened = false;
@@ -882,7 +842,6 @@ public class DungeonAssistant extends Module {
             return;
         }
 
-        // Normal (non-silent) screen handling
         if (mc.currentScreen instanceof HandledScreen && !(mc.currentScreen instanceof InventoryScreen)) {
             if (!wasAutoOpened) return;
             if (lastOpenedContainer == null && lastOpenedEntity == null) return;
@@ -956,14 +915,10 @@ public class DungeonAssistant extends Module {
     // ═══════════════════════════════════════════════════════════════════════════
 
     private void updateScanningLogic() {
-        try {
-            if (mc.world.getRegistryKey() == null) return;
-        } catch (Exception e) { return; }
+        try { if (mc.world.getRegistryKey() == null) return; }
+        catch (Exception e) { return; }
 
-        if (dimensionChangeCooldown > 0) {
-            dimensionChangeCooldown--;
-            return;
-        }
+        if (dimensionChangeCooldown > 0) { dimensionChangeCooldown--; return; }
 
         try {
             String currDim = mc.world.getRegistryKey().getValue().toString();
@@ -975,7 +930,7 @@ public class DungeonAssistant extends Module {
             }
         } catch (Exception ignored) { return; }
 
-        BlockPos playerPos   = mc.player.getBlockPos();
+        BlockPos playerPos    = mc.player.getBlockPos();
         int      centerChunkX = playerPos.getX() >> 4;
         int      centerChunkZ = playerPos.getZ() >> 4;
 
@@ -1010,10 +965,7 @@ public class DungeonAssistant extends Module {
         for (Map.Entry<BlockPos, TargetType> entry : targets.entrySet()) {
             if (entry.getValue() == TargetType.SPAWNER) {
                 double distSq = entry.getKey().getSquaredDistance(mc.player.getPos());
-                if (distSq <= rangeSq && distSq < minDistSq) {
-                    minDistSq = distSq;
-                    bestPos   = entry.getKey();
-                }
+                if (distSq <= rangeSq && distSq < minDistSq) { minDistSq = distSq; bestPos = entry.getKey(); }
             }
         }
 
@@ -1047,7 +999,7 @@ public class DungeonAssistant extends Module {
         lastOpenedEntity    = cart;
         lastOpenedContainer = null;
         checkedEntityIds.add(cart.getId());
-        wasAutoOpened       = true;
+        wasAutoOpened        = true;
         interactTimeoutTimer = INTERACT_TIMEOUT_TICKS;
 
         Rotations.rotate(Rotations.getYaw(cart), Rotations.getPitch(cart), () -> {
@@ -1084,9 +1036,9 @@ public class DungeonAssistant extends Module {
             }
         }
 
-        lastOpenedContainer = pos;
-        lastOpenedEntity    = null;
-        wasAutoOpened       = true;
+        lastOpenedContainer  = pos;
+        lastOpenedEntity     = null;
+        wasAutoOpened        = true;
         interactTimeoutTimer = INTERACT_TIMEOUT_TICKS;
 
         Rotations.rotate(Rotations.getYaw(pos), Rotations.getPitch(pos), () -> {
@@ -1149,8 +1101,8 @@ public class DungeonAssistant extends Module {
             for (int x = -5; x <= 5; x++) {
                 for (int y = -5; y <= 5; y++) {
                     for (int z = -5; z <= 5; z++) {
-                        BlockPos  pos   = spawnerPos.add(x, y, z);
-                        Block     b     = mc.world.getBlockState(pos).getBlock();
+                        BlockPos pos = spawnerPos.add(x, y, z);
+                        Block    b   = mc.world.getBlockState(pos).getBlock();
                         if (b == Blocks.TORCH || b == Blocks.WALL_TORCH
                                 || b == Blocks.SOUL_TORCH || b == Blocks.SOUL_WALL_TORCH) {
                             spawnerTorches.add(pos);
@@ -1199,8 +1151,7 @@ public class DungeonAssistant extends Module {
     }
 
     private boolean processChunk(int cx, int cz, int rSq, int centerChunkX, int centerChunkZ) {
-        int dx = cx - centerChunkX;
-        int dz = cz - centerChunkZ;
+        int dx = cx - centerChunkX, dz = cz - centerChunkZ;
         if (dx * dx + dz * dz > rSq) return false;
 
         ChunkPos cp = new ChunkPos(cx, cz);
@@ -1221,9 +1172,9 @@ public class DungeonAssistant extends Module {
         boolean doMisrotated = trackMisrotatedDeepslate.get();
         if (!doCustomBlocks && !doMisrotated) return;
 
-        int          minY    = minYSetting.get();
-        int          maxY    = maxYSetting.get();
-        List<Block>  filter  = doCustomBlocks ? filterBlocks.get() : List.of();
+        int          minY     = minYSetting.get();
+        int          maxY     = maxYSetting.get();
+        List<Block>  filter   = doCustomBlocks ? filterBlocks.get() : List.of();
         ChunkSection[] sections = chunk.getSectionArray();
 
         for (int i = 0; i < sections.length; i++) {
@@ -1245,9 +1196,7 @@ public class DungeonAssistant extends Module {
                         Block      block    = state.getBlock();
                         BlockPos   blockPos = new BlockPos((chunk.getPos().x << 4) + x, worldY, (chunk.getPos().z << 4) + z);
 
-                        if (doCustomBlocks && filter.contains(block)) {
-                            targets.put(blockPos, TargetType.CUSTOM_BLOCK);
-                        }
+                        if (doCustomBlocks && filter.contains(block)) targets.put(blockPos, TargetType.CUSTOM_BLOCK);
                         if (doMisrotated && block == Blocks.DEEPSLATE
                                 && state.contains(Properties.AXIS)
                                 && state.get(Properties.AXIS) != Axis.Y) {
@@ -1266,9 +1215,7 @@ public class DungeonAssistant extends Module {
                 targets.put(pos, TargetType.SPAWNER);
             } else if (trackChests.get()) {
                 Block block = mc.world.getBlockState(pos).getBlock();
-                if (block == Blocks.CHEST || block == Blocks.TRAPPED_CHEST) {
-                    targets.put(pos, TargetType.CHEST);
-                }
+                if (block == Blocks.CHEST || block == Blocks.TRAPPED_CHEST) targets.put(pos, TargetType.CHEST);
             }
         }
     }
@@ -1315,9 +1262,7 @@ public class DungeonAssistant extends Module {
 
             int removed = 0;
             Iterator<BlockPos> it = knownStackedMinecarts.iterator();
-            while (it.hasNext()) {
-                if (!currentStacked.contains(it.next())) { it.remove(); removed++; }
-            }
+            while (it.hasNext()) { if (!currentStacked.contains(it.next())) { it.remove(); removed++; } }
             if (removed > 0) {
                 int remaining = knownStackedMinecarts.size();
                 if (remaining > 0) info("§7%d stacked minecart group(s) cleared. §f%d §7group(s) remaining.", removed, remaining);
@@ -1373,18 +1318,18 @@ public class DungeonAssistant extends Module {
 
     private void renderBeam(Render3DEvent event, Box anchorBox, SettingColor color) {
         if (mc.world == null) return;
-        double beamWidth = 0.25;
-        double half      = beamWidth / 2.0;
-        double centerX   = (anchorBox.minX + anchorBox.maxX) / 2.0;
-        double centerZ   = (anchorBox.minZ + anchorBox.maxZ) / 2.0;
-        int    worldBot  = mc.world.getBottomY();
-        int    worldTop  = worldBot + mc.world.getHeight();
+        double half    = 0.125;
+        double centerX = (anchorBox.minX + anchorBox.maxX) / 2.0;
+        double centerZ = (anchorBox.minZ + anchorBox.maxZ) / 2.0;
+        int    worldBot = mc.world.getBottomY();
+        int    worldTop = worldBot + mc.world.getHeight();
 
-        event.renderer.box(
-            new Box(centerX - half, worldBot, centerZ - half,
-                    centerX + half, worldTop, centerZ + half),
-            color, color, ShapeMode.Both, 0
+        Box beamBox = new Box(
+            centerX - half, worldBot, centerZ - half,
+            centerX + half, worldTop, centerZ + half
         );
+        renderGlowLayers(event, beamBox, color);
+        event.renderer.box(beamBox, withAlpha(color, 60), color, ShapeMode.Both, 0);
     }
 
     private Box getMinecartChestBox(ChestMinecartEntity minecart) {
@@ -1394,10 +1339,9 @@ public class DungeonAssistant extends Module {
         double zPadding    = (entityBox.getLengthZ() - chestSize) / 2.0;
         double chestHeight = 10.0 / 16.0;
         double minY        = entityBox.maxY - chestHeight;
-
         return new Box(
-            entityBox.minX + xPadding, minY,             entityBox.minZ + zPadding,
-            entityBox.maxX - xPadding, entityBox.maxY,   entityBox.maxZ - zPadding
+            entityBox.minX + xPadding, minY,           entityBox.minZ + zPadding,
+            entityBox.maxX - xPadding, entityBox.maxY, entityBox.maxZ - zPadding
         );
     }
 
@@ -1407,7 +1351,15 @@ public class DungeonAssistant extends Module {
     }
 
     // ═══════════════════════════════════════════════════════════════════════════
-    // Validation & Color Helpers
+    // Color Helpers
+    // ═══════════════════════════════════════════════════════════════════════════
+
+    private SettingColor withAlpha(SettingColor color, int alpha) {
+        return new SettingColor(color.r, color.g, color.b, Math.min(255, Math.max(0, alpha)));
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════════
+    // Validation & Color Lookup
     // ═══════════════════════════════════════════════════════════════════════════
 
     private boolean validateBlockType(Block block, TargetType type) {

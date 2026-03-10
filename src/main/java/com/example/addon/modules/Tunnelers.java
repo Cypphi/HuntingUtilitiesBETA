@@ -24,6 +24,7 @@ import meteordevelopment.meteorclient.events.world.TickEvent;
 import meteordevelopment.meteorclient.renderer.ShapeMode;
 import meteordevelopment.meteorclient.settings.BoolSetting;
 import meteordevelopment.meteorclient.settings.ColorSetting;
+import meteordevelopment.meteorclient.settings.DoubleSetting;
 import meteordevelopment.meteorclient.settings.EnumSetting;
 import meteordevelopment.meteorclient.settings.IntSetting;
 import meteordevelopment.meteorclient.settings.Setting;
@@ -35,6 +36,7 @@ import net.minecraft.block.Block;
 import net.minecraft.block.BlockState;
 import net.minecraft.block.Blocks;
 import net.minecraft.util.math.BlockPos;
+import net.minecraft.util.math.Box;
 import net.minecraft.util.math.ChunkPos;
 import net.minecraft.world.chunk.ChunkSection;
 import net.minecraft.world.chunk.WorldChunk;
@@ -62,6 +64,7 @@ public class Tunnelers extends Module {
     private final SettingGroup sgAbnormal = settings.createGroup("Abnormal Tunnels");
     private final SettingGroup sgLadder   = settings.createGroup("Ladder Shafts");
     private final SettingGroup sgRender   = settings.createGroup("Render");
+    private final SettingGroup sgGlow     = settings.createGroup("Glow");
 
     // ------------------------------------------------------------------ //
     //  General                                                             //
@@ -207,45 +210,52 @@ public class Tunnelers extends Module {
         .build());
 
     // ------------------------------------------------------------------ //
+    //  Glow                                                                //
+    // ------------------------------------------------------------------ //
+
+    private final Setting<Boolean> glowEnabled = sgGlow.add(new BoolSetting.Builder()
+        .name("glow")
+        .description("Render a bloom glow around each highlighted box.")
+        .defaultValue(true)
+        .build());
+
+    private final Setting<Integer> glowLayers = sgGlow.add(new IntSetting.Builder()
+        .name("glow-layers")
+        .description("Number of bloom layers rendered around each box.")
+        .defaultValue(4).min(1).sliderMax(8)
+        .visible(glowEnabled::get)
+        .build());
+
+    private final Setting<Double> glowSpread = sgGlow.add(new DoubleSetting.Builder()
+        .name("glow-spread")
+        .description("How far each bloom layer expands outward (in blocks).")
+        .defaultValue(0.05).min(0.01).sliderMax(0.2)
+        .visible(glowEnabled::get)
+        .build());
+
+    private final Setting<Integer> glowBaseAlpha = sgGlow.add(new IntSetting.Builder()
+        .name("glow-base-alpha")
+        .description("Alpha of the innermost glow layer (0-255).")
+        .defaultValue(60).min(4).sliderMax(150)
+        .visible(glowEnabled::get)
+        .build());
+
+    // ------------------------------------------------------------------ //
     //  State                                                               //
     // ------------------------------------------------------------------ //
 
-    /** Live block→type map. Written by main thread (flush), read by merge task. */
     private final ConcurrentHashMap<BlockPos, TunnelType>    locations      = new ConcurrentHashMap<>();
     private final ConcurrentHashMap<ChunkPos, Set<BlockPos>> chunkIndex     = new ConcurrentHashMap<>();
     private final ConcurrentLinkedQueue<ScanResult>          pendingResults = new ConcurrentLinkedQueue<>();
 
-    /**
-     * The finished, sorted list of merged boxes handed to the render thread.
-     * Written only by the merge task via a single volatile store.
-     * The render thread reads it with a single volatile load — zero locking.
-     */
     private volatile List<MergedBox> renderSnapshot = Collections.emptyList();
-
-    /**
-     * Gate that ensures at most ONE merge task is queued at any time.
-     * compareAndSet(false→true) to schedule; the task resets it to false when done.
-     * This prevents a burst of flushes from stacking up O(N) merge jobs.
-     */
     private final AtomicBoolean mergeScheduled = new AtomicBoolean(false);
-
-    /**
-     * Player position snapshot taken on the main thread when a merge is
-     * scheduled, so the background merge task can compute distances without
-     * touching any Minecraft state.
-     */
     private volatile int snapPX, snapPY, snapPZ;
 
-    // Chunk scanning state — main-thread only.
     private final Set<ChunkPos>          scannedChunks = new HashSet<>();
     private final LinkedHashSet<ChunkPos> snapshotQueue = new LinkedHashSet<>();
     private final Set<ChunkPos>          inFlight       = ConcurrentHashMap.newKeySet();
 
-    /**
-     * Single-thread executor shared by chunk scanners (3 threads) AND the
-     * merge task (1 thread). The merge task is cheap compared to scanning so
-     * sharing is fine; it prevents needing a second pool.
-     */
     private ExecutorService executor;
 
     private String lastDimension           = "";
@@ -279,7 +289,6 @@ public class Tunnelers extends Module {
         pruneTimer = 0;
         dimensionChangeCooldown = 0;
         if (mc.world != null) lastDimension = mc.world.getRegistryKey().getValue().toString();
-        // 3 scanner threads + headroom for the occasional merge task.
         executor = Executors.newFixedThreadPool(4, r -> {
             Thread t = new Thread(r, "Tunnelers-Worker");
             t.setDaemon(true);
@@ -302,7 +311,7 @@ public class Tunnelers extends Module {
     }
 
     // ------------------------------------------------------------------ //
-    //  Tick — main thread work is now O(batches) only, never O(blocks)    //
+    //  Tick                                                                //
     // ------------------------------------------------------------------ //
 
     @EventHandler
@@ -322,21 +331,14 @@ public class Tunnelers extends Module {
             return;
         }
 
-        // 1. Merge completed scan results into the live map — O(batches × entries).
         boolean newData = flushPendingResults();
-
-        // 2. Schedule a background merge if the map changed.
-        //    The main thread only snapshots player position and does a CAS —
-        //    the expensive O(N log N) merge runs entirely on the worker pool.
         if (newData) scheduleMerge();
 
-        // 3. Periodically prune out-of-range chunks.
         if (++pruneTimer >= scanDelay.get()) {
             pruneTimer = 0;
-            if (pruneOutOfRange()) scheduleMerge(); // re-merge after eviction
+            if (pruneOutOfRange()) scheduleMerge();
         }
 
-        // 4. Queue and dispatch new chunk scans.
         int playerCX = mc.player.getBlockPos().getX() >> 4;
         int playerCZ = mc.player.getBlockPos().getZ() >> 4;
         enqueueNewChunks(playerCX, playerCZ);
@@ -344,35 +346,16 @@ public class Tunnelers extends Module {
     }
 
     // ------------------------------------------------------------------ //
-    //  Merge scheduling — main thread sets up, worker does the work       //
+    //  Merge scheduling                                                    //
     // ------------------------------------------------------------------ //
 
-    /**
-     * Schedules one merge task if none is already queued.
-     * The AtomicBoolean gate means that no matter how many flushes happen
-     * in a single tick (up to MAX_BATCHES_PER_FLUSH) only ONE merge is ever
-     * queued. The task resets the gate when it finishes so the next dirty
-     * tick can queue another.
-     *
-     * Main-thread cost: one CAS + two int volatile writes. Essentially free.
-     */
     private void scheduleMerge() {
-        if (!mergeScheduled.compareAndSet(false, true)) return; // already queued
+        if (!mergeScheduled.compareAndSet(false, true)) return;
 
-        // Snapshot player position now, on the main thread, so the worker
-        // task never needs to touch mc.player.
         snapPX = mc.player.getBlockPos().getX();
         snapPY = mc.player.getBlockPos().getY();
         snapPZ = mc.player.getBlockPos().getZ();
 
-        // Take an immutable snapshot of the current locations map for the
-        // worker. ConcurrentHashMap.entrySet() iteration is weakly consistent
-        // and safe to do from another thread, but we want a stable snapshot
-        // so the merge result is coherent. A single HashMap copy here is
-        // O(N) on the main thread but it's just pointer copies — no GC-heavy
-        // object creation — and it's bounded by the map size.
-        //
-        // We pass the snapshot to the lambda to avoid capturing the live map.
         final Map<BlockPos, TunnelType> locSnapshot = new HashMap<>(locations);
         final int px = snapPX, py = snapPY, pz = snapPZ;
         final double maxDistSq = (double)(range.get() * 16) * (range.get() * 16);
@@ -380,33 +363,17 @@ public class Tunnelers extends Module {
         executor.submit(() -> {
             try {
                 List<MergedBox> merged = buildMergedBoxes(locSnapshot, px, py, pz, maxDistSq);
-                renderSnapshot = merged; // single volatile write — render thread sees it immediately
+                renderSnapshot = merged;
             } finally {
-                mergeScheduled.set(false); // gate open for the next dirty tick
+                mergeScheduled.set(false);
             }
         });
     }
 
     // ------------------------------------------------------------------ //
-    //  Greedy Mesh — runs entirely on the worker thread, never main thread //
+    //  Greedy Mesh                                                         //
     // ------------------------------------------------------------------ //
 
-    /**
-     * Collapses adjacent same-type blocks into the minimum number of AABBs
-     * using greedy expansion: X → Z → Y.
-     *
-     * Key correctness fix vs previous version:
-     *   The outerY loop previously used a labelled break inside a nested
-     *   for-for, which means any single missing block in the XZ-slab would
-     *   break out of the OUTER loop — correct — but only after already having
-     *   incremented y2. This caused boxes to be one block too tall whenever
-     *   the slab extension failed after the first step.
-     *   Fixed by checking the full slab BEFORE incrementing y2.
-     *
-     * @param locs      immutable snapshot of the live locations map
-     * @param px/py/pz  player position at scheduling time
-     * @param maxDistSq squared render range, used for distSq clamping
-     */
     private static List<MergedBox> buildMergedBoxes(
             Map<BlockPos, TunnelType> locs,
             int px, int py, int pz,
@@ -414,7 +381,6 @@ public class Tunnelers extends Module {
     ) {
         if (locs.isEmpty()) return Collections.emptyList();
 
-        // Group positions by type. Merging must stay within the same type.
         EnumMap<TunnelType, Set<Long>>   remaining   = new EnumMap<>(TunnelType.class);
         EnumMap<TunnelType, List<int[]>> coordsByType = new EnumMap<>(TunnelType.class);
         for (TunnelType t : TunnelType.values()) {
@@ -438,29 +404,22 @@ public class Tunnelers extends Module {
 
             for (int[] origin : coords) {
                 int ox = origin[0], oy = origin[1], oz = origin[2];
-                if (!rem.contains(pack(ox, oy, oz))) continue; // already consumed
+                if (!rem.contains(pack(ox, oy, oz))) continue;
 
-                // --- Extend along +X ---
                 int x2 = ox;
                 while (rem.contains(pack(x2 + 1, oy, oz))) x2++;
 
-                // --- Extend along +Z (entire X-row must be present) ---
                 int z2 = oz;
                 while (canExtendZ(rem, ox, x2, oy, z2 + 1)) z2++;
 
-                // --- Extend along +Y (entire XZ-slab must be present) ---
-                // FIX: test BEFORE incrementing y2, not after, to avoid
-                // the off-by-one that produced boxes 1 block too tall.
                 int y2 = oy;
                 while (canExtendY(rem, ox, x2, y2 + 1, oz, z2)) y2++;
 
-                // Consume all blocks in this merged box.
                 for (int x = ox; x <= x2; x++)
                     for (int y = oy; y <= y2; y++)
                         for (int z = oz; z <= z2; z++)
                             rem.remove(pack(x, y, z));
 
-                // Squared distance from box centre to player.
                 double cx = (ox + x2) * 0.5 + 0.5;
                 double cy = (oy + y2) * 0.5 + 0.5;
                 double cz = (oz + z2) * 0.5 + 0.5;
@@ -471,19 +430,16 @@ public class Tunnelers extends Module {
             }
         }
 
-        // Nearest-first so the render cap drops distant geometry first.
         boxes.sort(Comparator.comparingDouble(b -> b.distSq));
         return boxes;
     }
 
-    /** Returns true if every block in the row (ox..x2, y, z) is present in rem. */
     private static boolean canExtendZ(Set<Long> rem, int ox, int x2, int y, int z) {
         for (int x = ox; x <= x2; x++)
             if (!rem.contains(pack(x, y, z))) return false;
         return true;
     }
 
-    /** Returns true if every block in the slab (ox..x2, y, oz..z2) is present in rem. */
     private static boolean canExtendY(Set<Long> rem, int ox, int x2, int y, int oz, int z2) {
         for (int x = ox; x <= x2; x++)
             for (int z = oz; z <= z2; z++)
@@ -496,8 +452,6 @@ public class Tunnelers extends Module {
     // ------------------------------------------------------------------ //
 
     private static long pack(int x, int y, int z) {
-        // x, z: ±33 554 432 blocks (26-bit unsigned after offset)
-        // y:    ±2 048 blocks      (12-bit unsigned after offset)
         return ((long)(x + 33_554_432) << 38) | ((long)(y + 2_048) << 26) | (z + 33_554_432);
     }
 
@@ -505,7 +459,6 @@ public class Tunnelers extends Module {
     //  Pruning                                                             //
     // ------------------------------------------------------------------ //
 
-    /** @return true if any chunks were evicted (caller should re-merge). */
     private boolean pruneOutOfRange() {
         if (mc.player == null) return false;
         int centerCX = mc.player.getBlockPos().getX() >> 4;
@@ -527,7 +480,7 @@ public class Tunnelers extends Module {
     }
 
     // ------------------------------------------------------------------ //
-    //  Queue building (main thread, O(range²) but cheap coord-only work)  //
+    //  Queue building                                                      //
     // ------------------------------------------------------------------ //
 
     private void enqueueNewChunks(int centerCX, int centerCZ) {
@@ -601,10 +554,9 @@ public class Tunnelers extends Module {
     }
 
     // ------------------------------------------------------------------ //
-    //  Flush — O(batches × entries), main thread                          //
+    //  Flush                                                               //
     // ------------------------------------------------------------------ //
 
-    /** @return true if any results were merged. */
     private boolean flushPendingResults() {
         ScanResult batch;
         int n = 0;
@@ -829,7 +781,7 @@ public class Tunnelers extends Module {
     }
 
     // ------------------------------------------------------------------ //
-    //  Render — main thread cost is now: one volatile read + N box calls  //
+    //  Render                                                              //
     // ------------------------------------------------------------------ //
 
     @EventHandler
@@ -840,6 +792,7 @@ public class Tunnelers extends Module {
         if (snapshot.isEmpty()) return;
 
         boolean   doFade    = fadeWithDistance.get();
+        boolean   doGlow    = glowEnabled.get();
         double    maxDistSq = (double)(range.get() * 16) * (range.get() * 16);
         int       limit     = maxRenderBoxes.get();
         ShapeMode sm        = shapeMode.get();
@@ -862,10 +815,49 @@ public class Tunnelers extends Module {
                 c = base;
             }
 
+            // Bloom glow — drawn before the solid box so layers sit behind it.
+            // Uses the same per-type color as the fill, tinted down via quadratic
+            // alpha falloff so the glow is brightest near the box surface and
+            // fades quickly outward. Fade-with-distance is also applied so distant
+            // boxes don't bloom brighter than their fill.
+            if (doGlow) {
+                int    layers    = glowLayers.get();
+                double spread    = glowSpread.get();
+                int    baseAlpha = glowBaseAlpha.get();
+
+                for (int i = layers; i >= 1; i--) {
+                    double expansion = spread * i;
+
+                    // t=0 innermost (brightest), t=1 outermost (most transparent).
+                    // Squaring keeps the core bright and drops sharply at the edges.
+                    double t          = (double)(i - 1) / layers;
+                    int    layerAlpha = Math.max(4, (int)(baseAlpha * (1.0 - t * t)));
+
+                    // Apply distance fade to glow alpha as well so it scales with the fill.
+                    if (doFade) {
+                        float frac = (float) Math.max(0.0, 1.0 - box.distSq / maxDistSq);
+                        layerAlpha = Math.max(4, (int)(layerAlpha * frac));
+                    }
+
+                    event.renderer.box(
+                        box.x1 - expansion, box.y1 - expansion, box.z1 - expansion,
+                        box.x2 + expansion, box.y2 + expansion, box.z2 + expansion,
+                        withAlpha(c, layerAlpha),
+                        withAlpha(c, 0),
+                        ShapeMode.Sides, 0
+                    );
+                }
+            }
+
+            // Solid highlight box on top of glow layers.
             event.renderer.box(box.x1, box.y1, box.z1, box.x2, box.y2, box.z2, c, c, sm, 0);
             drawn++;
         }
     }
+
+    // ------------------------------------------------------------------ //
+    //  Color helpers                                                       //
+    // ------------------------------------------------------------------ //
 
     private SettingColor getColor(TunnelType type) {
         if (type == null) return null;
@@ -877,6 +869,10 @@ public class Tunnelers extends Module {
             case ABNORMAL_TUNNEL -> findAbnormalTunnels.get() ? colorAbnormalTunnels.get() : null;
             case LADDER_SHAFT    -> findLadderShafts.get()    ? colorLadderShafts.get()    : null;
         };
+    }
+
+    private static SettingColor withAlpha(SettingColor color, int alpha) {
+        return new SettingColor(color.r, color.g, color.b, Math.min(255, Math.max(0, alpha)));
     }
 
     // ------------------------------------------------------------------ //
@@ -894,12 +890,6 @@ public class Tunnelers extends Module {
         ScanResult(ChunkPos cp, Map<BlockPos, TunnelType> r) { chunkPos = cp; results = r; }
     }
 
-    /**
-     * An AABB covering one or more adjacent same-type blocks after greedy merging.
-     * x1/y1/z1 = inclusive min corner.
-     * x2/y2/z2 = exclusive max corner (x2 = lastX + 1, etc.).
-     * distSq   = squared distance from box centre to player, clamped to maxDistSq.
-     */
     private static final class MergedBox {
         final int x1, y1, z1, x2, y2, z2;
         final TunnelType type;
