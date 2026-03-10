@@ -21,8 +21,10 @@ import meteordevelopment.meteorclient.settings.SettingGroup;
 import meteordevelopment.meteorclient.settings.StringListSetting;
 import meteordevelopment.meteorclient.settings.StringSetting;
 import meteordevelopment.meteorclient.systems.modules.Module;
+import meteordevelopment.meteorclient.utils.render.color.Color;
 import meteordevelopment.meteorclient.utils.render.color.SettingColor;
 import meteordevelopment.orbit.EventHandler;
+import net.minecraft.entity.Entity;
 import net.minecraft.entity.player.PlayerEntity;
 import net.minecraft.network.packet.s2c.play.PlayerListS2CPacket;
 import net.minecraft.sound.SoundEvents;
@@ -271,21 +273,31 @@ public class NeighbourhoodWatch extends Module {
     // Settings — Glow
     // ═══════════════════════════════════════════════════════════════════════════
 
+    private final Setting<Boolean> glowEnabled = sgGlow.add(new BoolSetting.Builder()
+        .name("glow")
+        .description("Render a bloom halo around each tracked player in addition to the outline.")
+        .defaultValue(true)
+        .build()
+    );
+
     private final Setting<Integer> glowLayers = sgGlow.add(new IntSetting.Builder()
         .name("glow-layers").description("Number of bloom layers rendered around each player.")
         .defaultValue(4).min(1).sliderMax(8)
+        .visible(glowEnabled::get)
         .build()
     );
 
     private final Setting<Double> glowSpread = sgGlow.add(new DoubleSetting.Builder()
         .name("glow-spread").description("How far each bloom layer expands outward (in blocks).")
         .defaultValue(0.05).min(0.01).sliderMax(0.2)
+        .visible(glowEnabled::get)
         .build()
     );
 
     private final Setting<Integer> glowBaseAlpha = sgGlow.add(new IntSetting.Builder()
         .name("glow-base-alpha").description("Alpha of the innermost glow layer (0-255).")
         .defaultValue(60).min(10).sliderMax(150)
+        .visible(glowEnabled::get)
         .build()
     );
 
@@ -294,7 +306,8 @@ public class NeighbourhoodWatch extends Module {
     // ═══════════════════════════════════════════════════════════════════════════
 
     private final Set<Integer> notifiedPlayers    = new HashSet<>();
-    private final Set<Integer> highlightedPlayers = new HashSet<>();
+    // Rebuilt every tick — holds IDs of players currently being outlined.
+    private final Set<Integer> activelyOutlined   = new HashSet<>();
     private final Set<String>  ignoredThisSession = new HashSet<>();
     private final Set<String>  playersInTab       = new HashSet<>();
     private final Set<String>  friendSet          = new HashSet<>();
@@ -328,7 +341,16 @@ public class NeighbourhoodWatch extends Module {
 
     @Override
     public void onDeactivate() {
-        highlightedPlayers.clear();
+        // Clear glowing flag from every player we were highlighting so they
+        // don't stay lit up after the module is toggled off.
+        if (mc.world != null) {
+            for (Entity entity : mc.world.getEntities()) {
+                if (activelyOutlined.contains(entity.getId())) {
+                    entity.setGlowing(false);
+                }
+            }
+        }
+        activelyOutlined.clear();
         resetState();
     }
 
@@ -338,7 +360,7 @@ public class NeighbourhoodWatch extends Module {
     }
 
     // ═══════════════════════════════════════════════════════════════════════════
-    // Event Handlers
+    // Tick — safety, tracking notifications, and outline shader management
     // ═══════════════════════════════════════════════════════════════════════════
 
     @EventHandler
@@ -346,13 +368,24 @@ public class NeighbourhoodWatch extends Module {
         if (mc.player == null || mc.world == null) return;
         if (tickDisconnectOnPlayer()) return;
         tickPlayerTracking();
+        tickOutlineShader();
     }
 
-    @EventHandler
-    private void onRender(Render3DEvent event) {
-        if (!trackPlayers.get() || mc.world == null || mc.player == null) return;
+    /**
+     * Applies / removes the vanilla glowing flag and injects the per-status
+     * outline color into Meteor's RenderUtils.entityOutlineColors map so the
+     * OutlineEntityFeatureRenderer draws a proper mesh silhouette rather than a
+     * bounding box. Rebuilt from scratch every tick so stale entities are
+     * cleaned up immediately.
+     */
+    private void tickOutlineShader() {
+        if (!trackPlayers.get()) {
+            // If tracking was just turned off, clear any lingering outlines.
+            clearAllOutlines();
+            return;
+        }
 
-        Set<Integer> currentlyVisible = new HashSet<>();
+        Set<Integer> newlyActive = new HashSet<>();
 
         for (PlayerEntity player : mc.world.getPlayers()) {
             if (player == mc.player || player.isSpectator()) continue;
@@ -376,18 +409,58 @@ public class NeighbourhoodWatch extends Module {
                 case Other  -> otherColor.get();
             };
 
-            currentlyVisible.add(player.getId());
-            highlightedPlayers.add(player.getId());
+            // Enable vanilla glowing — Meteor's OutlineEntityFeatureRenderer
+            // reads isGlowing() to decide whether to draw the silhouette outline.
+            player.setGlowing(true);
 
-            // Bloom layers around player bounding box
-            renderGlowLayers(event, player.getBoundingBox(), color);
+            // Push our per-status color into Meteor's entity outline color map.
+            // This is checked by the renderer before it falls back to team color,
+            // giving us full color control with no server packets.
+            setOutlineColor(player, color);
 
-            // Solid outline on top
-            event.renderer.box(player.getBoundingBox(), withAlpha(color, 0), color, ShapeMode.Lines, 0);
+            newlyActive.add(player.getId());
         }
 
-        highlightedPlayers.removeIf(id -> !currentlyVisible.contains(id));
+        // Remove glowing from players that left range or were toggled off.
+        for (int id : activelyOutlined) {
+            if (!newlyActive.contains(id)) {
+                Entity e = mc.world.getEntityById(id);
+                if (e != null) e.setGlowing(false);
+            }
+        }
+
+        activelyOutlined.clear();
+        activelyOutlined.addAll(newlyActive);
     }
+
+    // ═══════════════════════════════════════════════════════════════════════════
+    // Render — optional bloom halo behind the silhouette outline
+    // ═══════════════════════════════════════════════════════════════════════════
+
+    @EventHandler
+    private void onRender(Render3DEvent event) {
+        if (!glowEnabled.get() || !trackPlayers.get()) return;
+        if (mc.world == null || mc.player == null) return;
+
+        for (PlayerEntity player : mc.world.getPlayers()) {
+            if (!activelyOutlined.contains(player.getId())) continue;
+
+            String       name   = player.getName().getString();
+            PlayerStatus status = getPlayerStatusPublic(name);
+            SettingColor color  = switch (status) {
+                case Friend -> friendColor.get();
+                case Enemy  -> enemyColor.get();
+                case Proxy  -> proxyColor.get();
+                case Other  -> otherColor.get();
+            };
+
+            renderGlowLayers(event, player.getBoundingBox(), color);
+        }
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════════
+    // Packet Handler
+    // ═══════════════════════════════════════════════════════════════════════════
 
     @EventHandler
     private void onPacketReceive(PacketEvent.Receive event) {
@@ -457,6 +530,46 @@ public class NeighbourhoodWatch extends Module {
     }
 
     // ═══════════════════════════════════════════════════════════════════════════
+    // Outline Color Injection
+    // ═══════════════════════════════════════════════════════════════════════════
+
+    /**
+     * Writes the desired outline color into Meteor's static
+     * {@code RenderUtils.entityOutlineColors} map. The OutlineEntityFeatureRenderer
+     * checks this map before falling back to the entity's scoreboard team color,
+     * giving us full per-player color control with no server-side interaction.
+     *
+     * If the field doesn't exist in the current Meteor build the call is silently
+     * ignored — the outline will appear white (default team color) which is still
+     * functionally correct.
+     */
+    private void setOutlineColor(Entity entity, SettingColor color) {
+        try {
+            var field = meteordevelopment.meteorclient.utils.render.RenderUtils.class
+                .getDeclaredField("entityOutlineColors");
+            field.setAccessible(true);
+            @SuppressWarnings("unchecked")
+            java.util.Map<Integer, Color> map =
+                (java.util.Map<Integer, Color>) field.get(null);
+            if (map != null) {
+                map.put(entity.getId(), new Color(color.r, color.g, color.b, color.a));
+            }
+        } catch (NoSuchFieldException | IllegalAccessException ignored) {
+            // Field not present in this Meteor build — outline uses default team/white color.
+        }
+    }
+
+    private void clearAllOutlines() {
+        if (mc.world != null) {
+            for (int id : activelyOutlined) {
+                Entity e = mc.world.getEntityById(id);
+                if (e != null) e.setGlowing(false);
+            }
+        }
+        activelyOutlined.clear();
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════════
     // Chat Parsing
     // ═══════════════════════════════════════════════════════════════════════════
 
@@ -522,7 +635,7 @@ public class NeighbourhoodWatch extends Module {
     }
 
     // ═══════════════════════════════════════════════════════════════════════════
-    // Bloom Rendering
+    // Bloom Rendering (box-space halo behind the silhouette outline)
     // ═══════════════════════════════════════════════════════════════════════════
 
     private void renderGlowLayers(Render3DEvent event, Box box, SettingColor color) {
@@ -532,7 +645,10 @@ public class NeighbourhoodWatch extends Module {
 
         for (int i = layers; i >= 1; i--) {
             double expansion = spread * i;
-            int    layerAlpha = Math.max(4, (int) (baseAlpha * (1.0 - (double)(i - 1) / layers)));
+            // Quadratic falloff: bright at the player surface, drops off sharply outward.
+            double t          = (double)(i - 1) / layers;
+            int    layerAlpha = Math.max(4, (int)(baseAlpha * (1.0 - t * t)));
+
             event.renderer.box(
                 box.expand(expansion),
                 withAlpha(color, layerAlpha),
