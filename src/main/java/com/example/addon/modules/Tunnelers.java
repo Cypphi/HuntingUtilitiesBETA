@@ -666,32 +666,39 @@ public class Tunnelers extends Module {
     }
 
     private boolean is1x1Tunnel(int x, int y, int z, ScanContext ctx) {
-        // Check for solid floor, air tunnel space, and solid ceiling. This is the basic vertical structure.
+        // A 1x1 tunnel requires a solid floor, a 1-block high air space, and a solid ceiling.
         if (!ctx.isSolid(x, y, z) || !ctx.isAir(x, y + 1, z) || !ctx.isSolid(x, y + 2, z)) {
             return false;
         }
 
-        // Check the four horizontal neighbors of the air block.
+        // As per your request, we are looking for a structure with 5 solid faces,
+        // which means a dead-end tunnel (floor, ceiling, and 3 horizontal walls).
         boolean northSolid = ctx.isSolid(x, y + 1, z - 1);
         boolean southSolid = ctx.isSolid(x, y + 1, z + 1);
         boolean eastSolid = ctx.isSolid(x + 1, y + 1, z);
         boolean westSolid = ctx.isSolid(x - 1, y + 1, z);
 
-        // A proper tunnel segment has two opposing solid walls and two open ends.
-        boolean isStraightTunnel = (northSolid && southSolid && !eastSolid && !westSolid) ||
-                                   (eastSolid && westSolid && !northSolid && !southSolid);
-
-        // A dead-end has three solid walls and one open end.
         int solidHorizontalSides = 0;
         if (northSolid) solidHorizontalSides++;
         if (southSolid) solidHorizontalSides++;
         if (eastSolid) solidHorizontalSides++;
         if (westSolid) solidHorizontalSides++;
-        boolean isDeadEnd = solidHorizontalSides == 3;
 
-        // The old logic detected fully enclosed 1x1 spaces (4 solid horizontal sides), which are not tunnels.
-        // This new logic detects both straight tunnel segments (2 openings) and dead ends (1 opening).
-        return isStraightTunnel || isDeadEnd;
+        if (solidHorizontalSides != 3) return false;
+
+        // To prevent highlighting pockets that open into larger caves, we also check
+        // the blocks that frame the 1x1 opening. They must also be solid.
+        if (!southSolid) { // Opening is to the South
+            return ctx.isSolid(x - 1, y + 1, z + 1) && ctx.isSolid(x + 1, y + 1, z + 1);
+        } else if (!northSolid) { // Opening is to the North
+            return ctx.isSolid(x - 1, y + 1, z - 1) && ctx.isSolid(x + 1, y + 1, z - 1);
+        } else if (!westSolid) { // Opening is to the West
+            return ctx.isSolid(x - 1, y + 1, z - 1) && ctx.isSolid(x - 1, y + 1, z + 1);
+        } else if (!eastSolid) { // Opening is to the East
+            return ctx.isSolid(x + 1, y + 1, z - 1) && ctx.isSolid(x + 1, y + 1, z + 1);
+        }
+
+        return false; // Should be unreachable
     }
 
     private boolean is1x2Tunnel(int x, int y, int z, ScanContext ctx) {
