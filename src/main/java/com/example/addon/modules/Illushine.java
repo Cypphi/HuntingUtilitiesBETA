@@ -17,7 +17,7 @@ import meteordevelopment.meteorclient.settings.IntSetting;
 import meteordevelopment.meteorclient.settings.Setting;
 import meteordevelopment.meteorclient.settings.SettingGroup;
 import meteordevelopment.meteorclient.systems.modules.Module;
-import meteordevelopment.meteorclient.utils.render.color.Color;
+import meteordevelopment.meteorclient.utils.render.WireframeEntityRenderer;
 import meteordevelopment.meteorclient.utils.render.color.SettingColor;
 import meteordevelopment.orbit.EventHandler;
 import net.minecraft.client.gui.DrawContext;
@@ -77,6 +77,16 @@ public class Illushine extends Module {
         .name("ignored-entities")
         .description("Entities to ignore.")
         .defaultValue(new HashSet<>())
+        .build()
+    );
+
+    private final Setting<Double> outlineScale = sgGeneral.add(new DoubleSetting.Builder()
+        .name("outline-scale")
+        .description("Scale of the wireframe outline relative to the mob's actual size. " +
+                     "Values slightly above 1.0 push the outline just outside the model surface.")
+        .defaultValue(1.0)
+        .min(0.1)
+        .sliderMax(2.0)
         .build()
     );
 
@@ -192,7 +202,7 @@ public class Illushine extends Module {
 
     private final Setting<Boolean> glowEnabled = sgGlow.add(new BoolSetting.Builder()
         .name("glow")
-        .description("Render a bloom halo around each mob in addition to the outline.")
+        .description("Render a bloom halo around each mob in addition to the wireframe outline.")
         .defaultValue(true)
         .build()
     );
@@ -231,8 +241,8 @@ public class Illushine extends Module {
     // State
     // ═══════════════════════════════════════════════════════════════════════════
 
-    // Entities whose team color we have overridden this tick.
-    // Cleared and rebuilt every tick so we never hold stale references.
+    // IDs of mobs currently being highlighted — rebuilt every tick so it's
+    // always fresh and onRender never needs a second full entity scan.
     private final Set<Integer> activelyOutlined = new HashSet<>();
 
     // ═══════════════════════════════════════════════════════════════════════════
@@ -240,7 +250,7 @@ public class Illushine extends Module {
     // ═══════════════════════════════════════════════════════════════════════════
 
     public Illushine() {
-        super(HuntingUtilities.CATEGORY, "illushine", "Highlights mobs with a glow outline by hostility type.");
+        super(HuntingUtilities.CATEGORY, "illushine", "Highlights mobs with a wireframe outline by hostility type.");
     }
 
     // ═══════════════════════════════════════════════════════════════════════════
@@ -262,27 +272,18 @@ public class Illushine extends Module {
 
     @Override
     public void onDeactivate() {
-        // Clear the glowing flag from every entity we were highlighting so
-        // they don't stay lit up after the module is toggled off.
-        if (mc.world != null) {
-            for (Entity entity : mc.world.getEntities()) {
-                if (activelyOutlined.contains(entity.getId())) {
-                    entity.setGlowing(false);
-                }
-            }
-        }
         activelyOutlined.clear();
     }
 
     // ═══════════════════════════════════════════════════════════════════════════
-    // Tick — apply / remove glowing flag and team color each tick
+    // Tick — rebuild active set (ID-only, no rendering)
     // ═══════════════════════════════════════════════════════════════════════════
 
     @EventHandler
     private void onTick(TickEvent.Post event) {
         if (mc.world == null || mc.player == null) return;
 
-        Set<Integer> newlyActive = new HashSet<>();
+        activelyOutlined.clear();
 
         for (Entity entity : mc.world.getEntities()) {
             if (!(entity instanceof MobEntity mob)) continue;
@@ -297,104 +298,56 @@ public class Illushine extends Module {
             };
             if (!shouldHighlight) continue;
 
-            SettingColor color = switch (category) {
-                case PASSIVE -> passiveColor.get();
-                case NEUTRAL -> neutralColor.get();
-                case HOSTILE -> hostileColor.get();
-            };
-
-            // Enable vanilla glowing effect on the entity.
-            // Meteor's OutlineEntityFeatureRenderer reads entity.isGlowing() and
-            // entity.getTeamColorValue() to decide the outline color, so we set
-            // both here on the client side — no packet is sent to the server.
-            mob.setGlowing(true);
-
-            // Override the outline color by temporarily assigning the entity to a
-            // synthetic Meteor-managed color team. Meteor's built-in ESP modules
-            // (e.g. Entities, Players) use this same path via
-            // RenderUtils.getOutlineColor / team color injection.
-            // The color is re-applied every tick so it stays in sync with setting changes.
-            setOutlineColor(mob, color);
-
-            newlyActive.add(mob.getId());
+            activelyOutlined.add(mob.getId());
         }
-
-        // Remove glowing from entities that left range or were toggled off.
-        for (int id : activelyOutlined) {
-            if (!newlyActive.contains(id)) {
-                Entity e = mc.world.getEntityById(id);
-                if (e != null) e.setGlowing(false);
-            }
-        }
-
-        activelyOutlined.clear();
-        activelyOutlined.addAll(newlyActive);
     }
 
     // ═══════════════════════════════════════════════════════════════════════════
-    // Render — optional bloom halo behind the silhouette
+    // Render — wireframe outline + optional bloom halo
     // ═══════════════════════════════════════════════════════════════════════════
 
     @EventHandler
     private void onRender(Render3DEvent event) {
-        if (!glowEnabled.get() || mc.world == null || mc.player == null) return;
+        if (mc.world == null || mc.player == null) return;
+        if (activelyOutlined.isEmpty()) return;
 
         for (Entity entity : mc.world.getEntities()) {
             if (!activelyOutlined.contains(entity.getId())) continue;
             if (!(entity instanceof MobEntity mob)) continue;
 
-            MobCategory category = categorise(mob);
-            SettingColor color = switch (category) {
+            MobCategory  category = categorise(mob);
+            SettingColor color    = switch (category) {
                 case PASSIVE -> passiveColor.get();
                 case NEUTRAL -> neutralColor.get();
                 case HOSTILE -> hostileColor.get();
             };
 
-            renderGlowLayers(event, mob.getBoundingBox(), color);
-        }
-    }
-
-    // ═══════════════════════════════════════════════════════════════════════════
-    // Outline color injection
-    // ═══════════════════════════════════════════════════════════════════════════
-
-    /**
-     * Meteor's outline shader resolves the outline color by calling
-     * {@code entity.getTeamColorValue()}, which returns the integer RGB of the
-     * entity's scoreboard team color, or white (0xFFFFFF) if the entity has no
-     * team. We can't reassign scoreboard teams at runtime without sending server
-     * packets, so instead we hook into Meteor's own color override system:
-     *
-     * {@code meteordevelopment.meteorclient.utils.render.RenderUtils} keeps a
-     * static {@code Map<Integer, Color> entityOutlineColors} that the
-     * OutlineEntityFeatureRenderer checks BEFORE falling back to the team color.
-     * Writing into that map here gives us full per-entity color control with
-     * no side effects and no server interaction.
-     *
-     * If the map doesn't exist in your version of Meteor (it was added in a
-     * mid-2024 build), fall back to the setGlowing-only path — the outline will
-     * appear in the vanilla team color (white by default), which is still
-     * functionally correct.
-     */
-    private void setOutlineColor(Entity entity, SettingColor color) {
-        try {
-            var field = meteordevelopment.meteorclient.utils.render.RenderUtils.class
-                .getDeclaredField("entityOutlineColors");
-            field.setAccessible(true);
-            @SuppressWarnings("unchecked")
-            java.util.Map<Integer, Color> map =
-                (java.util.Map<Integer, Color>) field.get(null);
-            if (map != null) {
-                map.put(entity.getId(), new Color(color.r, color.g, color.b, color.a));
+            // Bloom halo drawn first so it sits behind the wireframe lines.
+            if (glowEnabled.get()) {
+                renderGlowLayers(event, mob.getBoundingBox(), color);
             }
-        } catch (NoSuchFieldException | IllegalAccessException ignored) {
-            // Field not present in this Meteor build — glowing outline will use
-            // the default team/white color instead. No action needed.
+
+            // WireframeEntityRenderer traces the actual rendered model geometry
+            // (vertices and quads) using the same render pipeline Meteor's own
+            // ESP "Shader" mode uses internally.
+            //
+            // sideColor = subtle transparent fill inside the mesh faces
+            // lineColor = the solid outline edges that follow the mob's shape
+            // scale     = 1.0 traces the exact surface; nudge above 1.0 to push
+            //             the outline slightly outside so it isn't clipped by the skin
+            WireframeEntityRenderer.render(
+                event,
+                mob,
+                outlineScale.get(),
+                withAlpha(color, 25),  // subtle fill so the mob shape reads in dark areas
+                color,                 // solid edge lines
+                ShapeMode.Both
+            );
         }
     }
 
     // ═══════════════════════════════════════════════════════════════════════════
-    // Bloom Rendering (box-space halo behind the silhouette outline)
+    // Bloom Rendering (box-space halo behind the wireframe)
     // ═══════════════════════════════════════════════════════════════════════════
 
     private void renderGlowLayers(Render3DEvent event, Box box, SettingColor color) {
