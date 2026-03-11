@@ -196,8 +196,12 @@ public class ThirdSight extends Module {
     public void onActivate() {
         if (mc.player == null || mc.options == null) return;
 
+        // Seed the free-look angles from the player's current look direction so
+        // the camera starts exactly behind where the player is facing.
+        // getPitch() is already clamped to [-90,90] by Minecraft, but we clamp
+        // to ±89.9 ourselves to avoid a degenerate up-vector at the poles.
         cameraYaw   = mc.player.getYaw();
-        cameraPitch = mc.player.getPitch();
+        cameraPitch = Math.max(-89.9f, Math.min(89.9f, mc.player.getPitch()));
 
         previousPerspective = mc.options.getPerspective();
         if (previousPerspective == Perspective.FIRST_PERSON) mc.options.setPerspective(Perspective.THIRD_PERSON_BACK);
