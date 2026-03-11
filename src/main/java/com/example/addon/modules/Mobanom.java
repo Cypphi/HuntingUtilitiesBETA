@@ -191,51 +191,16 @@ public class Mobanom extends Module {
     );
 
     // ═══════════════════════════════════════════════════════════════════════════
-    // Dimension anomaly sets
+    // Native-origin sets
     //
-    // Each set lists mobs that are ANOMALOUS in that dimension — i.e. they do
-    // not naturally spawn there and their presence suggests something unusual.
-    //
-    // OVERWORLD_ANOMALIES — Nether-native and End-native mobs.
-    //   Strider is Nether-native → anomalous in Overworld.
-    //   Wither and Ender Dragon are boss mobs (player-summoned) — excluded;
-    //   they can appear anywhere legitimately via summoning.
-    //
-    // NETHER_ANOMALIES — Overworld passives, Overworld neutrals, and End-natives.
-    //   Includes all passive mobs from the provided list that are Overworld-only.
-    //   Includes Overworld neutrals: Wolf, Bee, Polar Bear, Enderman*, Spider*,
-    //   Cave Spider*, Iron Golem (* = also hostile by some classifications but
-    //   listed as neutral and Overworld-native).
-    //   Includes End-native: Shulker, Ender Dragon (boss — omitted).
-    //   Hostile Overworld mobs that also appear in the Nether naturally
-    //   (Skeleton, Zombie, Creeper, Witch, etc.) are excluded — they CAN spawn
-    //   in the Nether via fortress/soul sand valley spawning rules.
-    //
-    // END_ANOMALIES — Overworld passives, Overworld neutrals, and Nether-natives.
-    //   Mirror of NETHER_ANOMALIES but swapping Nether ↔ End natives.
+    // Each set lists the mobs NATIVE to that dimension.
+    // Detection is then trivial: a mob is anomalous if it is NOT in the native
+    // set for the dimension the player is currently in.
     // ═══════════════════════════════════════════════════════════════════════════
 
-    // Mobs that are anomalous if seen in the OVERWORLD (Nether/End natives)
-    private static final Set<EntityType<?>> OVERWORLD_ANOMALIES = Set.of(
-        // Nether-native
-        EntityType.GHAST,
-        EntityType.BLAZE,
-        EntityType.WITHER_SKELETON,
-        EntityType.MAGMA_CUBE,
-        EntityType.PIGLIN,
-        EntityType.PIGLIN_BRUTE,
-        EntityType.HOGLIN,
-        EntityType.ZOGLIN,
-        EntityType.STRIDER,
-        EntityType.ZOMBIFIED_PIGLIN,
-        // End-native
-        EntityType.SHULKER,
-        EntityType.ENDERMITE
-    );
-
-    // Mobs that are anomalous if seen in the NETHER (Overworld passives/neutrals + End-natives)
-    private static final Set<EntityType<?>> NETHER_ANOMALIES = Set.of(
-        // Overworld passives
+    /** Mobs native to the Overworld. Anomalous in the Nether and the End. */
+    private static final Set<EntityType<?>> OVERWORLD_NATIVES = Set.of(
+        // Passives
         EntityType.ALLAY,
         EntityType.AXOLOTL,
         EntityType.BAT,
@@ -265,61 +230,18 @@ public class Mobanom extends Module {
         EntityType.TURTLE,
         EntityType.VILLAGER,
         EntityType.WANDERING_TRADER,
-        // Overworld neutrals
+        // Neutrals
         EntityType.BEE,
         EntityType.ENDERMAN,
         EntityType.IRON_GOLEM,
         EntityType.POLAR_BEAR,
         EntityType.SPIDER,
         EntityType.CAVE_SPIDER,
-        EntityType.WOLF,
-        EntityType.ZOMBIFIED_PIGLIN, // neutral, Nether-native → anomalous only outside Nether; kept here for END check
-        // End-native
-        EntityType.SHULKER,
-        EntityType.ENDERMITE
+        EntityType.WOLF
     );
 
-    // Mobs that are anomalous if seen in the END (Overworld passives/neutrals + Nether-natives)
-    private static final Set<EntityType<?>> END_ANOMALIES = Set.of(
-        // Overworld passives
-        EntityType.ALLAY,
-        EntityType.AXOLOTL,
-        EntityType.BAT,
-        EntityType.CAMEL,
-        EntityType.CAT,
-        EntityType.CHICKEN,
-        EntityType.COD,
-        EntityType.COW,
-        EntityType.DONKEY,
-        EntityType.FOX,
-        EntityType.FROG,
-        EntityType.GLOW_SQUID,
-        EntityType.HORSE,
-        EntityType.MOOSHROOM,
-        EntityType.MULE,
-        EntityType.OCELOT,
-        EntityType.PARROT,
-        EntityType.PIG,
-        EntityType.RABBIT,
-        EntityType.SALMON,
-        EntityType.SHEEP,
-        EntityType.SNIFFER,
-        EntityType.SNOW_GOLEM,
-        EntityType.SQUID,
-        EntityType.TADPOLE,
-        EntityType.TROPICAL_FISH,
-        EntityType.TURTLE,
-        EntityType.VILLAGER,
-        EntityType.WANDERING_TRADER,
-        // Overworld neutrals
-        EntityType.BEE,
-        EntityType.ENDERMAN,
-        EntityType.IRON_GOLEM,
-        EntityType.POLAR_BEAR,
-        EntityType.SPIDER,
-        EntityType.CAVE_SPIDER,
-        EntityType.WOLF,
-        // Nether-natives
+    /** Mobs native to the Nether. Anomalous in the Overworld and the End. */
+    private static final Set<EntityType<?>> NETHER_NATIVES = Set.of(
         EntityType.GHAST,
         EntityType.BLAZE,
         EntityType.WITHER_SKELETON,
@@ -330,6 +252,12 @@ public class Mobanom extends Module {
         EntityType.ZOGLIN,
         EntityType.STRIDER,
         EntityType.ZOMBIFIED_PIGLIN
+    );
+
+    /** Mobs native to the End. Anomalous in the Overworld and the Nether. */
+    private static final Set<EntityType<?>> END_NATIVES = Set.of(
+        EntityType.SHULKER,
+        EntityType.ENDERMITE
     );
 
     // ═══════════════════════════════════════════════════════════════════════════
@@ -408,9 +336,6 @@ public class Mobanom extends Module {
 
     // ═══════════════════════════════════════════════════════════════════════════
     // Render
-    // Wireframe mode — box outline + bloom drawn here.
-    // Spectral mode  — outline drawn by vanilla glow pipeline via GlowingRegistry;
-    //                  no bloom (bloom settings are hidden in Spectral mode).
     // ═══════════════════════════════════════════════════════════════════════════
 
     @EventHandler
@@ -457,53 +382,28 @@ public class Mobanom extends Module {
         if (detectChestedAnimals.get() && hasChestAttachment(mob)) return AnomalyType.CHESTED;
         if (detectUnnaturalItems.get() && hasUnnaturalItems(mob))  return AnomalyType.ITEM;
 
-        if (!isDimensionAnomaly(mob.getType(), dimension)) return null;
-
-        // Determine which dimension the mob is native to and tag accordingly
-        // so the correct color is used in rendering.
         EntityType<?> type = mob.getType();
 
-        if (dimension.equals("minecraft:overworld")) {
-            // In the Overworld: is it a Nether-native or End-native?
-            if (NETHER_ANOMALIES.contains(type) || END_ANOMALIES.contains(type)) {
-                // Nether-natives flagged in overworld get DIMENSION_NETHER color;
-                // End-natives get DIMENSION_END color.
-                boolean isNetherNative = Set.of(
-                    EntityType.GHAST, EntityType.BLAZE, EntityType.WITHER_SKELETON,
-                    EntityType.MAGMA_CUBE, EntityType.PIGLIN, EntityType.PIGLIN_BRUTE,
-                    EntityType.HOGLIN, EntityType.ZOGLIN, EntityType.STRIDER,
-                    EntityType.ZOMBIFIED_PIGLIN
-                ).contains(type);
-                return isNetherNative ? AnomalyType.DIMENSION_NETHER : AnomalyType.DIMENSION_END;
-            }
-        }
-
-        if (dimension.equals("minecraft:the_nether")) {
-            // In the Nether: Overworld mobs → OVERWORLD color; End-natives → END color
-            boolean isEndNative = Set.of(EntityType.SHULKER, EntityType.ENDERMITE).contains(type);
-            return isEndNative ? AnomalyType.DIMENSION_END : AnomalyType.DIMENSION_OVERWORLD;
-        }
-
-        if (dimension.equals("minecraft:the_end")) {
-            // In the End: Overworld mobs → OVERWORLD color; Nether-natives → NETHER color
-            boolean isNetherNative = Set.of(
-                EntityType.GHAST, EntityType.BLAZE, EntityType.WITHER_SKELETON,
-                EntityType.MAGMA_CUBE, EntityType.PIGLIN, EntityType.PIGLIN_BRUTE,
-                EntityType.HOGLIN, EntityType.ZOGLIN, EntityType.STRIDER,
-                EntityType.ZOMBIFIED_PIGLIN
-            ).contains(type);
-            return isNetherNative ? AnomalyType.DIMENSION_NETHER : AnomalyType.DIMENSION_OVERWORLD;
-        }
-
-        return AnomalyType.DIMENSION_OVERWORLD;
-    }
-
-    private boolean isDimensionAnomaly(EntityType<?> type, String dimension) {
         return switch (dimension) {
-            case "minecraft:overworld"  -> OVERWORLD_ANOMALIES.contains(type);
-            case "minecraft:the_nether" -> NETHER_ANOMALIES.contains(type);
-            case "minecraft:the_end"    -> END_ANOMALIES.contains(type);
-            default                     -> false;
+            case "minecraft:overworld" -> {
+                // Only flag mobs whose home is NOT the Overworld
+                if (NETHER_NATIVES.contains(type)) yield AnomalyType.DIMENSION_NETHER;
+                if (END_NATIVES.contains(type))    yield AnomalyType.DIMENSION_END;
+                yield null;
+            }
+            case "minecraft:the_nether" -> {
+                // Only flag mobs whose home is NOT the Nether
+                if (OVERWORLD_NATIVES.contains(type)) yield AnomalyType.DIMENSION_OVERWORLD;
+                if (END_NATIVES.contains(type))       yield AnomalyType.DIMENSION_END;
+                yield null;
+            }
+            case "minecraft:the_end" -> {
+                // Only flag mobs whose home is NOT the End
+                if (OVERWORLD_NATIVES.contains(type)) yield AnomalyType.DIMENSION_OVERWORLD;
+                if (NETHER_NATIVES.contains(type))    yield AnomalyType.DIMENSION_NETHER;
+                yield null;
+            }
+            default -> null;
         };
     }
 
