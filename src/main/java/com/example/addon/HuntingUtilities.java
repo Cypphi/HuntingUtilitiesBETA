@@ -1,29 +1,30 @@
 package com.example.addon;
 
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
 import com.example.addon.modules.DungeonAssistant;
 import com.example.addon.modules.ElytraAssistant;
 import com.example.addon.modules.Graveyard;
-import com.example.addon.modules.Inventory101;
 import com.example.addon.modules.Illushine;
+import com.example.addon.modules.Inventory101;
 import com.example.addon.modules.LavaMarker;
 import com.example.addon.modules.LootLens;
-import com.example.addon.modules.NeighbourhoodWatch;
 import com.example.addon.modules.Mobanom;
-import com.example.addon.modules.ObsidianFist;
+import com.example.addon.modules.NeighbourhoodWatch;
 import com.example.addon.modules.PortalMaker;
 import com.example.addon.modules.PortalTracker;
 import com.example.addon.modules.RocketPilot;
 import com.example.addon.modules.ServerHealthcareSystem;
 import com.example.addon.modules.SignScanner;
+import com.example.addon.modules.ThirdSight;
 import com.example.addon.modules.Timethrottle;
 import com.example.addon.modules.Tunnelers;
-import com.example.addon.modules.ThirdSight;
+
 import meteordevelopment.meteorclient.addons.MeteorAddon;
 import meteordevelopment.meteorclient.systems.hud.HudGroup;
 import meteordevelopment.meteorclient.systems.modules.Category;
 import meteordevelopment.meteorclient.systems.modules.Modules;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
 
 public class HuntingUtilities extends MeteorAddon {
     public static final Logger LOG = LoggerFactory.getLogger(HuntingUtilities.class);
@@ -43,7 +44,6 @@ public class HuntingUtilities extends MeteorAddon {
         modules.add(new Illushine());
         modules.add(new LavaMarker());
         modules.add(new LootLens());
-        modules.add(new ObsidianFist());
         modules.add(new PortalMaker());
         modules.add(new PortalTracker());
         modules.add(new RocketPilot());

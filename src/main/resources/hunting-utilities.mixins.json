@@ -19,7 +19,6 @@
     "HandledScreenMixin",
     "IMouseAccessor",
     "MixinSignBlockEntityRenderer",
-    "ObsidianFistMixin",
     "RocketPilotMixin",
     "RocketPilotInputMixin",
     "ServerHealthcareSystemMixin",
