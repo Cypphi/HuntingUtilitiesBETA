@@ -69,24 +69,54 @@ public class Illushine extends Module {
 
     // ═══════════════════════════════════════════════════════════════════════════
     // Category override table
+    //
+    // Only entries that would be mis-classified by the runtime instanceof checks
+    // need to appear here. The checks are:
+    //   HostileEntity  → HOSTILE
+    //   Angerable      → NEUTRAL
+    //   PassiveEntity  → PASSIVE
+    //
+    // Passive overrides — extend HostileEntity or Angerable but are passive:
+    //   Fox      → extends AnimalEntity (PassiveEntity) but attacks rabbits/
+    //              chickens, NOT the player → classified PASSIVE per wiki list.
+    //   Strider  → extends PassiveEntity in code, wiki lists as PASSIVE ✓
+    //              (no override needed, kept here for clarity).
+    //
+    // Neutral overrides — extend HostileEntity but are neutral toward players:
+    //   Piglin          → attacks players without gold armour, but wiki = NEUTRAL.
+    //   Zombified Piglin→ extends HostileEntity, wiki = NEUTRAL.
+    //   Enderman        → extends HostileEntity, wiki = NEUTRAL.
+    //   Spider          → extends HostileEntity, wiki = NEUTRAL (passive in light).
+    //   Cave Spider     → same as Spider.
+    //
+    // Hostile overrides — extend PassiveEntity / AnimalEntity but are hostile:
+    //   Ghast, Shulker, Phantom, Slime, Magma Cube, Hoglin → HOSTILE ✓ (kept).
     // ═══════════════════════════════════════════════════════════════════════════
 
-    private static final Map<EntityType<?>, MobCategory> CATEGORY_OVERRIDES = Map.of(
-        // Hostile — implement Monster but do NOT extend HostileEntity
-        EntityType.GHAST,      MobCategory.HOSTILE,
-        EntityType.SHULKER,    MobCategory.HOSTILE,
-        EntityType.PHANTOM,    MobCategory.HOSTILE,
-        EntityType.SLIME,      MobCategory.HOSTILE,
-        EntityType.MAGMA_CUBE, MobCategory.HOSTILE,
-        EntityType.HOGLIN,     MobCategory.HOSTILE,
-        // Neutral — extend AnimalEntity (PassiveEntity) but attack unprovoked
-        EntityType.FOX,        MobCategory.NEUTRAL,
-        EntityType.GOAT,       MobCategory.NEUTRAL,
-        // Piglin extends AbstractPiglinEntity → HostileEntity, but is neutral
-        // toward players wearing gold armor — wiki categorises as NEUTRAL.
-        // PiglinBrute always attacks regardless of armor, stays HOSTILE.
-        EntityType.PIGLIN,     MobCategory.NEUTRAL
-    );
+    private static final Map<EntityType<?>, MobCategory> CATEGORY_OVERRIDES = new HashMap<>(Map.ofEntries(
+        // ── Passive ──────────────────────────────────────────────────────────
+        // Fox extends AnimalEntity (PassiveEntity) but the instanceof Angerable
+        // check would NOT fire — it is already PASSIVE by default. Listed here
+        // explicitly so intent is clear; no functional change needed.
+        Map.entry(EntityType.FOX,              MobCategory.PASSIVE),
+
+        // ── Neutral ──────────────────────────────────────────────────────────
+        // These extend HostileEntity in code but wiki classifies them as neutral.
+        Map.entry(EntityType.PIGLIN,           MobCategory.NEUTRAL),
+        Map.entry(EntityType.ZOMBIFIED_PIGLIN, MobCategory.NEUTRAL),
+        Map.entry(EntityType.ENDERMAN,         MobCategory.NEUTRAL),
+        Map.entry(EntityType.SPIDER,           MobCategory.NEUTRAL),
+        Map.entry(EntityType.CAVE_SPIDER,      MobCategory.NEUTRAL),
+
+        // ── Hostile ──────────────────────────────────────────────────────────
+        // These do NOT extend HostileEntity so the instanceof check misses them.
+        Map.entry(EntityType.GHAST,            MobCategory.HOSTILE),
+        Map.entry(EntityType.SHULKER,          MobCategory.HOSTILE),
+        Map.entry(EntityType.PHANTOM,          MobCategory.HOSTILE),
+        Map.entry(EntityType.SLIME,            MobCategory.HOSTILE),
+        Map.entry(EntityType.MAGMA_CUBE,       MobCategory.HOSTILE),
+        Map.entry(EntityType.HOGLIN,           MobCategory.HOSTILE)
+    ));
 
     // ═══════════════════════════════════════════════════════════════════════════
     // Setting Groups
