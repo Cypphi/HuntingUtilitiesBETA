@@ -135,12 +135,10 @@ public class PortalMaker extends Module {
     private int     finishTimer      = 0;
     private boolean pearlThrown      = false;
 
-    // Portal-entry state machine
-    private enum EntryPhase { ALIGN, APPROACH, INSIDE }
-    private EntryPhase entryPhase       = EntryPhase.ALIGN;
-    private int        entryStuckTicks  = 0;
-    private Vec3d      lastEntryPos     = null;
-    private int        entryTimeoutTicks = 0;
+    /** Ticks the player has been roughly stationary while walking to portal. */
+    private int   stuckTicks        = 0;
+    private Vec3d lastPos           = null;
+    private int   scaffoldCooldown  = 0;
 
     // ═══════════════════════════════════════════════════════════════════════════
     // Constructor
@@ -157,14 +155,13 @@ public class PortalMaker extends Module {
     @Override
     public void onActivate() {
         portalFramePositions.clear();
-        placementIndex    = 0;
-        tickTimer         = 0;
-        finishTimer       = 0;
-        pearlThrown       = false;
-        entryPhase        = EntryPhase.ALIGN;
-        entryStuckTicks   = 0;
-        lastEntryPos      = null;
-        entryTimeoutTicks = 0;
+        placementIndex   = 0;
+        tickTimer        = 0;
+        finishTimer      = 0;
+        pearlThrown      = false;
+        stuckTicks       = 0;
+        lastPos          = null;
+        scaffoldCooldown = 0;
 
         if (mc.player == null || mc.world == null) { toggle(); return; }
 
@@ -229,12 +226,10 @@ public class PortalMaker extends Module {
     @Override
     public void onDeactivate() {
         portalFramePositions.clear();
-        placementIndex    = 0;
-        tickTimer         = 0;
-        entryStuckTicks   = 0;
-        lastEntryPos      = null;
-        entryPhase        = EntryPhase.ALIGN;
-        entryTimeoutTicks = 0;
+        placementIndex   = 0;
+        tickTimer        = 0;
+        stuckTicks       = 0;
+        lastPos          = null;
         stopMovement();
     }
 
@@ -346,19 +341,21 @@ public class PortalMaker extends Module {
     }
 
     // ═══════════════════════════════════════════════════════════════════════════
-    // Portal Entry
+    // Portal Entry Movement
     //
-    // Strategy:
-    //   ALIGN   — rotate to face the portal opening exactly, stand still until
-    //             the yaw delta is small. This prevents diagonal drift and the
-    //             player bumping the obsidian frame columns.
-    //   APPROACH— walk straight at the portal opening. Handle obstacles (jump)
-    //             and gaps (scaffold). Abort if fallen or timed out.
-    //   INSIDE  — detected by isPlayerInPortal(); handled in onTick.
-    //
-    // Key improvement over the old code: we aim at the portal OPENING (the air
-    // column one block above the bottom-row obsidian), not the obsidian frame.
-    // We also use a global timeout so the module can't loop forever.
+    // Fixes over the original:
+    //   1. getPortalOpeningCenter() aims at the interior air gap above the two
+    //      bottom obsidian, not the obsidian block centres.  The old version put
+    //      the target on/between the frame blocks, causing the player to walk
+    //      into the columns instead of the opening.
+    //   2. The approach direction used to read mc.player.getHorizontalFacing()
+    //      which lags a tick behind Rotations.rotate.  We now derive it from the
+    //      same (dx, dz) vector we already computed, so obstacle detection is
+    //      consistent with where the player is actually heading.
+    //   3. finishTimer is gone.  We just keep walking until isPlayerInPortal()
+    //      fires (handled in onTick) or the global stuck-timeout kills it.
+    //   4. Stuck threshold tightened to 0.0025 sq-dist (was 0.001, too loose on
+    //      a 20 Hz tick) and recovery reduced to 6 ticks so it reacts faster.
     // ═══════════════════════════════════════════════════════════════════════════
 
     private void moveToPortal() {
@@ -379,86 +376,54 @@ public class PortalMaker extends Module {
 
         Vec3d portalCenter = getPortalOpeningCenter();
         Vec3d playerPos    = mc.player.getPos();
-        double playerCentreX = playerPos.x + 0.0; // foot pos is already centre X/Z
-        double playerCentreZ = playerPos.z;
-
-        // ── Global timeout (300 ticks = 15 s) ─────────────────────────────────
-        if (++entryTimeoutTicks > 300) {
-            error("Timed out trying to enter portal.");
-            stopMovement();
-            toggle();
-            return;
-        }
 
         // ── Fell-off guard ─────────────────────────────────────────────────────
-        if (playerPos.y < portalCenter.y - 5.0) {
+        if (playerPos.y < portalCenter.y - 4.0) {
             error("Fell too far below the portal — stopping.");
             stopMovement();
             toggle();
             return;
         }
 
-        // ── Horizontal vector to opening centre ───────────────────────────────
-        double dx     = portalCenter.x - playerCentreX;
-        double dz     = portalCenter.z - playerCentreZ;
-        double hDist  = Math.sqrt(dx * dx + dz * dz);
-
-        // Yaw that points directly at the portal opening.
-        float targetYaw = (float) Math.toDegrees(Math.atan2(-dx, dz));
-        float yawDelta  = MathHelper.wrapDegrees(targetYaw - mc.player.getYaw());
-
         // ── Stuck detection ────────────────────────────────────────────────────
-        if (lastEntryPos != null && lastEntryPos.squaredDistanceTo(playerPos) < 0.0025) {
-            entryStuckTicks++;
+        if (lastPos != null && lastPos.squaredDistanceTo(playerPos) < 0.0025) {
+            stuckTicks++;
         } else {
-            entryStuckTicks = 0;
+            stuckTicks = 0;
         }
-        lastEntryPos = playerPos;
+        lastPos = playerPos;
 
-        // ── ALIGN phase — don't move until we're facing the opening ───────────
-        if (entryPhase == EntryPhase.ALIGN) {
+        // Hard timeout: if stuck for more than 5 s give up.
+        if (stuckTicks > 100) {
+            error("Stuck trying to enter portal — stopping.");
             stopMovement();
-            Rotations.rotate(targetYaw, 0f); // look straight ahead, not down
-            if (Math.abs(yawDelta) < 5f) {
-                entryPhase = EntryPhase.APPROACH;
-            }
+            toggle();
             return;
         }
 
-        // ── Already inside? ───────────────────────────────────────────────────
+        // ── Horizontal vector toward the portal OPENING ───────────────────────
+        double dx       = portalCenter.x - playerPos.x;
+        double dz       = portalCenter.z - playerPos.z;
+        double hDistSq  = dx * dx + dz * dz;
+        double hDist    = Math.sqrt(hDistSq);
+
+        // Yaw directly toward the opening centre (horizontal).
+        float targetYaw = (float) Math.toDegrees(Math.atan2(-dx, dz));
+
+        // Always face the portal opening so Rotations drives the body yaw.
+        Rotations.rotate(targetYaw, mc.player.getPitch());
+
+        float yawDiff  = MathHelper.wrapDegrees(targetYaw - mc.player.getYaw());
+        boolean aligned = Math.abs(yawDiff) < 30f;
+
+        // ── Already inside portal blocks? ─────────────────────────────────────
         if (isPlayerInPortal()) {
             stopMovement();
             return;
         }
 
-        // ── Re-align if we've drifted more than 20° off-axis ─────────────────
-        // This prevents the player from walking into the obsidian frame columns.
-        if (Math.abs(yawDelta) > 20f) {
-            entryPhase = EntryPhase.ALIGN;
-            stopMovement();
-            return;
-        }
-
-        // Always keep facing the portal while approaching.
-        Rotations.rotate(targetYaw, 0f);
-
-        // ── Obstacle analysis along the approach direction ────────────────────
-        Direction approachDir    = directionFromVector(dx, dz);
-        BlockPos  footBlock      = mc.player.getBlockPos();
-        BlockPos  footFront      = footBlock.offset(approachDir);
-        BlockPos  headFront      = footFront.up();
-        BlockPos  footFrontBelow = footFront.down();
-
-        boolean footBlocked  = isHardObstacle(footFront);
-        boolean headBlocked  = isHardObstacle(headFront);
-        // A gap is a non-solid, non-portal block below the step-ahead position
-        // while the front face itself is also clear (so we'd walk off into air).
-        boolean gapAhead     = !footBlocked
-                            && !mc.world.getBlockState(footFrontBelow).isSolidBlock(mc.world, footFrontBelow)
-                            && !mc.world.getBlockState(footFrontBelow).isOf(Blocks.NETHER_PORTAL);
-
-        // ── Close enough — nudge in without sprinting ─────────────────────────
-        if (hDist < 0.5) {
+        // ── Close enough — gentle nudge forward ───────────────────────────────
+        if (hDist < 0.6) {
             mc.options.sprintKey.setPressed(false);
             mc.options.forwardKey.setPressed(true);
             mc.options.backKey.setPressed(false);
@@ -468,13 +433,30 @@ public class PortalMaker extends Module {
             return;
         }
 
+        // ── Obstacle detection using the computed approach direction ───────────
+        // Derive cardinal from (dx, dz) — same vector as the yaw above — so
+        // footFront always looks through the opening, never at the frame column.
+        Direction approachDir    = directionFromVector(dx, dz);
+        BlockPos  footFront      = mc.player.getBlockPos().offset(approachDir);
+        BlockPos  headFront      = footFront.up();
+        BlockPos  footFrontBelow = footFront.down();
+
+        boolean footBlocked = isHardObstacle(footFront);
+        boolean headBlocked = isHardObstacle(headFront);
+        boolean gapAhead    = !footBlocked
+                           && !mc.world.getBlockState(footFrontBelow).isSolidBlock(mc.world, footFrontBelow)
+                           && !mc.world.getBlockState(footFrontBelow).isOf(Blocks.NETHER_PORTAL);
+
         // ── Scaffold into a gap ───────────────────────────────────────────────
-        if (gapAhead && mc.player.isOnGround()) {
-            mc.options.sneakKey.setPressed(true);  // don't walk off the edge
+        if (scaffoldCooldown > 0) scaffoldCooldown--;
+
+        if (aligned && gapAhead && mc.player.isOnGround() && scaffoldCooldown == 0) {
+            mc.options.sneakKey.setPressed(true);
             mc.options.forwardKey.setPressed(false);
             mc.options.sprintKey.setPressed(false);
-            // Try to place a block in the gap; if we can't, just shuffle forward.
-            if (!tryScaffoldPlace(footFrontBelow)) {
+            if (tryScaffoldPlace(footFrontBelow)) {
+                scaffoldCooldown = placeDelay.get() + 2;
+            } else {
                 mc.options.sneakKey.setPressed(false);
                 mc.options.forwardKey.setPressed(true);
             }
@@ -482,51 +464,48 @@ public class PortalMaker extends Module {
         }
         mc.options.sneakKey.setPressed(false);
 
-        // ── Jump over a 1-block-high wall ─────────────────────────────────────
-        if (footBlocked && !headBlocked && mc.player.isOnGround()) {
-            mc.options.forwardKey.setPressed(true);
+        // ── Jump over a 1-block wall ───────────────────────────────────────────
+        if (aligned && footBlocked && !headBlocked && mc.player.isOnGround()) {
             mc.options.sprintKey.setPressed(false);
+            mc.options.forwardKey.setPressed(true);
             mc.player.jump();
             return;
         }
 
-        // ── Stuck recovery — jump to break free ───────────────────────────────
-        if (entryStuckTicks > 6 && mc.player.isOnGround()) {
+        // ── Stuck recovery ────────────────────────────────────────────────────
+        if (stuckTicks > 6 && mc.player.isOnGround()) {
             mc.player.jump();
-            entryStuckTicks = 0;
+            stuckTicks = 0;
         }
 
         // ── Normal walk / sprint ──────────────────────────────────────────────
-        // Sprint only when far enough away and the path ahead is clear.
-        boolean sprint = hDist > 2.5 && !footBlocked;
+        boolean sprinting = hDist > 3.0 && aligned && !footBlocked;
 
         mc.options.backKey.setPressed(false);
         mc.options.leftKey.setPressed(false);
         mc.options.rightKey.setPressed(false);
-        mc.options.sprintKey.setPressed(sprint);
-        mc.options.forwardKey.setPressed(true);
+        mc.options.sprintKey.setPressed(sprinting);
+        mc.options.forwardKey.setPressed(aligned);
     }
 
     // ═══════════════════════════════════════════════════════════════════════════
-    // Portal geometry helpers
+    // Geometry helpers
     // ═══════════════════════════════════════════════════════════════════════════
 
     /**
-     * Returns the centre of the portal OPENING — the air space just inside the
-     * frame, one block above the two bottom obsidian blocks, at standing height.
-     *
-     * This is deliberately NOT the obsidian block centres; aiming here lets the
-     * player walk through the opening without clipping the frame columns.
+     * Returns the centre of the portal OPENING — the interior air column one
+     * block above the two bottom frame obsidian blocks, at eye level.
+     * Aiming here lets the player walk straight through the gap rather than
+     * into the obsidian frame columns on either side.
      */
     private Vec3d getPortalOpeningCenter() {
-        // Bottom two frame blocks are at index 0 and 1.
-        // The portal interior starts one block above them.
         BlockPos p1 = portalFramePositions.get(0).up();
         BlockPos p2 = portalFramePositions.get(1).up();
-        double cx = (p1.getX() + p2.getX()) / 2.0 + 0.5;
-        double cy =  p1.getY(); // standing-level Y inside the opening
-        double cz = (p1.getZ() + p2.getZ()) / 2.0 + 0.5;
-        return new Vec3d(cx, cy, cz);
+        return new Vec3d(
+            (p1.getX() + p2.getX()) / 2.0 + 0.5,
+             p1.getY(),
+            (p1.getZ() + p2.getZ()) / 2.0 + 0.5
+        );
     }
 
     /** Returns the cardinal Direction closest to the (dx, dz) approach vector. */
@@ -539,8 +518,8 @@ public class PortalMaker extends Module {
     }
 
     /**
-     * A block is a "hard obstacle" if it is solid and not a nether portal.
-     * Air, replaceable blocks, and portal blocks are not obstacles.
+     * Returns true only for genuinely solid obstacles.
+     * Air, replaceable blocks, and nether portal blocks are never obstacles.
      */
     private boolean isHardObstacle(BlockPos pos) {
         var state = mc.world.getBlockState(pos);

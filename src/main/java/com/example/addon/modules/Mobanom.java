@@ -198,7 +198,13 @@ public class Mobanom extends Module {
     // set for the dimension the player is currently in.
     // ═══════════════════════════════════════════════════════════════════════════
 
-    /** Mobs native to the Overworld. Anomalous in the Nether and the End. */
+    /**
+     * Mobs native ONLY to the Overworld. Anomalous in the Nether and the End.
+     *
+     * Note: ENDERMAN is intentionally absent — it spawns naturally in both
+     * the Overworld and the End, so it is not anomalous in either dimension.
+     * SPIDER / CAVE_SPIDER also spawn in Nether fortresses, so they are excluded.
+     */
     private static final Set<EntityType<?>> OVERWORLD_NATIVES = Set.of(
         // Passives
         EntityType.ALLAY,
@@ -230,17 +236,41 @@ public class Mobanom extends Module {
         EntityType.TURTLE,
         EntityType.VILLAGER,
         EntityType.WANDERING_TRADER,
-        // Neutrals
+        // Neutrals (Overworld-only)
         EntityType.BEE,
-        EntityType.ENDERMAN,
         EntityType.IRON_GOLEM,
         EntityType.POLAR_BEAR,
-        EntityType.SPIDER,
-        EntityType.CAVE_SPIDER,
-        EntityType.WOLF
+        EntityType.WOLF,
+        // Hostiles (Overworld-only)
+        EntityType.ZOMBIE,
+        EntityType.SKELETON,
+        EntityType.CREEPER,
+        EntityType.WITCH,
+        EntityType.PHANTOM,
+        EntityType.DROWNED,
+        EntityType.HUSK,
+        EntityType.STRAY,
+        EntityType.ZOMBIE_VILLAGER,
+        EntityType.VINDICATOR,
+        EntityType.EVOKER,
+        EntityType.PILLAGER,
+        EntityType.RAVAGER,
+        EntityType.VEX,
+        EntityType.ILLUSIONER,
+        EntityType.GUARDIAN,
+        EntityType.ELDER_GUARDIAN,
+        EntityType.SILVERFISH,
+        EntityType.ZOMBIE_HORSE,
+        EntityType.SKELETON_HORSE
     );
 
-    /** Mobs native to the Nether. Anomalous in the Overworld and the End. */
+    /**
+     * Mobs native ONLY to the Nether. Anomalous in the Overworld and the End.
+     *
+     * Note: SPIDER / CAVE_SPIDER spawn in Nether fortresses so are excluded
+     * from OVERWORLD_NATIVES but are NOT listed here either — they are
+     * multi-dimensional and never flagged as anomalous.
+     */
     private static final Set<EntityType<?>> NETHER_NATIVES = Set.of(
         EntityType.GHAST,
         EntityType.BLAZE,
@@ -254,10 +284,16 @@ public class Mobanom extends Module {
         EntityType.ZOMBIFIED_PIGLIN
     );
 
-    /** Mobs native to the End. Anomalous in the Overworld and the Nether. */
+    /**
+     * Mobs native ONLY to the End. Anomalous in the Overworld and the Nether.
+     *
+     * Note: ENDERMAN spawns in Overworld, Nether, and End — excluded from all
+     * sets so it is never flagged.
+     */
     private static final Set<EntityType<?>> END_NATIVES = Set.of(
         EntityType.SHULKER,
-        EntityType.ENDERMITE
+        EntityType.ENDERMITE,
+        EntityType.ENDER_DRAGON
     );
 
     // ═══════════════════════════════════════════════════════════════════════════
