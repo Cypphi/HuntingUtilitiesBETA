@@ -12,7 +12,6 @@ Current Modules
 - Lava Marker
 - Loot Lens
 - Mobanom
-- Obsidian Fist (WIP)
 - Portal Maker
 - Portal Tracker
 - Rocket Pilot
