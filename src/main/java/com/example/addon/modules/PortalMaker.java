@@ -292,12 +292,25 @@ public class PortalMaker extends Module {
         if (isPortalLit()) {
             if (autoEnter.get()) {
                 moveToPortal();
-            }
-            // Timeout guard — if we can't enter in time, give up.
-            if (finishTimer++ >= finishDelay.get()) {
-                if (autoEnter.get()) error("Failed to enter portal.");
-                else info("PortalMaker finished.");
-                toggle();
+                // Only start the timeout once the player is close enough that
+                // they should be able to step in within finishDelay ticks.
+                // Counting from too far away meant 1-second default expired
+                // before the player even reached the portal.
+                Vec3d portalCenter = getPortalCenter();
+                Vec3d playerPos    = mc.player.getPos();
+                double dx = portalCenter.x - playerPos.x;
+                double dz = portalCenter.z - playerPos.z;
+                if (dx * dx + dz * dz < 4.0) { // within 2 blocks
+                    if (finishTimer++ >= finishDelay.get()) {
+                        error("Failed to enter portal.");
+                        toggle();
+                    }
+                }
+            } else {
+                if (finishTimer++ >= finishDelay.get()) {
+                    info("PortalMaker finished.");
+                    toggle();
+                }
             }
         } else {
             finishTimer = 0;
@@ -424,16 +437,23 @@ public class PortalMaker extends Module {
             return;
         }
 
-        // ── Check what's directly in front at foot / head level ───────────────
-        Direction facing          = mc.player.getHorizontalFacing();
-        BlockPos  footFront       = mc.player.getBlockPos().offset(facing);
-        BlockPos  headFront       = footFront.up();
-        BlockPos  footFrontBelow  = footFront.down();
+        // ── Check what's directly ahead along the TARGET approach vector ────────
+        // We must NOT use mc.player.getHorizontalFacing() here — that reflects
+        // the body's current facing which lags behind the Rotations.rotate target
+        // and can land on the obsidian frame column rather than the portal opening,
+        // triggering the obstacle-jump loop every tick.
+        // Instead, quantise the approach direction to the nearest cardinal so
+        // footFront always looks into the portal opening, not the frame pillar.
+        Direction approachDir = directionFromVector(dx, dz);
+        BlockPos  footFront      = mc.player.getBlockPos().offset(approachDir);
+        BlockPos  headFront      = footFront.up();
+        BlockPos  footFrontBelow = footFront.down();
 
-        boolean footBlocked   = !mc.world.getBlockState(footFront).isReplaceable();
-        boolean headBlocked   = !mc.world.getBlockState(headFront).isReplaceable();
-        boolean gapAhead      = mc.world.getBlockState(footFront).isReplaceable()
-                             && mc.world.getBlockState(footFrontBelow).isReplaceable();
+        // Never treat nether portal blocks as obstacles — walking into them IS the goal.
+        boolean footBlocked = isHardObstacle(footFront);
+        boolean headBlocked = isHardObstacle(headFront);
+        boolean gapAhead    = !isHardObstacle(footFront) && !isHardObstacle(footFrontBelow)
+                           && !mc.world.getBlockState(footFrontBelow).isOf(Blocks.NETHER_PORTAL);
 
         // ── Scaffold into the gap if needed ───────────────────────────────────
         if (scaffoldCooldown > 0) scaffoldCooldown--;
@@ -477,6 +497,28 @@ public class PortalMaker extends Module {
         mc.options.rightKey.setPressed(false);
         mc.options.sprintKey.setPressed(sprinting);
         mc.options.forwardKey.setPressed(aligned);
+    }
+
+    /** Returns the cardinal Direction closest to the (dx, dz) approach vector. */
+    private Direction directionFromVector(double dx, double dz) {
+        if (Math.abs(dx) >= Math.abs(dz)) {
+            return dx > 0 ? Direction.EAST : Direction.WEST;
+        } else {
+            return dz > 0 ? Direction.SOUTH : Direction.NORTH;
+        }
+    }
+
+    /**
+     * Returns true only for blocks that are genuinely solid obstacles —
+     * explicitly excludes nether portal blocks and any replaceable block.
+     * Nether portal blocks must never be treated as obstacles because
+     * walking into them is the goal of the entire enter-portal phase.
+     */
+    private boolean isHardObstacle(BlockPos pos) {
+        var state = mc.world.getBlockState(pos);
+        if (state.isAir() || state.isReplaceable()) return false;
+        if (state.isOf(Blocks.NETHER_PORTAL))       return false;
+        return true;
     }
 
     /** Returns the XZ centre of the two bottom portal interior blocks at their Y level. */
