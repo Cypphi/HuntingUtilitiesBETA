@@ -70,45 +70,50 @@ public class Illushine extends Module {
     // ═══════════════════════════════════════════════════════════════════════════
     // Category override table
     //
-    // Only entries that would be mis-classified by the runtime instanceof checks
-    // need to appear here. The checks are:
+    // Runtime instanceof checks used as the base classification:
     //   HostileEntity  → HOSTILE
     //   Angerable      → NEUTRAL
     //   PassiveEntity  → PASSIVE
     //
-    // Passive overrides — extend HostileEntity or Angerable but are passive:
-    //   Fox      → extends AnimalEntity (PassiveEntity) but attacks rabbits/
-    //              chickens, NOT the player → classified PASSIVE per wiki list.
-    //   Strider  → extends PassiveEntity in code, wiki lists as PASSIVE ✓
-    //              (no override needed, kept here for clarity).
+    // Entries here are ONLY needed when a mob would be mis-classified by those
+    // checks, or when the correct category needs to be stated explicitly.
     //
-    // Neutral overrides — extend HostileEntity but are neutral toward players:
-    //   Piglin          → attacks players without gold armour, but wiki = NEUTRAL.
-    //   Zombified Piglin→ extends HostileEntity, wiki = NEUTRAL.
-    //   Enderman        → extends HostileEntity, wiki = NEUTRAL.
-    //   Spider          → extends HostileEntity, wiki = NEUTRAL (passive in light).
-    //   Cave Spider     → same as Spider.
+    // Passive overrides:
+    //   Fox        → PassiveEntity in code, correct by default. Explicit for clarity.
+    //   Baby Piglin→ shares EntityType.PIGLIN with adult; handled in categorise()
+    //                via isBaby() since EntityType alone cannot distinguish them.
     //
-    // Hostile overrides — extend PassiveEntity / AnimalEntity but are hostile:
-    //   Ghast, Shulker, Phantom, Slime, Magma Cube, Hoglin → HOSTILE ✓ (kept).
+    // Neutral overrides (extend HostileEntity but are neutral toward players):
+    //   Piglin, Zombified Piglin, Enderman, Spider, Cave Spider, Goat.
+    //
+    // Hostile overrides (do NOT extend HostileEntity):
+    //   Ghast, Shulker, Phantom, Slime, Magma Cube, Hoglin.
+    //   Piglin Brute extends HostileEntity correctly but is listed explicitly
+    //   to document that it is always hostile (unlike regular Piglins).
     // ═══════════════════════════════════════════════════════════════════════════
 
     private static final Map<EntityType<?>, MobCategory> CATEGORY_OVERRIDES = new HashMap<>(Map.ofEntries(
         // ── Passive ──────────────────────────────────────────────────────────
-        // Fox extends AnimalEntity (PassiveEntity) but the instanceof Angerable
-        // check would NOT fire — it is already PASSIVE by default. Listed here
-        // explicitly so intent is clear; no functional change needed.
         Map.entry(EntityType.FOX,              MobCategory.PASSIVE),
 
         // ── Neutral ──────────────────────────────────────────────────────────
-        // These extend HostileEntity in code but wiki classifies them as neutral.
+        // PIGLIN: neutral toward players with gold armour. Baby Piglins share
+        // this EntityType but are passive — handled via isBaby() in categorise().
         Map.entry(EntityType.PIGLIN,           MobCategory.NEUTRAL),
+        // ZOMBIFIED_PIGLIN: neutral, only retaliates when attacked.
         Map.entry(EntityType.ZOMBIFIED_PIGLIN, MobCategory.NEUTRAL),
+        // ENDERMAN: neutral unless looked at directly.
         Map.entry(EntityType.ENDERMAN,         MobCategory.NEUTRAL),
+        // SPIDER / CAVE_SPIDER: neutral in daylight, hostile in darkness.
         Map.entry(EntityType.SPIDER,           MobCategory.NEUTRAL),
         Map.entry(EntityType.CAVE_SPIDER,      MobCategory.NEUTRAL),
+        // GOAT: charges players and mobs unprovoked; extends AnimalEntity (PassiveEntity).
+        Map.entry(EntityType.GOAT,             MobCategory.NEUTRAL),
 
         // ── Hostile ──────────────────────────────────────────────────────────
+        // PIGLIN_BRUTE: always hostile regardless of gold armour; extends HostileEntity.
+        // Listed explicitly to distinguish from neutral adult Piglins.
+        Map.entry(EntityType.PIGLIN_BRUTE,     MobCategory.HOSTILE),
         // These do NOT extend HostileEntity so the instanceof check misses them.
         Map.entry(EntityType.GHAST,            MobCategory.HOSTILE),
         Map.entry(EntityType.SHULKER,          MobCategory.HOSTILE),
@@ -418,6 +423,11 @@ public class Illushine extends Module {
     // ═══════════════════════════════════════════════════════════════════════════
 
     private MobCategory categorise(MobEntity mob) {
+        // Baby Piglin shares EntityType.PIGLIN with adults but is always passive —
+        // it never attacks and does not grow up. Check before the override table
+        // so it does not inherit the adult NEUTRAL classification.
+        if (mob.getType() == EntityType.PIGLIN && mob.isBaby()) return MobCategory.PASSIVE;
+
         MobCategory override = CATEGORY_OVERRIDES.get(mob.getType());
         if (override != null) return override;
 

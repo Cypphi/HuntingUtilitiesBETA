@@ -243,7 +243,6 @@ public class Mobanom extends Module {
         EntityType.WOLF,
         // Hostiles (Overworld-only)
         EntityType.ZOMBIE,
-        EntityType.SKELETON,
         EntityType.CREEPER,
         EntityType.WITCH,
         EntityType.PHANTOM,
@@ -260,8 +259,8 @@ public class Mobanom extends Module {
         EntityType.GUARDIAN,
         EntityType.ELDER_GUARDIAN,
         EntityType.SILVERFISH,
-        EntityType.ZOMBIE_HORSE,
-        EntityType.SKELETON_HORSE
+        EntityType.ZOMBIE_HORSE
+        // SKELETON and SKELETON_HORSE omitted — spawn naturally in Nether fortresses
     );
 
     /**
@@ -280,8 +279,9 @@ public class Mobanom extends Module {
         EntityType.PIGLIN_BRUTE,
         EntityType.HOGLIN,
         EntityType.ZOGLIN,
-        EntityType.STRIDER,
-        EntityType.ZOMBIFIED_PIGLIN
+        EntityType.STRIDER
+        // ZOMBIFIED_PIGLIN omitted — it is the result of a Piglin entering the
+        // Overworld, so finding one there is expected, not anomalous.
     );
 
     /**
@@ -447,8 +447,14 @@ public class Mobanom extends Module {
         for (ItemStack stack : mob.getArmorItems()) {
             if (isUnnatural(stack)) return true;
         }
-        if (isUnnatural(mob.getMainHandStack())) return true;
-        if (isUnnatural(mob.getOffHandStack()))  return true;
+        // Piglins (including babies) naturally spawn holding crossbows or nothing.
+        // Zombified Piglins always hold a golden sword — skip both.
+        boolean skipMainHand = (mob.getType() == EntityType.PIGLIN
+                                    && mob.getMainHandStack().isOf(Items.CROSSBOW))
+                            || (mob.getType() == EntityType.ZOMBIFIED_PIGLIN
+                                    && mob.getMainHandStack().isOf(Items.GOLDEN_SWORD));
+        if (!skipMainHand && isUnnatural(mob.getMainHandStack())) return true;
+        if (isUnnatural(mob.getOffHandStack())) return true;
         return false;
     }
 
