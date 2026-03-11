@@ -130,10 +130,15 @@ public class PortalMaker extends Module {
     // ═══════════════════════════════════════════════════════════════════════════
 
     public final List<BlockPos> portalFramePositions = new ArrayList<>();
-    private int     placementIndex = 0;
-    private int     tickTimer      = 0;
-    private int     finishTimer    = 0;
-    private boolean pearlThrown    = false;
+    private int     placementIndex    = 0;
+    private int     tickTimer         = 0;
+    private int     finishTimer       = 0;
+    private boolean pearlThrown       = false;
+
+    /** How many ticks we've been stuck at roughly the same position while walking to portal. */
+    private int     stuckTicks        = 0;
+    private Vec3d   lastPos           = null;
+    private int     scaffoldCooldown  = 0;
 
     // ═══════════════════════════════════════════════════════════════════════════
     // Constructor
@@ -150,10 +155,13 @@ public class PortalMaker extends Module {
     @Override
     public void onActivate() {
         portalFramePositions.clear();
-        placementIndex = 0;
-        tickTimer      = 0;
-        finishTimer    = 0;
-        pearlThrown    = false;
+        placementIndex   = 0;
+        tickTimer        = 0;
+        finishTimer      = 0;
+        pearlThrown      = false;
+        stuckTicks       = 0;
+        lastPos          = null;
+        scaffoldCooldown = 0;
 
         if (mc.player == null || mc.world == null) { toggle(); return; }
 
@@ -218,8 +226,10 @@ public class PortalMaker extends Module {
     @Override
     public void onDeactivate() {
         portalFramePositions.clear();
-        placementIndex = 0;
-        tickTimer      = 0;
+        placementIndex   = 0;
+        tickTimer        = 0;
+        stuckTicks       = 0;
+        lastPos          = null;
         stopMovement();
     }
 
@@ -231,11 +241,14 @@ public class PortalMaker extends Module {
     private void onTick(TickEvent.Pre event) {
         if (mc.player == null || mc.world == null) return;
 
-        if (mc.world.getBlockState(mc.player.getBlockPos()).getBlock() == Blocks.NETHER_PORTAL) {
+        // Successfully inside the portal — done.
+        if (isPlayerInPortal()) {
+            stopMovement();
             toggle();
             return;
         }
 
+        // Recalculate which blocks still need placing.
         placementIndex = portalFramePositions.size();
         for (int i = 0; i < portalFramePositions.size(); i++) {
             if (mc.world.getBlockState(portalFramePositions.get(i)).getBlock() != Blocks.OBSIDIAN) {
@@ -244,6 +257,7 @@ public class PortalMaker extends Module {
             }
         }
 
+        // ── Phase 1: place obsidian ────────────────────────────────────────────
         if (placementIndex < portalFramePositions.size()) {
             if (!mc.player.getMainHandStack().isOf(Items.OBSIDIAN)) {
                 FindItemResult obsidian = InvUtils.find(Items.OBSIDIAN);
@@ -257,7 +271,6 @@ public class PortalMaker extends Module {
             tickTimer = 0;
 
             BlockPos target = portalFramePositions.get(placementIndex);
-
             if (mc.world.getBlockState(target).getBlock() == Blocks.OBSIDIAN) { placementIndex++; return; }
 
             if (!mc.world.getBlockState(target).isReplaceable()) {
@@ -271,22 +284,24 @@ public class PortalMaker extends Module {
                 mc.interactionManager.interactBlock(mc.player, Hand.MAIN_HAND, hit);
                 mc.player.swingHand(Hand.MAIN_HAND);
             });
-
             placementIndex++;
+            return;
         }
 
-        if (placementIndex >= portalFramePositions.size()) {
-            if (isPortalLit()) {
-                if (autoEnter.get()) moveToPortal();
-                if (finishTimer++ >= finishDelay.get()) {
-                    if (autoEnter.get()) error("Failed to enter portal.");
-                    else info("PortalMaker finished.");
-                    toggle();
-                }
-            } else {
-                finishTimer = 0;
-                if (tickTimer++ >= 10) { lightPortal(); tickTimer = 0; }
+        // ── Phase 2: light / enter ─────────────────────────────────────────────
+        if (isPortalLit()) {
+            if (autoEnter.get()) {
+                moveToPortal();
             }
+            // Timeout guard — if we can't enter in time, give up.
+            if (finishTimer++ >= finishDelay.get()) {
+                if (autoEnter.get()) error("Failed to enter portal.");
+                else info("PortalMaker finished.");
+                toggle();
+            }
+        } else {
+            finishTimer = 0;
+            if (tickTimer++ >= 10) { lightPortal(); tickTimer = 0; }
         }
     }
 
@@ -321,113 +336,158 @@ public class PortalMaker extends Module {
                mc.world.getBlockState(p2).getBlock() == Blocks.NETHER_PORTAL;
     }
 
+    /** True when the player's feet OR head block is inside a nether portal. */
+    private boolean isPlayerInPortal() {
+        BlockPos feet = mc.player.getBlockPos();
+        return mc.world.getBlockState(feet).isOf(Blocks.NETHER_PORTAL) ||
+               mc.world.getBlockState(feet.up()).isOf(Blocks.NETHER_PORTAL);
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════════
+    // Portal Entry Movement  (completely rewritten)
+    // ═══════════════════════════════════════════════════════════════════════════
+
+    /**
+     * Moves the player into the portal using a straightforward state machine:
+     *
+     *  1. If ender-pearl mode is enabled, throw a pearl and return.
+     *  2. Compute a horizontal approach vector toward the portal center.
+     *  3. Face that direction via Rotations.rotate.
+     *  4. Walk forward, sprint when far away, stop sprinting when close.
+     *  5. Jump over any solid block immediately in front at foot level.
+     *  6. Bridge a gap (scaffold) if we're about to step into air.
+     *  7. Track "stuck" ticks; if stuck for too long, jump to break free.
+     *  8. Abort if we fell far below the portal.
+     */
     private void moveToPortal() {
         if (portalFramePositions.size() < 2 || mc.player == null || mc.world == null) return;
 
-        BlockPos p1 = portalFramePositions.get(0).up();
-        BlockPos p2 = portalFramePositions.get(1).up();
-        Vec3d portalCenter = new Vec3d(
-            (p1.getX() + p2.getX()) / 2.0 + 0.5,
-            p1.getY(),
-            (p1.getZ() + p2.getZ()) / 2.0 + 0.5
-        );
-
+        // ── Ender pearl fast-path ──────────────────────────────────────────────
         if (useEnderPearl.get()) {
-            if (pearlThrown) return;
-            if (selectHotbarItem(Items.ENDER_PEARL)) {
-                Vec3d pearlTarget = new Vec3d(portalCenter.x, p1.getY() + 1.5, portalCenter.z);
-                Rotations.rotate(Rotations.getYaw(pearlTarget), Rotations.getPitch(pearlTarget), () -> {
+            if (!pearlThrown && selectHotbarItem(Items.ENDER_PEARL)) {
+                Vec3d target = getPortalCenter().add(0, 1.5, 0);
+                Rotations.rotate(Rotations.getYaw(target), Rotations.getPitch(target), () -> {
                     mc.interactionManager.interactItem(mc.player, Hand.MAIN_HAND);
                     mc.player.swingHand(Hand.MAIN_HAND);
                 });
                 pearlThrown = true;
-                return;
             }
-        }
-
-        if (mc.world.getBlockState(mc.player.getBlockPos()).isOf(Blocks.NETHER_PORTAL) ||
-            mc.world.getBlockState(mc.player.getBlockPos().up()).isOf(Blocks.NETHER_PORTAL)) {
-            stopMovement();
             return;
         }
 
-        if (mc.player.getY() < p1.getY() - 3.0) {
-            error("Fell too far below the portal. Stopping.");
+        Vec3d portalCenter = getPortalCenter();
+        Vec3d playerPos    = mc.player.getPos();
+
+        // ── Fell-off guard ─────────────────────────────────────────────────────
+        if (playerPos.y < portalCenter.y - 4.0) {
+            error("Fell too far below the portal — stopping.");
             stopMovement();
             toggle();
             return;
         }
 
-        float targetYaw = (float) Rotations.getYaw(portalCenter);
-        Rotations.rotate(targetYaw, -15f);
-        float   yawDiff     = MathHelper.wrapDegrees(targetYaw - mc.player.getYaw());
-        boolean isAligned   = Math.abs(yawDiff) < 45f;
-        double  distSq      = mc.player.squaredDistanceTo(portalCenter.x, mc.player.getY(), portalCenter.z);
-        boolean closeEnough = distSq < 1.5 * 1.5;
-
-        if (mc.player.isOnGround() && isAligned && !closeEnough) {
-            Direction facing     = mc.player.getHorizontalFacing();
-            BlockPos  gapSupport = null;
-
-            for (int look = 1; look <= 2; look++) {
-                BlockPos ahead      = mc.player.getBlockPos().offset(facing, look);
-                BlockPos aheadBelow = ahead.down();
-                if (mc.world.getBlockState(ahead).isReplaceable() &&
-                    mc.world.getBlockState(aheadBelow).isReplaceable()) {
-                    gapSupport = aheadBelow;
-                    break;
-                }
-            }
-
-            if (gapSupport != null) {
-                mc.options.forwardKey.setPressed(false);
-                mc.options.sprintKey.setPressed(false);
-                mc.options.sneakKey.setPressed(true);
-                if (tryScaffoldPlace(gapSupport)) {
-                    tickTimer = placeDelay.get();
-                } else {
-                    error("Cannot scaffold to portal — no blocks available. Stopping.");
-                    mc.options.sneakKey.setPressed(false);
-                    stopMovement();
-                    toggle();
-                }
-                return;
-            }
-            mc.options.sneakKey.setPressed(false);
+        // ── Stuck detection ────────────────────────────────────────────────────
+        if (lastPos != null && lastPos.squaredDistanceTo(playerPos) < 0.001) {
+            stuckTicks++;
         } else {
-            mc.options.sneakKey.setPressed(false);
+            stuckTicks = 0;
         }
+        lastPos = playerPos;
+
+        // ── Horizontal distance & alignment ───────────────────────────────────
+        double dx        = portalCenter.x - playerPos.x;
+        double dz        = portalCenter.z - playerPos.z;
+        double hDistSq   = dx * dx + dz * dz;
+        double hDist     = Math.sqrt(hDistSq);
+
+        // Target yaw pointing straight at the portal center (horizontal only).
+        float targetYaw  = (float) Math.toDegrees(Math.atan2(-dx, dz));
+        float yawDiff    = MathHelper.wrapDegrees(targetYaw - mc.player.getYaw());
+        boolean aligned  = Math.abs(yawDiff) < 30f;   // tighter than original — avoids diagonal drift
+
+        // Always face the portal.
+        Rotations.rotate(targetYaw, mc.player.getPitch());
+
+        // ── Already inside portal blocks? ─────────────────────────────────────
+        if (isPlayerInPortal()) {
+            stopMovement();
+            return;
+        }
+
+        // ── Close enough — just press forward gently ──────────────────────────
+        if (hDist < 0.6) {
+            mc.options.sprintKey.setPressed(false);
+            mc.options.forwardKey.setPressed(true);
+            mc.options.backKey.setPressed(false);
+            mc.options.leftKey.setPressed(false);
+            mc.options.rightKey.setPressed(false);
+            return;
+        }
+
+        // ── Check what's directly in front at foot / head level ───────────────
+        Direction facing          = mc.player.getHorizontalFacing();
+        BlockPos  footFront       = mc.player.getBlockPos().offset(facing);
+        BlockPos  headFront       = footFront.up();
+        BlockPos  footFrontBelow  = footFront.down();
+
+        boolean footBlocked   = !mc.world.getBlockState(footFront).isReplaceable();
+        boolean headBlocked   = !mc.world.getBlockState(headFront).isReplaceable();
+        boolean gapAhead      = mc.world.getBlockState(footFront).isReplaceable()
+                             && mc.world.getBlockState(footFrontBelow).isReplaceable();
+
+        // ── Scaffold into the gap if needed ───────────────────────────────────
+        if (scaffoldCooldown > 0) scaffoldCooldown--;
+
+        if (aligned && gapAhead && mc.player.isOnGround() && scaffoldCooldown == 0) {
+            // Sneak so we don't walk off, then place a bridge block.
+            mc.options.sneakKey.setPressed(true);
+            mc.options.forwardKey.setPressed(false);
+            mc.options.sprintKey.setPressed(false);
+
+            if (tryScaffoldPlace(footFrontBelow)) {
+                scaffoldCooldown = placeDelay.get() + 2;
+            } else {
+                // No blocks to bridge with — just walk straight through (gap might be 1 wide).
+                mc.options.sneakKey.setPressed(false);
+                mc.options.forwardKey.setPressed(true);
+            }
+            return;
+        }
+        mc.options.sneakKey.setPressed(false);
+
+        // ── Jump over a single-block obstacle at foot level ───────────────────
+        if (aligned && footBlocked && !headBlocked && mc.player.isOnGround()) {
+            mc.options.sprintKey.setPressed(false);
+            mc.options.forwardKey.setPressed(true);
+            mc.player.jump();
+            return;
+        }
+
+        // ── Stuck recovery — try jumping ──────────────────────────────────────
+        if (stuckTicks > 8 && mc.player.isOnGround()) {
+            mc.player.jump();
+            stuckTicks = 0;
+        }
+
+        // ── Normal walk / sprint ──────────────────────────────────────────────
+        boolean sprinting = hDist > 3.0 && aligned && !footBlocked;
 
         mc.options.backKey.setPressed(false);
         mc.options.leftKey.setPressed(false);
         mc.options.rightKey.setPressed(false);
+        mc.options.sprintKey.setPressed(sprinting);
+        mc.options.forwardKey.setPressed(aligned);
+    }
 
-        if (closeEnough) {
-            mc.options.sprintKey.setPressed(false);
-            mc.options.forwardKey.setPressed(true);
-        } else {
-            mc.options.sprintKey.setPressed(distSq > 4.0 && isAligned);
-            mc.options.forwardKey.setPressed(isAligned);
-        }
-
-        if (mc.player.isOnGround()) {
-            Direction facing       = mc.player.getHorizontalFacing();
-            BlockPos  blockInFront = mc.player.getBlockPos().offset(facing);
-
-            if (mc.player.horizontalCollision) {
-                mc.options.sprintKey.setPressed(false);
-                mc.player.jump();
-                return;
-            }
-            if (!mc.world.getBlockState(blockInFront).isReplaceable() &&
-                mc.world.getBlockState(blockInFront.up()).isReplaceable()) {
-                mc.options.forwardKey.setPressed(true);
-                mc.options.sprintKey.setPressed(false);
-                mc.player.jump();
-                return;
-            }
-            if (closeEnough && mc.player.getY() < p1.getY()) mc.player.jump();
-        }
+    /** Returns the XZ centre of the two bottom portal interior blocks at their Y level. */
+    private Vec3d getPortalCenter() {
+        BlockPos p1 = portalFramePositions.get(0).up();
+        BlockPos p2 = portalFramePositions.get(1).up();
+        return new Vec3d(
+            (p1.getX() + p2.getX()) / 2.0 + 0.5,
+             p1.getY(),
+            (p1.getZ() + p2.getZ()) / 2.0 + 0.5
+        );
     }
 
     // ═══════════════════════════════════════════════════════════════════════════
@@ -523,11 +583,7 @@ public class PortalMaker extends Module {
             if (!mc.world.getBlockState(pos).isReplaceable()) continue;
 
             Box box = new Box(pos);
-
-            // Bloom layers
             renderGlowLayers(event, box, lineColor.get());
-
-            // Solid preview on top
             event.renderer.box(box, sideColor.get(), lineColor.get(), shapeMode.get(), 0);
         }
     }

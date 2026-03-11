@@ -56,10 +56,6 @@ import net.minecraft.world.chunk.WorldChunk;
 
 public class PortalTracker extends Module {
 
-    // ───────────────────────────────────────────────────────────────
-    // Constants
-    // ───────────────────────────────────────────────────────────────
-
     private static final int    DIMENSION_SETTLE_TICKS           = 40;
     private static final int    ENTRY_EXCLUSION_COOLDOWN_TICKS   = 200;
     private static final int    ENTRY_EXCLUSION_RADIUS           = 5;
@@ -70,217 +66,156 @@ public class PortalTracker extends Module {
     private static final long   MESSAGE_COOLDOWN_MS              = 2000;
     private static final int    WAYPOINT_DEDUP_RADIUS            = 8;
 
-    // ───────────────────────────────────────────────────────────────
-    // Setting Groups
-    // ───────────────────────────────────────────────────────────────
+    // ── Highlight Style ────────────────────────────────────────────
+    public enum HighlightStyle {
+        GLOW("Glow"),
+        SPECTRAL("Spectral");
 
+        private final String displayName;
+        HighlightStyle(String name) { this.displayName = name; }
+
+        @Override public String toString() { return displayName; }
+    }
+
+    // ── Setting Groups ─────────────────────────────────────────────
     private final SettingGroup sgGeneral       = settings.getDefaultGroup();
     private final SettingGroup sgNetherPortals = settings.createGroup("Nether Portals");
     private final SettingGroup sgEndDimension  = settings.createGroup("End Dimension");
     private final SettingGroup sgRender        = settings.createGroup("Render");
     private final SettingGroup sgGlow          = settings.createGroup("Glow");
+    private final SettingGroup sgSpectral      = settings.createGroup("Spectral");
     private final SettingGroup sgPlatform      = settings.createGroup("Platform 9\u00BE");
 
-    // ───────────────────────────────────────────────────────────────
-    // Settings — General
-    // ───────────────────────────────────────────────────────────────
-
+    // ── General ────────────────────────────────────────────────────
     private final Setting<Integer> range = sgGeneral.add(new IntSetting.Builder()
-        .name("range")
-        .description("Portal detection range in chunks.")
-        .defaultValue(32).min(16).max(64).sliderMin(16).sliderMax(64)
-        .build()
-    );
+        .name("range").description("Portal detection range in chunks.")
+        .defaultValue(32).min(16).max(64).sliderMin(16).sliderMax(64).build());
 
     private final Setting<Integer> autoMarkRange = sgGeneral.add(new IntSetting.Builder()
-        .name("auto-mark-range")
-        .description("Auto-mark Nether portals within this many blocks of the player as created by you.")
-        .defaultValue(10).min(0).max(50).sliderMin(0).sliderMax(50)
-        .build()
-    );
+        .name("auto-mark-range").description("Auto-mark Nether portals within this many blocks of the player as created by you.")
+        .defaultValue(10).min(0).max(50).sliderMin(0).sliderMax(50).build());
 
     private final Setting<Boolean> trackOverworld = sgGeneral.add(new BoolSetting.Builder()
-        .name("track-overworld")
-        .description("Also auto-mark portals found in the Overworld as created by you.")
-        .defaultValue(false)
-        .build()
-    );
+        .name("track-overworld").description("Also auto-mark portals found in the Overworld as created by you.")
+        .defaultValue(false).build());
 
     private final Setting<Boolean> showCreatedCount = sgGeneral.add(new BoolSetting.Builder()
-        .name("show-created-count")
-        .description("Show a chat message each time a new portal you created is discovered.")
-        .defaultValue(true)
-        .build()
-    );
+        .name("show-created-count").description("Show a chat message each time a new portal you created is discovered.")
+        .defaultValue(true).build());
 
     private final Setting<Boolean> onlyShowCreated = sgGeneral.add(new BoolSetting.Builder()
-        .name("only-show-created")
-        .description("Only highlight portals you've created.")
-        .defaultValue(false)
-        .build()
-    );
+        .name("only-show-created").description("Only highlight portals you've created.")
+        .defaultValue(false).build());
 
     private final Setting<Boolean> showBeam = sgGeneral.add(new BoolSetting.Builder()
-        .name("show-beam")
-        .description("Show a vertical beam above each tracked portal.")
-        .defaultValue(true)
-        .build()
-    );
+        .name("show-beam").description("Show a vertical beam above each tracked portal.")
+        .defaultValue(true).build());
 
     private final Setting<Boolean> onlyNearestBeam = sgGeneral.add(new BoolSetting.Builder()
-        .name("only-nearest-beam")
-        .description("Only render the beam for the portal closest to the player.")
-        .defaultValue(false)
-        .visible(showBeam::get)
-        .build()
-    );
+        .name("only-nearest-beam").description("Only render the beam for the portal closest to the player.")
+        .defaultValue(false).visible(showBeam::get).build());
 
     private final Setting<Integer> beamWidth = sgGeneral.add(new IntSetting.Builder()
-        .name("beam-width")
-        .description("Beam width in hundredths of a block.")
-        .defaultValue(15).min(5).max(50).sliderMin(5).sliderMax(50)
-        .visible(showBeam::get)
-        .build()
-    );
+        .name("beam-width").description("Beam width in hundredths of a block.")
+        .defaultValue(15).min(5).max(50).sliderMin(5).sliderMax(50).visible(showBeam::get).build());
 
     private final Setting<Boolean> dynamicColors = sgGeneral.add(new BoolSetting.Builder()
-        .name("dynamic-colors")
-        .description("Animate portal colors. Each type uses a distinct hue offset so types stay visually distinguishable.")
-        .defaultValue(false)
-        .build()
-    );
+        .name("dynamic-colors").description("Animate portal colors. Each type uses a distinct hue offset so types stay visually distinguishable.")
+        .defaultValue(false).build());
 
     private final Setting<Boolean> highlightFrame = sgGeneral.add(new BoolSetting.Builder()
-        .name("highlight-frame")
-        .description("Highlights the obsidian frame of Nether portals.")
-        .defaultValue(true)
-        .build()
-    );
+        .name("highlight-frame").description("Highlights the obsidian frame of Nether portals.")
+        .defaultValue(true).build());
 
     private final Setting<Boolean> xaeroIntegration = sgGeneral.add(new BoolSetting.Builder()
-        .name("xaero-integration")
-        .description("Enables all Xaero integration: writes waypoints for portals you create, watches for removals, and loads historical portals from XaeroPlus's database.")
-        .defaultValue(true)
-        .build()
-    );
+        .name("xaero-integration").description("Enables all Xaero integration.")
+        .defaultValue(true).build());
 
     private final Setting<Boolean> resetButton = sgGeneral.add(new BoolSetting.Builder()
-        .name("reset")
-        .description("Reset the current session and clear all created-portal records.")
-        .defaultValue(false)
-        .onChanged(this::handleReset)
-        .build()
-    );
+        .name("reset").description("Reset the current session and clear all created-portal records.")
+        .defaultValue(false).onChanged(this::handleReset).build());
 
-    // ───────────────────────────────────────────────────────────────
-    // Settings — Nether Portals
-    // ───────────────────────────────────────────────────────────────
-
+    // ── Nether Portals ─────────────────────────────────────────────
     private final Setting<Boolean> scanNetherPortals = sgNetherPortals.add(new BoolSetting.Builder()
-        .name("scan-nether")
-        .description("Scan lit Nether portals.")
-        .defaultValue(true)
-        .build()
-    );
+        .name("scan-nether").description("Scan lit Nether portals.").defaultValue(true).build());
 
     private final Setting<SettingColor> netherColor = sgNetherPortals.add(new ColorSetting.Builder()
-        .name("nether-color")
-        .defaultValue(new SettingColor(180, 60, 255, 255))
-        .visible(scanNetherPortals::get)
-        .build()
-    );
+        .name("nether-color").defaultValue(new SettingColor(180, 60, 255, 255))
+        .visible(scanNetherPortals::get).build());
 
-    // ───────────────────────────────────────────────────────────────
-    // Settings — End Dimension
-    // ───────────────────────────────────────────────────────────────
-
+    // ── End Dimension ──────────────────────────────────────────────
     private final Setting<Boolean> scanEndPortals = sgEndDimension.add(new BoolSetting.Builder()
-        .name("end-portals")
-        .description("Scan End portal blocks.")
-        .defaultValue(true)
-        .build()
-    );
+        .name("end-portals").description("Scan End portal blocks.").defaultValue(true).build());
 
     private final Setting<SettingColor> endPortalColor = sgEndDimension.add(new ColorSetting.Builder()
-        .name("end-portal-color")
-        .defaultValue(new SettingColor(0, 255, 128, 255))
-        .visible(scanEndPortals::get)
-        .build()
-    );
+        .name("end-portal-color").defaultValue(new SettingColor(0, 255, 128, 255))
+        .visible(scanEndPortals::get).build());
 
     private final Setting<Boolean> scanEndGateways = sgEndDimension.add(new BoolSetting.Builder()
-        .name("end-gateways")
-        .description("Scan End gateways.")
-        .defaultValue(true)
-        .build()
-    );
+        .name("end-gateways").description("Scan End gateways.").defaultValue(true).build());
 
     private final Setting<SettingColor> endGatewayColor = sgEndDimension.add(new ColorSetting.Builder()
-        .name("end-gateway-color")
-        .defaultValue(new SettingColor(255, 0, 255, 255))
-        .visible(scanEndGateways::get)
-        .build()
-    );
+        .name("end-gateway-color").defaultValue(new SettingColor(255, 0, 255, 255))
+        .visible(scanEndGateways::get).build());
 
-    // ───────────────────────────────────────────────────────────────
-    // Settings — Render
-    // ───────────────────────────────────────────────────────────────
-
+    // ── Render ─────────────────────────────────────────────────────
     private final Setting<ShapeMode> shapeMode = sgRender.add(new EnumSetting.Builder<ShapeMode>()
-        .name("shape-mode")
-        .description("Render style for portal highlights.")
-        .defaultValue(ShapeMode.Both)
-        .build()
-    );
+        .name("shape-mode").description("Render style for portal highlights.")
+        .defaultValue(ShapeMode.Both).build());
 
-    // ───────────────────────────────────────────────────────────────
-    // Settings — Glow
-    // ───────────────────────────────────────────────────────────────
+    /** Selects between GLOW (layered bloom) and SPECTRAL (crisp outline, like spectral arrow). */
+    private final Setting<HighlightStyle> highlightStyle = sgRender.add(new EnumSetting.Builder<HighlightStyle>()
+        .name("highlight-style")
+        .description("GLOW renders layered bloom around the unified portal box. SPECTRAL renders a crisp outline only, like the spectral arrow effect.")
+        .defaultValue(HighlightStyle.GLOW).build());
 
+    // ── Glow ───────────────────────────────────────────────────────
     private final Setting<Integer> glowLayers = sgGlow.add(new IntSetting.Builder()
-        .name("glow-layers")
-        .description("Number of bloom layers rendered around each portal.")
+        .name("glow-layers").description("Number of bloom layers rendered around each portal.")
         .defaultValue(4).min(1).sliderMax(8)
-        .build()
-    );
+        .visible(() -> highlightStyle.get() == HighlightStyle.GLOW).build());
 
     private final Setting<Double> glowSpread = sgGlow.add(new DoubleSetting.Builder()
-        .name("glow-spread")
-        .description("How far each bloom layer expands outward (in blocks).")
+        .name("glow-spread").description("How far each bloom layer expands outward (in blocks).")
         .defaultValue(0.05).min(0.01).sliderMax(0.2)
-        .build()
-    );
+        .visible(() -> highlightStyle.get() == HighlightStyle.GLOW).build());
 
     private final Setting<Integer> glowBaseAlpha = sgGlow.add(new IntSetting.Builder()
-        .name("glow-base-alpha")
-        .description("Alpha of the innermost glow layer (0-255).")
+        .name("glow-base-alpha").description("Alpha of the innermost glow layer (0-255).")
         .defaultValue(50).min(4).sliderMax(150)
-        .build()
-    );
+        .visible(() -> highlightStyle.get() == HighlightStyle.GLOW).build());
 
-    // ───────────────────────────────────────────────────────────────
-    // Settings — Platform 9¾
-    // ───────────────────────────────────────────────────────────────
+    // ── Spectral ───────────────────────────────────────────────────
+    private final Setting<Integer> spectralLineAlpha = sgSpectral.add(new IntSetting.Builder()
+        .name("line-alpha").description("Opacity of the spectral outline (0-255).")
+        .defaultValue(255).min(30).sliderMax(255)
+        .visible(() -> highlightStyle.get() == HighlightStyle.SPECTRAL).build());
 
+    private final Setting<Integer> spectralFillAlpha = sgSpectral.add(new IntSetting.Builder()
+        .name("fill-alpha").description("Opacity of the spectral fill (0 = pure outline, higher = tinted fill).")
+        .defaultValue(15).min(0).sliderMax(80)
+        .visible(() -> highlightStyle.get() == HighlightStyle.SPECTRAL).build());
+
+    private final Setting<Double> spectralExpand = sgSpectral.add(new DoubleSetting.Builder()
+        .name("expand").description("How much to expand the outline box beyond the portal edge (in blocks).")
+        .defaultValue(0.05).min(0.0).sliderMax(0.3)
+        .visible(() -> highlightStyle.get() == HighlightStyle.SPECTRAL).build());
+
+    private final Setting<Boolean> spectralPulse = sgSpectral.add(new BoolSetting.Builder()
+        .name("pulse").description("Pulsate the spectral outline alpha over time, like the vanilla glowing effect.")
+        .defaultValue(true)
+        .visible(() -> highlightStyle.get() == HighlightStyle.SPECTRAL).build());
+
+    // ── Platform 9¾ ───────────────────────────────────────────────
     private final Setting<Keybind> platformKey = sgPlatform.add(new KeybindSetting.Builder()
-        .name("platform-key")
-        .description("Key to build the 5x5 platform.")
-        .defaultValue(Keybind.none())
-        .action(this::startPlatformBuild)
-        .build()
-    );
+        .name("platform-key").description("Key to build the 5x5 platform.")
+        .defaultValue(Keybind.none()).action(this::startPlatformBuild).build());
 
     private final Setting<Integer> platformDelay = sgPlatform.add(new IntSetting.Builder()
-        .name("platform-delay")
-        .description("Ticks between block placements.")
-        .defaultValue(2).min(1)
-        .build()
-    );
+        .name("platform-delay").description("Ticks between block placements.")
+        .defaultValue(2).min(1).build());
 
-    // ───────────────────────────────────────────────────────────────
-    // State
-    // ───────────────────────────────────────────────────────────────
-
+    // ── State ──────────────────────────────────────────────────────
     private final Map<BlockPos, PortalType> portals          = new ConcurrentHashMap<>();
     private final Set<BlockPos>             createdPortals   = ConcurrentHashMap.newKeySet();
     private final List<PortalStructure>     portalStructures = new CopyOnWriteArrayList<>();
@@ -294,16 +229,13 @@ public class PortalTracker extends Module {
 
     private String lastDimension           = "";
     private int    dimensionChangeCooldown = 0;
-
-    private BlockPos entryPortalPos = null;
-    private int      exclusionTimer = 0;
-
-    private boolean manuallyActivated = false;
-    private long    sessionStartTime  = 0;
-    private int     totalCreated      = 0;
-
-    private int structureTimer = 0;
-    private int cleanupTimer   = 0;
+    private BlockPos entryPortalPos        = null;
+    private int      exclusionTimer        = 0;
+    private boolean manuallyActivated      = false;
+    private long    sessionStartTime       = 0;
+    private int     totalCreated           = 0;
+    private int structureTimer             = 0;
+    private int cleanupTimer               = 0;
 
     private final List<BlockPos> platformPositions = new ArrayList<>();
     private int platformIndex = 0;
@@ -312,18 +244,11 @@ public class PortalTracker extends Module {
     private final Map<BlockPos, WaypointEntry> xaeroTrackedPortals = new ConcurrentHashMap<>();
     private int xaerosPlusWatchCount = 0;
 
-    // ───────────────────────────────────────────────────────────────
-    // Constructor
-    // ───────────────────────────────────────────────────────────────
-
     public PortalTracker() {
         super(HuntingUtilities.CATEGORY, "portal-tracker", "Automatically tracks and highlights portals.");
     }
 
-    // ───────────────────────────────────────────────────────────────
-    // Lifecycle
-    // ───────────────────────────────────────────────────────────────
-
+    // ── Lifecycle ──────────────────────────────────────────────────
     @Override
     public void onActivate() {
         clearAllState();
@@ -338,38 +263,24 @@ public class PortalTracker extends Module {
     public void onDeactivate() {
         if (manuallyActivated && mc.player != null) {
             long elapsed = System.currentTimeMillis() - sessionStartTime;
-            if (elapsed > 0) {
+            if (elapsed > 0)
                 sendMessage("§7Session ended — §f" + portalStructures.size()
                     + " §7portals discovered §8| §a" + totalCreated + " §7created");
-            }
         }
         clearAllState();
     }
 
     private void clearAllState() {
-        portals.clear();
-        createdPortals.clear();
-        portalStructures.clear();
-        notifiedStructures.clear();
-        messageCooldowns.clear();
-        scannedChunks.clear();
-        dirtyChunks.clear();
-        xaeroTrackedPortals.clear();
-        XaeroPortalBridge.clearWatched();
-        portalsDirty      = false;
-        manuallyActivated = false;
-        sessionStartTime  = 0;
-        structureTimer    = 0;
-        cleanupTimer      = 0;
-        platformPositions.clear();
-        platformIndex     = 0;
-        platformTimer     = 0;
+        portals.clear(); createdPortals.clear(); portalStructures.clear();
+        notifiedStructures.clear(); messageCooldowns.clear();
+        scannedChunks.clear(); dirtyChunks.clear();
+        xaeroTrackedPortals.clear(); XaeroPortalBridge.clearWatched();
+        portalsDirty = false; manuallyActivated = false; sessionStartTime = 0;
+        structureTimer = 0; cleanupTimer = 0;
+        platformPositions.clear(); platformIndex = 0; platformTimer = 0;
     }
 
-    // ───────────────────────────────────────────────────────────────
-    // Tick
-    // ───────────────────────────────────────────────────────────────
-
+    // ── Tick ───────────────────────────────────────────────────────
     @EventHandler
     private void onTick(TickEvent.Post event) {
         if (mc.player == null || mc.world == null) return;
@@ -391,16 +302,12 @@ public class PortalTracker extends Module {
         if (xaeroIntegration.get()) XaeroPortalBridge.tick();
 
         if (portalsDirty && ++structureTimer >= STRUCTURE_REBUILD_INTERVAL_TICKS) {
-            structureTimer = 0;
-            portalsDirty   = false;
-            groupPortals();
+            structureTimer = 0; portalsDirty = false; groupPortals();
         }
 
         if (++cleanupTimer >= CLEANUP_INTERVAL_TICKS) {
             cleanupTimer = 0;
-            cleanupDistantPortals();
-            cleanupTrackedData();
-            cleanupDistantChunks(centerChunkX, centerChunkZ);
+            cleanupDistantPortals(); cleanupTrackedData(); cleanupDistantChunks(centerChunkX, centerChunkZ);
         }
 
         if (!manuallyActivated) manuallyActivated = true;
@@ -417,14 +324,9 @@ public class PortalTracker extends Module {
             lastDimension           = currDim;
             entryPortalPos          = mc.player.getBlockPos();
 
-            portals.clear();
-            createdPortals.clear();
-            portalStructures.clear();
-            notifiedStructures.clear();
-            scannedChunks.clear();
-            dirtyChunks.clear();
-            xaeroTrackedPortals.clear();
-            XaeroPortalBridge.clearWatched();
+            portals.clear(); createdPortals.clear(); portalStructures.clear();
+            notifiedStructures.clear(); scannedChunks.clear(); dirtyChunks.clear();
+            xaeroTrackedPortals.clear(); XaeroPortalBridge.clearWatched();
             portalsDirty = false;
 
             loadXaeroWaypointsForDimension(currDim);
@@ -438,13 +340,9 @@ public class PortalTracker extends Module {
         } catch (Exception ignored) { return true; }
     }
 
-    // ───────────────────────────────────────────────────────────────
-    // Xaero Waypoint Integration
-    // ───────────────────────────────────────────────────────────────
-
+    // ── Xaero Integration ──────────────────────────────────────────
     private void loadXaeroWaypointsForDimension(String dimensionId) {
         if (!xaeroIntegration.get()) return;
-
         List<WaypointEntry> entries = XaerosWaypointHelper.loadPortalWaypoints(dimensionId);
         for (WaypointEntry entry : entries) {
             if (entry.name.contains(XaerosWaypointHelper.REMOVED_TAG)) continue;
@@ -452,9 +350,8 @@ public class PortalTracker extends Module {
             xaeroTrackedPortals.put(pos, entry);
             XaeroPortalBridge.watchPosition(pos, (watchedPos, stillExists) -> {
                 if (!isActive()) return;
-                if (stillExists) {
-                    xaeroTrackedPortals.remove(watchedPos);
-                } else {
+                if (stillExists) { xaeroTrackedPortals.remove(watchedPos); }
+                else {
                     if (!portals.containsKey(watchedPos)) {
                         WaypointEntry e = xaeroTrackedPortals.remove(watchedPos);
                         if (e != null) confirmPortalRemoved(watchedPos, e, dimensionId);
@@ -462,13 +359,10 @@ public class PortalTracker extends Module {
                 }
             });
         }
-
-        if (!xaeroTrackedPortals.isEmpty()) {
+        if (!xaeroTrackedPortals.isEmpty())
             sendMessage("§7Xaero: watching §f" + xaeroTrackedPortals.size()
                 + " §7saved portal" + (xaeroTrackedPortals.size() == 1 ? "" : "s")
                 + " for removal" + (XaeroPortalBridge.XAERO_PRESENT ? "" : " §8(Xaero not detected)"));
-        }
-
         loadXaerosPlusPortals(dimensionId);
     }
 
@@ -476,26 +370,20 @@ public class PortalTracker extends Module {
         if (!xaeroIntegration.get()) return;
         if (!XaerosPlusPortalDB.isAvailable()) return;
         if (!dimensionId.equals("minecraft:the_nether") && !dimensionId.equals("minecraft:overworld")) return;
-
         List<XaerosPlusPortalDB.PortalEntry> entries = XaerosPlusPortalDB.loadForDimension(dimensionId, 50000);
         xaerosPlusWatchCount = 0;
         for (XaerosPlusPortalDB.PortalEntry entry : entries) {
             XaeroPortalBridge.watchColumn(entry.x, entry.z, (foundPos, present) -> {
                 if (!isActive()) return;
-                if (present) {
-                    if (!portals.containsKey(foundPos)) { portals.put(foundPos, PortalType.NETHER); portalsDirty = true; }
-                } else {
-                    sendMessage("§c\u26A0 XaeroPlus portal removed §8[" + getDimensionName(dimensionId) + "]");
-                }
+                if (present) { if (!portals.containsKey(foundPos)) { portals.put(foundPos, PortalType.NETHER); portalsDirty = true; } }
+                else sendMessage("§c\u26A0 XaeroPlus portal removed §8[" + getDimensionName(dimensionId) + "]");
             });
             xaerosPlusWatchCount++;
         }
-
-        if (xaerosPlusWatchCount > 0) {
+        if (xaerosPlusWatchCount > 0)
             sendMessage("§7XaeroPlus: watching §f" + xaerosPlusWatchCount
                 + " §7portal" + (xaerosPlusWatchCount == 1 ? "" : "s")
                 + " from database §8[" + getDimensionName(dimensionId) + "]");
-        }
     }
 
     private void confirmPortalRemoved(BlockPos pos, WaypointEntry entry, String dimensionId) {
@@ -506,21 +394,16 @@ public class PortalTracker extends Module {
         else          sendMessage("§c\u26A0 Portal removed §8[" + getDimensionName(dimensionId) + "]");
     }
 
-    // ───────────────────────────────────────────────────────────────
-    // Scanning
-    // ───────────────────────────────────────────────────────────────
-
+    // ── Scanning ───────────────────────────────────────────────────
     private void scanBlockEntities(int centerChunkX, int centerChunkZ) {
-        int chunkRange   = range.get();
-        int chunkRangeSq = chunkRange * chunkRange;
-        int maxDistSq    = (chunkRange * 16) * (chunkRange * 16);
-        String   dimId     = mc.world.getRegistryKey().getValue().toString();
+        int chunkRange = range.get(), chunkRangeSq = chunkRange * chunkRange;
+        int maxDistSq  = (chunkRange * 16) * (chunkRange * 16);
+        String dimId = mc.world.getRegistryKey().getValue().toString();
         BlockPos playerPos = mc.player.getBlockPos();
-
         for (int cx = centerChunkX - chunkRange; cx <= centerChunkX + chunkRange; cx++) {
             for (int cz = centerChunkZ - chunkRange; cz <= centerChunkZ + chunkRange; cz++) {
                 int dx = cx - centerChunkX, dz = cz - centerChunkZ;
-                if (dx * dx + dz * dz > chunkRangeSq) continue;
+                if (dx*dx + dz*dz > chunkRangeSq) continue;
                 ChunkPos cp = new ChunkPos(cx, cz);
                 if (scannedChunks.contains(cp)) continue;
                 WorldChunk chunk = mc.world.getChunkManager().getChunk(cx, cz, ChunkStatus.FULL, false);
@@ -530,8 +413,7 @@ public class PortalTracker extends Module {
                     if (pos.getSquaredDistance(playerPos) > maxDistSq) continue;
                     PortalType type = classifyBlockEntity(be);
                     if (type != null && !portals.containsKey(pos)) {
-                        portals.put(pos, type);
-                        portalsDirty = true;
+                        portals.put(pos, type); portalsDirty = true;
                         processNewDiscovery(pos, type, dimId);
                     }
                 }
@@ -546,14 +428,14 @@ public class PortalTracker extends Module {
             for (int x = -d; x <= d; x++) {
                 for (int side = 0; side < 2; side++) {
                     int z = (side == 0) ? -d : d;
-                    if (processChunk(centerChunkX + x, centerChunkZ + z, rSq, centerChunkX, centerChunkZ))
+                    if (processChunk(centerChunkX+x, centerChunkZ+z, rSq, centerChunkX, centerChunkZ))
                         if (++scanned >= CHUNK_SCAN_LIMIT_PER_TICK) break outer;
                 }
             }
-            for (int z = -d + 1; z < d; z++) {
+            for (int z = -d+1; z < d; z++) {
                 for (int side = 0; side < 2; side++) {
                     int x = (side == 0) ? -d : d;
-                    if (processChunk(centerChunkX + x, centerChunkZ + z, rSq, centerChunkX, centerChunkZ))
+                    if (processChunk(centerChunkX+x, centerChunkZ+z, rSq, centerChunkX, centerChunkZ))
                         if (++scanned >= CHUNK_SCAN_LIMIT_PER_TICK) break outer;
                 }
             }
@@ -562,7 +444,7 @@ public class PortalTracker extends Module {
 
     private boolean processChunk(int cx, int cz, int rSq, int centerChunkX, int centerChunkZ) {
         int dx = cx - centerChunkX, dz = cz - centerChunkZ;
-        if (dx * dx + dz * dz > rSq) return false;
+        if (dx*dx + dz*dz > rSq) return false;
         ChunkPos cp = new ChunkPos(cx, cz);
         if (scannedChunks.contains(cp)) return false;
         if (!mc.world.getChunkManager().isChunkLoaded(cx, cz)) return false;
@@ -572,32 +454,23 @@ public class PortalTracker extends Module {
     }
 
     private void scanChunk(WorldChunk chunk) {
-        String         dimId    = mc.world.getRegistryKey().getValue().toString();
+        String dimId = mc.world.getRegistryKey().getValue().toString();
         ChunkSection[] sections = chunk.getSectionArray();
         for (int i = 0; i < sections.length; i++) {
             ChunkSection section = sections[i];
             if (section == null || section.isEmpty()) continue;
             int sectionMinY = (chunk.getBottomSectionCoord() + i) * 16;
-            for (int x = 0; x < 16; x++) {
-                for (int y = 0; y < 16; y++) {
-                    for (int z = 0; z < 16; z++) {
-                        PortalType type = classifyBlock(section.getBlockState(x, y, z).getBlock());
-                        if (type == null) continue;
-                        BlockPos pos = new BlockPos((chunk.getPos().x << 4) + x, sectionMinY + y, (chunk.getPos().z << 4) + z);
-                        if (!portals.containsKey(pos)) {
-                            portals.put(pos, type);
-                            portalsDirty = true;
-                            processNewDiscovery(pos, type, dimId);
-                        }
-                    }
+            for (int x = 0; x < 16; x++) for (int y = 0; y < 16; y++) for (int z = 0; z < 16; z++) {
+                PortalType type = classifyBlock(section.getBlockState(x, y, z).getBlock());
+                if (type == null) continue;
+                BlockPos pos = new BlockPos((chunk.getPos().x << 4)+x, sectionMinY+y, (chunk.getPos().z << 4)+z);
+                if (!portals.containsKey(pos)) {
+                    portals.put(pos, type); portalsDirty = true;
+                    processNewDiscovery(pos, type, dimId);
                 }
             }
         }
     }
-
-    // ───────────────────────────────────────────────────────────────
-    // Classification
-    // ───────────────────────────────────────────────────────────────
 
     private PortalType classifyBlock(Block block) {
         if (scanNetherPortals.get() && block == Blocks.NETHER_PORTAL) return PortalType.NETHER;
@@ -614,10 +487,7 @@ public class PortalTracker extends Module {
         return block == Blocks.NETHER_PORTAL || block == Blocks.END_PORTAL || block == Blocks.END_GATEWAY;
     }
 
-    // ───────────────────────────────────────────────────────────────
-    // Discovery
-    // ───────────────────────────────────────────────────────────────
-
+    // ── Discovery ──────────────────────────────────────────────────
     private void processNewDiscovery(BlockPos pos, PortalType type, String dimensionId) {
         if (autoMarkRange.get() <= 0 || mc.player == null) return;
         if (type != PortalType.NETHER) return;
@@ -625,17 +495,12 @@ public class PortalTracker extends Module {
         if (pos.getSquaredDistance(mc.player.getPos()) > (double) autoMarkRange.get() * autoMarkRange.get()) return;
         if (exclusionTimer > 0 && entryPortalPos != null
                 && pos.getSquaredDistance(entryPortalPos) <= ENTRY_EXCLUSION_RADIUS_SQ) return;
-
         boolean added = createdPortals.add(pos);
-        if (added) {
-            portalsDirty = true;
-            if (xaeroIntegration.get()) tryWriteXaeroWaypoint(pos, type, dimensionId);
-        }
+        if (added) { portalsDirty = true; if (xaeroIntegration.get()) tryWriteXaeroWaypoint(pos, type, dimensionId); }
     }
 
     private void tryWriteXaeroWaypoint(BlockPos pos, PortalType type, String dimensionId) {
-        String name = XaerosWaypointHelper.PORTAL_TAG + " "
-            + type.getDisplayName()
+        String name = XaerosWaypointHelper.PORTAL_TAG + " " + type.getDisplayName()
             + " (" + pos.getX() + ", " + pos.getY() + ", " + pos.getZ() + ")";
         int color = switch (type) {
             case NETHER      -> XaerosWaypointHelper.COLOR_PURPLE;
@@ -647,33 +512,24 @@ public class PortalTracker extends Module {
             WaypointEntry synth = new WaypointEntry(
                 "waypoint:" + name + ":PT:" + pos.getX() + ":" + pos.getY() + ":" + pos.getZ()
                     + ":" + color + ":false:0:gui.xaero_default:0.0:false",
-                name, pos.getX(), pos.getY(), pos.getZ(), color
-            );
+                name, pos.getX(), pos.getY(), pos.getZ(), color);
             xaeroTrackedPortals.put(pos, synth);
         }
     }
 
-    // ───────────────────────────────────────────────────────────────
-    // Grouping
-    // ───────────────────────────────────────────────────────────────
-
+    // ── Grouping ───────────────────────────────────────────────────
     private void groupPortals() {
         List<PortalStructure> newStructures = new ArrayList<>();
         Set<BlockPos>         visited       = new HashSet<>();
-
         for (BlockPos startPos : portals.keySet()) {
             if (visited.contains(startPos)) continue;
             PortalType type = portals.get(startPos);
             if (type == null) continue;
-
             Set<BlockPos>   component    = new HashSet<>();
             Queue<BlockPos> queue        = new LinkedList<>();
             Box             structureBox = new Box(startPos);
             boolean         isCreated    = false;
-
-            queue.add(startPos);
-            visited.add(startPos);
-
+            queue.add(startPos); visited.add(startPos);
             while (!queue.isEmpty()) {
                 BlockPos current = queue.poll();
                 component.add(current);
@@ -686,10 +542,8 @@ public class PortalTracker extends Module {
                     }
                 }
             }
-
             if (component.isEmpty()) continue;
             newStructures.add(new PortalStructure(structureBox.expand(0.02), component, isCreated, type));
-
             if (isCreated && showCreatedCount.get()) {
                 String id = String.format("%s_%.1f_%.1f_%.1f",
                     type.name(), structureBox.minX, structureBox.minY, structureBox.minZ);
@@ -699,22 +553,18 @@ public class PortalTracker extends Module {
                 }
             }
         }
-
         portalStructures.clear();
         portalStructures.addAll(newStructures);
     }
 
-    // ───────────────────────────────────────────────────────────────
-    // Cleanup
-    // ───────────────────────────────────────────────────────────────
-
+    // ── Cleanup ────────────────────────────────────────────────────
     private void cleanupDistantPortals() {
         if (mc.player == null) return;
         BlockPos playerPos  = mc.player.getBlockPos();
         int      renderDist = range.get() * 16;
         double   distSq     = (double)(renderDist + 64) * (renderDist + 64);
-        boolean removed = portals.entrySet().removeIf(e -> playerPos.getSquaredDistance(e.getKey()) > distSq);
-        if (removed) portalsDirty = true;
+        if (portals.entrySet().removeIf(e -> playerPos.getSquaredDistance(e.getKey()) > distSq))
+            portalsDirty = true;
     }
 
     private void cleanupTrackedData() {
@@ -728,45 +578,31 @@ public class PortalTracker extends Module {
         int r = range.get(), rSq = r * r;
         scannedChunks.removeIf(cp -> {
             int dx = cp.x - centerChunkX, dz = cp.z - centerChunkZ;
-            return dx * dx + dz * dz > rSq;
+            return dx*dx + dz*dz > rSq;
         });
     }
 
-    // ───────────────────────────────────────────────────────────────
-    // Block Update Event
-    // ───────────────────────────────────────────────────────────────
-
+    // ── Block Update ───────────────────────────────────────────────
     @EventHandler
     private void onBlockUpdate(BlockUpdateEvent event) {
         if (mc.player == null || mc.world == null) return;
         double threshold = range.get() * 16.0 + 32;
         if (event.pos.getSquaredDistance(mc.player.getPos()) > threshold * threshold) return;
-
         boolean wasPortal = isTrackedPortalBlock(event.oldState.getBlock());
         boolean isPortal  = isTrackedPortalBlock(event.newState.getBlock());
         if (!wasPortal && !isPortal) return;
-
         ChunkPos cp = new ChunkPos(event.pos);
-        dirtyChunks.add(cp);
-        scannedChunks.remove(cp);
-
+        dirtyChunks.add(cp); scannedChunks.remove(cp);
         if (!isPortal) {
-            portals.remove(event.pos);
-            portalsDirty = true;
+            portals.remove(event.pos); portalsDirty = true;
             if (xaeroIntegration.get()) {
                 WaypointEntry entry = xaeroTrackedPortals.remove(event.pos);
-                if (entry != null) {
-                    XaeroPortalBridge.unwatch(event.pos);
-                    confirmPortalRemoved(event.pos, entry, lastDimension);
-                }
+                if (entry != null) { XaeroPortalBridge.unwatch(event.pos); confirmPortalRemoved(event.pos, entry, lastDimension); }
             }
         }
     }
 
-    // ───────────────────────────────────────────────────────────────
-    // Rendering
-    // ───────────────────────────────────────────────────────────────
-
+    // ── Render ─────────────────────────────────────────────────────
     @EventHandler
     private void onRender(Render3DEvent event) {
         if (mc.player == null || mc.world == null) return;
@@ -786,36 +622,70 @@ public class PortalTracker extends Module {
 
         for (PortalStructure structure : portalStructures) {
             if (onlyShowCreated.get() && !structure.isCreated) continue;
-
             SettingColor color = getSettingColor(structure.type);
             if (color == null) continue;
 
-            Box renderBox = structure.boundingBox;
-
-            if (highlightFrame.get() && structure.type == PortalType.NETHER) {
-                renderNetherFrame(event, structure, color);
+            // Every path renders the unified bounding box — never individual per-block boxes.
+            if (highlightStyle.get() == HighlightStyle.SPECTRAL) {
+                renderSpectral(event, structure, color);
             } else {
-                renderGlowLayers(event, renderBox, color);
-                event.renderer.box(renderBox, withAlpha(color, 0), color, shapeMode.get(), 0);
+                if (highlightFrame.get() && structure.type == PortalType.NETHER) {
+                    renderNetherFrame(event, structure, color);
+                } else {
+                    renderGlowLayers(event, structure.boundingBox, color);
+                    event.renderer.box(structure.boundingBox, withAlpha(color, 0), color, shapeMode.get(), 0);
+                }
             }
 
-            if (showBeam.get() && (!onlyNearestBeam.get() || structure == nearest)) {
-                renderBeam(event, renderBox, color);
-            }
+            if (showBeam.get() && (!onlyNearestBeam.get() || structure == nearest))
+                renderBeam(event, structure.boundingBox, color);
         }
     }
 
-    private void renderNetherFrame(Render3DEvent event, PortalStructure structure, SettingColor color) {
-        Set<BlockPos> frameBlocks = new HashSet<>();
-        for (BlockPos portalPos : structure.portalBlocks) {
-            for (Direction dir : Direction.values()) {
-                BlockPos neighborPos = portalPos.offset(dir);
-                if (structure.portalBlocks.contains(neighborPos)) continue;
-                if (mc.world.getBlockState(neighborPos).isOf(Blocks.OBSIDIAN)) frameBlocks.add(neighborPos);
-            }
+    // ── Spectral ───────────────────────────────────────────────────
+
+    /**
+     * Spectral-arrow style highlight: one crisp outline box over the entire unified portal
+     * bounding box, with an optional faint fill and vanilla-style alpha pulse.
+     *
+     * The obsidian frame (when enabled) is also rendered as a single merged outline box —
+     * not as a loop of per-block outlines.
+     */
+    private void renderSpectral(Render3DEvent event, PortalStructure structure, SettingColor color) {
+        double expand    = spectralExpand.get();
+        Box    renderBox = structure.boundingBox.expand(expand);
+
+        int lineAlpha = spectralLineAlpha.get();
+        int fillAlpha = spectralFillAlpha.get();
+        if (spectralPulse.get()) {
+            // Pulse 60-100 % of configured alpha over ~1.5 s, mimicking vanilla's glowing shader.
+            double pulse = 0.6 + 0.4 * (0.5 + 0.5 * Math.sin(System.currentTimeMillis() / 750.0 * Math.PI));
+            lineAlpha = (int)(lineAlpha * pulse);
+            fillAlpha = (int)(fillAlpha * pulse);
         }
-        for (BlockPos framePos : frameBlocks) {
-            Box frameBox = new Box(framePos);
+
+        if (fillAlpha > 0)
+            event.renderer.box(renderBox, withAlpha(color, fillAlpha), withAlpha(color, 0), ShapeMode.Sides, 0);
+
+        event.renderer.box(renderBox, withAlpha(color, 0), withAlpha(color, lineAlpha), ShapeMode.Lines, 0);
+
+        if (highlightFrame.get() && structure.type == PortalType.NETHER) {
+            Box frameBox = buildFrameBox(structure);
+            if (frameBox != null)
+                event.renderer.box(frameBox.expand(expand), withAlpha(color, 0),
+                    withAlpha(color, lineAlpha / 2), ShapeMode.Lines, 0);
+        }
+    }
+
+    // ── Glow / Frame Helpers ───────────────────────────────────────
+
+    /**
+     * Glow-mode frame: computes one unified bounding box around all bordering obsidian
+     * and renders it as a single call — no per-block iteration at render time.
+     */
+    private void renderNetherFrame(Render3DEvent event, PortalStructure structure, SettingColor color) {
+        Box frameBox = buildFrameBox(structure);
+        if (frameBox != null) {
             renderGlowLayers(event, frameBox, color);
             event.renderer.box(frameBox, withAlpha(color, 0), color, shapeMode.get(), 0);
         }
@@ -823,46 +693,45 @@ public class PortalTracker extends Module {
         event.renderer.box(structure.boundingBox, withAlpha(color, 0), color, shapeMode.get(), 0);
     }
 
+    /**
+     * Builds one bounding box that wraps every obsidian block directly adjacent to the
+     * portal interior. Returns null if no obsidian is found in the loaded world.
+     */
+    private Box buildFrameBox(PortalStructure structure) {
+        Box frameBox = null;
+        for (BlockPos portalPos : structure.portalBlocks) {
+            for (Direction dir : Direction.values()) {
+                BlockPos neighborPos = portalPos.offset(dir);
+                if (structure.portalBlocks.contains(neighborPos)) continue;
+                if (mc.world.getBlockState(neighborPos).isOf(Blocks.OBSIDIAN)) {
+                    Box nb = new Box(neighborPos);
+                    frameBox = (frameBox == null) ? nb : frameBox.union(nb);
+                }
+            }
+        }
+        return frameBox != null ? frameBox.expand(0.02) : null;
+    }
+
     private void renderBeam(Render3DEvent event, Box anchorBox, SettingColor color) {
         double beamSize = beamWidth.get() / 100.0;
         double centerX  = (anchorBox.minX + anchorBox.maxX) / 2.0;
         double centerZ  = (anchorBox.minZ + anchorBox.maxZ) / 2.0;
-        int    worldBot = mc.world.getBottomY();
-        int    worldTop = worldBot + mc.world.getHeight();
-
-        Box beamBox = new Box(
-            centerX - beamSize, worldBot, centerZ - beamSize,
-            centerX + beamSize, worldTop, centerZ + beamSize
-        );
+        int worldBot = mc.world.getBottomY(), worldTop = worldBot + mc.world.getHeight();
+        Box beamBox = new Box(centerX-beamSize, worldBot, centerZ-beamSize, centerX+beamSize, worldTop, centerZ+beamSize);
         renderGlowLayers(event, beamBox, color);
         event.renderer.box(beamBox, withAlpha(color, 60), color, ShapeMode.Both, 0);
     }
 
-    // ───────────────────────────────────────────────────────────────
-    // Bloom Rendering
-    // ───────────────────────────────────────────────────────────────
-
     private void renderGlowLayers(Render3DEvent event, Box box, SettingColor color) {
-        int    layers    = glowLayers.get();
-        double spread    = glowSpread.get();
-        int    baseAlpha = glowBaseAlpha.get();
-
+        int layers = glowLayers.get(); double spread = glowSpread.get(); int baseAlpha = glowBaseAlpha.get();
         for (int i = layers; i >= 1; i--) {
-            double expansion = spread * i;
-            int    layerAlpha = Math.max(4, (int) (baseAlpha * (1.0 - (double)(i - 1) / layers)));
-            event.renderer.box(
-                box.expand(expansion),
-                withAlpha(color, layerAlpha),
-                withAlpha(color, 0),
-                ShapeMode.Sides, 0
-            );
+            int layerAlpha = Math.max(4, (int)(baseAlpha * (1.0 - (double)(i-1) / layers)));
+            event.renderer.box(box.expand(spread * i), withAlpha(color, layerAlpha),
+                withAlpha(color, 0), ShapeMode.Sides, 0);
         }
     }
 
-    // ───────────────────────────────────────────────────────────────
-    // Color Helpers
-    // ───────────────────────────────────────────────────────────────
-
+    // ── Color Helpers ──────────────────────────────────────────────
     private SettingColor withAlpha(SettingColor color, int alpha) {
         return new SettingColor(color.r, color.g, color.b, Math.min(255, Math.max(0, alpha)));
     }
@@ -875,7 +744,7 @@ public class PortalTracker extends Module {
                 case END_GATEWAY -> 0.667f;
             };
             float hue = (baseHue + (System.currentTimeMillis() % 3000) / 3000f) % 1f;
-            int   rgb = java.awt.Color.HSBtoRGB(hue, 0.8f, 1.0f);
+            int rgb = java.awt.Color.HSBtoRGB(hue, 0.8f, 1.0f);
             return new SettingColor((rgb >> 16) & 0xFF, (rgb >> 8) & 0xFF, rgb & 0xFF, 255);
         }
         return switch (type) {
@@ -885,48 +754,33 @@ public class PortalTracker extends Module {
         };
     }
 
-    // ───────────────────────────────────────────────────────────────
-    // Setting Handlers
-    // ───────────────────────────────────────────────────────────────
-
+    // ── Setting Handlers ───────────────────────────────────────────
     private void handleReset(boolean value) {
         if (!value) return;
-        int old = totalCreated;
-        totalCreated = 0;
-        createdPortals.clear();
-        notifiedStructures.clear();
-        xaeroTrackedPortals.clear();
-        XaeroPortalBridge.clearWatched();
-        sessionStartTime = System.currentTimeMillis();
-        portalsDirty     = true;
+        int old = totalCreated; totalCreated = 0;
+        createdPortals.clear(); notifiedStructures.clear();
+        xaeroTrackedPortals.clear(); XaeroPortalBridge.clearWatched();
+        sessionStartTime = System.currentTimeMillis(); portalsDirty = true;
         info("Session cleared. Reset " + old + " created portal" + (old == 1 ? "" : "s") + ".");
         resetButton.set(false);
     }
 
-    // ───────────────────────────────────────────────────────────────
-    // Public API
-    // ───────────────────────────────────────────────────────────────
-
+    // ── Public API ─────────────────────────────────────────────────
     public boolean isPortalGuiEnabled() { return isActive(); }
     public int getTotalPortals()         { return portalStructures.size(); }
     public int getTotalCreated()         { return totalCreated; }
 
     public void markChunkDirty(ChunkPos chunkPos) {
         if (chunkPos == null) return;
-        dirtyChunks.add(chunkPos);
-        scannedChunks.remove(chunkPos);
+        dirtyChunks.add(chunkPos); scannedChunks.remove(chunkPos);
     }
 
-    // ───────────────────────────────────────────────────────────────
-    // Utilities
-    // ───────────────────────────────────────────────────────────────
-
+    // ── Utilities ──────────────────────────────────────────────────
     private void sendMessage(String message) {
-        long now  = System.currentTimeMillis();
+        long now = System.currentTimeMillis();
         Long last = messageCooldowns.get(message);
         if (last == null || now - last > MESSAGE_COOLDOWN_MS) {
-            super.info(message);
-            messageCooldowns.put(message, now);
+            super.info(message); messageCooldowns.put(message, now);
         }
     }
 
@@ -939,15 +793,9 @@ public class PortalTracker extends Module {
         };
     }
 
-    // ───────────────────────────────────────────────────────────────
-    // Inner Types
-    // ───────────────────────────────────────────────────────────────
-
+    // ── Inner Types ────────────────────────────────────────────────
     private enum PortalType {
-        NETHER("Nether Portal"),
-        END_PORTAL("End Portal"),
-        END_GATEWAY("End Gateway");
-
+        NETHER("Nether Portal"), END_PORTAL("End Portal"), END_GATEWAY("End Gateway");
         private final String displayName;
         PortalType(String displayName) { this.displayName = displayName; }
         public String getDisplayName()  { return displayName; }
@@ -958,40 +806,24 @@ public class PortalTracker extends Module {
         final Set<BlockPos> portalBlocks;
         final boolean       isCreated;
         final PortalType    type;
-
         PortalStructure(Box bb, Set<BlockPos> pb, boolean ic, PortalType t) {
-            this.boundingBox  = bb;
-            this.portalBlocks = pb;
-            this.isCreated    = ic;
-            this.type         = t;
+            this.boundingBox = bb; this.portalBlocks = pb; this.isCreated = ic; this.type = t;
         }
     }
 
-    // ───────────────────────────────────────────────────────────────
-    // Platform 9¾ Logic
-    // ───────────────────────────────────────────────────────────────
-
+    // ── Platform 9¾ ───────────────────────────────────────────────
     private void startPlatformBuild() {
         if (mc.player == null || mc.currentScreen != null) return;
-        platformPositions.clear();
-        platformIndex = 0;
-        platformTimer = 0;
-
+        platformPositions.clear(); platformIndex = 0; platformTimer = 0;
         BlockPos center;
-        if (mc.crosshairTarget instanceof BlockHitResult bhr && bhr.getType() == HitResult.Type.BLOCK) {
+        if (mc.crosshairTarget instanceof BlockHitResult bhr && bhr.getType() == HitResult.Type.BLOCK)
             center = bhr.getBlockPos();
-        } else {
-            center = mc.player.getBlockPos().down();
-        }
-
+        else center = mc.player.getBlockPos().down();
         int r = 2;
-        for (int x = -r; x <= r; x++) {
-            for (int z = -r; z <= r; z++) {
-                if (x == 0 && z == 0) continue;
-                platformPositions.add(center.add(x, 0, z));
-            }
+        for (int x = -r; x <= r; x++) for (int z = -r; z <= r; z++) {
+            if (x == 0 && z == 0) continue;
+            platformPositions.add(center.add(x, 0, z));
         }
-
         BlockPos finalCenter = center;
         platformPositions.sort(java.util.Comparator.comparingDouble(p -> p.getSquaredDistance(finalCenter)));
         info("Building Platform 9\u00BE...");
@@ -1001,14 +833,12 @@ public class PortalTracker extends Module {
         if (platformPositions.isEmpty()) return;
         if (platformIndex >= platformPositions.size()) { platformPositions.clear(); info("Platform 9\u00BE complete."); return; }
         if (platformTimer > 0) { platformTimer--; return; }
-
         if (!mc.player.getMainHandStack().isOf(Items.OBSIDIAN)) {
             FindItemResult obsidian = InvUtils.find(Items.OBSIDIAN);
             if (!obsidian.found()) { error("No obsidian found for platform."); platformPositions.clear(); return; }
             if (obsidian.isHotbar()) InvUtils.swap(obsidian.slot(), false);
             else InvUtils.move().from(obsidian.slot()).toHotbar(mc.player.getInventory().selectedSlot);
         }
-
         BlockPos target = platformPositions.get(platformIndex);
         if (!mc.world.getBlockState(target).isReplaceable()) { platformIndex++; platformTimer = 0; return; }
         if (placeBlock(target)) { platformIndex++; platformTimer = platformDelay.get(); }

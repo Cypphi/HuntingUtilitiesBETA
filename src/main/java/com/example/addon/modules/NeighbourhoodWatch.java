@@ -48,7 +48,6 @@ public class NeighbourhoodWatch extends Module {
     private final SettingGroup sgTracking   = settings.createGroup("Player Tracking");
     private final SettingGroup sgFriends    = settings.createGroup("Friends & Enemies");
     private final SettingGroup sgTabList    = settings.createGroup("Tab List Monitoring");
-    private final SettingGroup sgGlow       = settings.createGroup("Glow");
 
     // ═══════════════════════════════════════════════════════════════════════════
     // Settings — Safety
@@ -183,6 +182,37 @@ public class NeighbourhoodWatch extends Module {
         .build()
     );
 
+    // ── Highlight rendering ───────────────────────────────────────────────────
+
+    private final Setting<Boolean> glowEnabled = sgTracking.add(new BoolSetting.Builder()
+        .name("glow")
+        .description("Render a bloom halo around each tracked player in addition to the outline.")
+        .defaultValue(true)
+        .visible(trackPlayers::get)
+        .build()
+    );
+
+    private final Setting<Integer> glowLayers = sgTracking.add(new IntSetting.Builder()
+        .name("glow-layers").description("Number of bloom layers rendered around each player.")
+        .defaultValue(4).min(1).sliderMax(8)
+        .visible(() -> trackPlayers.get() && glowEnabled.get())
+        .build()
+    );
+
+    private final Setting<Double> glowSpread = sgTracking.add(new DoubleSetting.Builder()
+        .name("glow-spread").description("How far each bloom layer expands outward (in blocks).")
+        .defaultValue(0.05).min(0.01).sliderMax(0.2)
+        .visible(() -> trackPlayers.get() && glowEnabled.get())
+        .build()
+    );
+
+    private final Setting<Integer> glowBaseAlpha = sgTracking.add(new IntSetting.Builder()
+        .name("glow-base-alpha").description("Alpha of the innermost glow layer (0-255).")
+        .defaultValue(60).min(10).sliderMax(150)
+        .visible(() -> trackPlayers.get() && glowEnabled.get())
+        .build()
+    );
+
     // ═══════════════════════════════════════════════════════════════════════════
     // Settings — Friends & Enemies
     // ═══════════════════════════════════════════════════════════════════════════
@@ -270,38 +300,6 @@ public class NeighbourhoodWatch extends Module {
     );
 
     // ═══════════════════════════════════════════════════════════════════════════
-    // Settings — Glow
-    // ═══════════════════════════════════════════════════════════════════════════
-
-    private final Setting<Boolean> glowEnabled = sgGlow.add(new BoolSetting.Builder()
-        .name("glow")
-        .description("Render a bloom halo around each tracked player in addition to the outline.")
-        .defaultValue(true)
-        .build()
-    );
-
-    private final Setting<Integer> glowLayers = sgGlow.add(new IntSetting.Builder()
-        .name("glow-layers").description("Number of bloom layers rendered around each player.")
-        .defaultValue(4).min(1).sliderMax(8)
-        .visible(glowEnabled::get)
-        .build()
-    );
-
-    private final Setting<Double> glowSpread = sgGlow.add(new DoubleSetting.Builder()
-        .name("glow-spread").description("How far each bloom layer expands outward (in blocks).")
-        .defaultValue(0.05).min(0.01).sliderMax(0.2)
-        .visible(glowEnabled::get)
-        .build()
-    );
-
-    private final Setting<Integer> glowBaseAlpha = sgGlow.add(new IntSetting.Builder()
-        .name("glow-base-alpha").description("Alpha of the innermost glow layer (0-255).")
-        .defaultValue(60).min(10).sliderMax(150)
-        .visible(glowEnabled::get)
-        .build()
-    );
-
-    // ═══════════════════════════════════════════════════════════════════════════
     // State
     // ═══════════════════════════════════════════════════════════════════════════
 
@@ -380,7 +378,6 @@ public class NeighbourhoodWatch extends Module {
      */
     private void tickOutlineShader() {
         if (!trackPlayers.get()) {
-            // If tracking was just turned off, clear any lingering outlines.
             clearAllOutlines();
             return;
         }
@@ -409,19 +406,11 @@ public class NeighbourhoodWatch extends Module {
                 case Other  -> otherColor.get();
             };
 
-            // Enable vanilla glowing — Meteor's OutlineEntityFeatureRenderer
-            // reads isGlowing() to decide whether to draw the silhouette outline.
             player.setGlowing(true);
-
-            // Push our per-status color into Meteor's entity outline color map.
-            // This is checked by the renderer before it falls back to team color,
-            // giving us full color control with no server packets.
             setOutlineColor(player, color);
-
             newlyActive.add(player.getId());
         }
 
-        // Remove glowing from players that left range or were toggled off.
         for (int id : activelyOutlined) {
             if (!newlyActive.contains(id)) {
                 Entity e = mc.world.getEntityById(id);
@@ -645,10 +634,8 @@ public class NeighbourhoodWatch extends Module {
 
         for (int i = layers; i >= 1; i--) {
             double expansion = spread * i;
-            // Quadratic falloff: bright at the player surface, drops off sharply outward.
             double t          = (double)(i - 1) / layers;
             int    layerAlpha = Math.max(4, (int)(baseAlpha * (1.0 - t * t)));
-
             event.renderer.box(
                 box.expand(expansion),
                 withAlpha(color, layerAlpha),

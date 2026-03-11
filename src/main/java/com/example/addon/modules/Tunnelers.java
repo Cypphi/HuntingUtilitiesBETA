@@ -38,13 +38,37 @@ import net.minecraft.block.Block;
 import net.minecraft.block.BlockState;
 import net.minecraft.block.Blocks;
 import net.minecraft.util.math.BlockPos;
-import net.minecraft.util.math.Box;
 import net.minecraft.util.math.ChunkPos;
-import net.minecraft.util.math.Direction;
 import net.minecraft.world.chunk.ChunkSection;
 import net.minecraft.world.chunk.WorldChunk;
 
 public class Tunnelers extends Module {
+
+    // ------------------------------------------------------------------ //
+    //  Highlight Style Enum                                                //
+    // ------------------------------------------------------------------ //
+
+    /**
+     * Controls how tunnel boxes are visually highlighted.
+     *
+     * GLOW     — layered bloom quads expand outward from each box, using a
+     *            quadratic alpha falloff (bright at the surface, fading fast).
+     *            Respects fade-with-distance.
+     * SPECTRAL — crisp lines-only outline drawn slightly expanded beyond each
+     *            box, mimicking the spectral arrow / vanilla glowing effect.
+     *            Supports an optional alpha pulse and configurable fill alpha.
+     *            Also respects fade-with-distance.
+     */
+    public enum HighlightStyle {
+        GLOW("Glow"),
+        SPECTRAL("Spectral");
+
+        private final String displayName;
+        HighlightStyle(String name) { this.displayName = name; }
+
+        @Override
+        public String toString() { return displayName; }
+    }
 
     public enum TunnelType {
         TUNNEL_1x1,
@@ -55,19 +79,24 @@ public class Tunnelers extends Module {
         LADDER_SHAFT
     }
 
+    // Horizontal-only directions for tunnel BFS connectivity checks.
+    private static final int[][] HORIZONTAL_DIRS = {
+        { 1, 0, 0}, {-1, 0, 0},
+        { 0, 0, 1}, { 0, 0,-1}
+    };
+
     // ------------------------------------------------------------------ //
     //  Setting Groups                                                      //
     // ------------------------------------------------------------------ //
 
     private final SettingGroup sgGeneral  = settings.getDefaultGroup();
+    private final SettingGroup sgSpectral = settings.createGroup("Spectral");
     private final SettingGroup sg1x1      = settings.createGroup("1x1 Tunnels");
     private final SettingGroup sg1x2      = settings.createGroup("1x2 Tunnels");
     private final SettingGroup sg2x2      = settings.createGroup("2x2 Tunnels");
     private final SettingGroup sgHoles    = settings.createGroup("Holes");
     private final SettingGroup sgAbnormal = settings.createGroup("Abnormal Tunnels");
     private final SettingGroup sgLadder   = settings.createGroup("Ladder Shafts");
-    private final SettingGroup sgRender   = settings.createGroup("Render");
-    private final SettingGroup sgGlow     = settings.createGroup("Glow");
 
     // ------------------------------------------------------------------ //
     //  General                                                             //
@@ -83,6 +112,84 @@ public class Tunnelers extends Module {
         .name("scan-delay")
         .description("Ticks between out-of-range pruning passes.")
         .defaultValue(40).min(10).sliderMax(200)
+        .build());
+
+    // ── Render ───────────────────────────────────────────────────────────────
+
+    private final Setting<ShapeMode> shapeMode = sgGeneral.add(new EnumSetting.Builder<ShapeMode>()
+        .name("shape-mode")
+        .defaultValue(ShapeMode.Both)
+        .build());
+
+    private final Setting<HighlightStyle> highlightStyle = sgGeneral.add(new EnumSetting.Builder<HighlightStyle>()
+        .name("highlight-style")
+        .description("GLOW renders layered bloom around each box. SPECTRAL renders a crisp outline only, like the spectral arrow effect.")
+        .defaultValue(HighlightStyle.GLOW)
+        .build());
+
+    private final Setting<Boolean> fadeWithDistance = sgGeneral.add(new BoolSetting.Builder()
+        .name("fade-with-distance")
+        .description("Reduces opacity of highlights that are further away.")
+        .defaultValue(true)
+        .build());
+
+    private final Setting<Integer> maxRenderBoxes = sgGeneral.add(new IntSetting.Builder()
+        .name("max-render-boxes")
+        .description("Maximum merged boxes rendered per frame. Lower = better FPS in dense areas.")
+        .defaultValue(2000).min(100).sliderMax(8000)
+        .build());
+
+    // ── Glow ─────────────────────────────────────────────────────────────────
+
+    private final Setting<Integer> glowLayers = sgGeneral.add(new IntSetting.Builder()
+        .name("glow-layers")
+        .description("Number of bloom layers rendered around each box.")
+        .defaultValue(4).min(1).sliderMax(8)
+        .visible(() -> highlightStyle.get() == HighlightStyle.GLOW)
+        .build());
+
+    private final Setting<Double> glowSpread = sgGeneral.add(new DoubleSetting.Builder()
+        .name("glow-spread")
+        .description("How far each bloom layer expands outward (in blocks).")
+        .defaultValue(0.05).min(0.01).sliderMax(0.2)
+        .visible(() -> highlightStyle.get() == HighlightStyle.GLOW)
+        .build());
+
+    private final Setting<Integer> glowBaseAlpha = sgGeneral.add(new IntSetting.Builder()
+        .name("glow-base-alpha")
+        .description("Alpha of the innermost glow layer (0-255).")
+        .defaultValue(60).min(4).sliderMax(150)
+        .visible(() -> highlightStyle.get() == HighlightStyle.GLOW)
+        .build());
+
+    // ── Spectral ─────────────────────────────────────────────────────────────
+
+    private final Setting<Double> spectralExpand = sgSpectral.add(new DoubleSetting.Builder()
+        .name("expand")
+        .description("How much to expand the outline box beyond each tunnel box surface (in blocks).")
+        .defaultValue(0.05).min(0.0).sliderMax(0.3)
+        .visible(() -> highlightStyle.get() == HighlightStyle.SPECTRAL)
+        .build());
+
+    private final Setting<Integer> spectralLineAlpha = sgSpectral.add(new IntSetting.Builder()
+        .name("line-alpha")
+        .description("Opacity of the spectral outline (0-255). Affected by fade-with-distance.")
+        .defaultValue(255).min(30).sliderMax(255)
+        .visible(() -> highlightStyle.get() == HighlightStyle.SPECTRAL)
+        .build());
+
+    private final Setting<Integer> spectralFillAlpha = sgSpectral.add(new IntSetting.Builder()
+        .name("fill-alpha")
+        .description("Alpha of a faint tinted fill drawn inside the outline (0 = lines only).")
+        .defaultValue(15).min(0).sliderMax(80)
+        .visible(() -> highlightStyle.get() == HighlightStyle.SPECTRAL)
+        .build());
+
+    private final Setting<Boolean> spectralPulse = sgSpectral.add(new BoolSetting.Builder()
+        .name("pulse")
+        .description("Pulsate the spectral outline alpha over time, like the vanilla glowing effect.")
+        .defaultValue(true)
+        .visible(() -> highlightStyle.get() == HighlightStyle.SPECTRAL)
         .build());
 
     // ------------------------------------------------------------------ //
@@ -116,16 +223,16 @@ public class Tunnelers extends Module {
         .defaultValue(true)
         .build());
 
-    private final Setting<SettingColor> color1x2 = sg1x2.add(new ColorSetting.Builder()
-        .name("color-1x2")
-        .defaultValue(new SettingColor(255, 200, 0, 75))
-        .visible(find1x2::get)
-        .build());
-
     private final Setting<Integer> min1x2Length = sg1x2.add(new IntSetting.Builder()
         .name("min-length")
         .description("Minimum length of a 1x2 tunnel to be rendered.")
         .defaultValue(4).min(1).sliderMax(64)
+        .visible(find1x2::get)
+        .build());
+
+    private final Setting<SettingColor> color1x2 = sg1x2.add(new ColorSetting.Builder()
+        .name("color-1x2")
+        .defaultValue(new SettingColor(255, 200, 0, 75))
         .visible(find1x2::get)
         .build());
 
@@ -183,6 +290,13 @@ public class Tunnelers extends Module {
         .defaultValue(true)
         .build());
 
+    private final Setting<Integer> minAbnormalLength = sgAbnormal.add(new IntSetting.Builder()
+        .name("min-length")
+        .description("Minimum length of an abnormal tunnel to be rendered.")
+        .defaultValue(2).min(1).sliderMax(64)
+        .visible(findAbnormalTunnels::get)
+        .build());
+
     private final Setting<SettingColor> colorAbnormalTunnels = sgAbnormal.add(new ColorSetting.Builder()
         .name("color-abnormal")
         .defaultValue(new SettingColor(255, 0, 255, 75))
@@ -210,58 +324,6 @@ public class Tunnelers extends Module {
         .name("color-ladder-shafts")
         .defaultValue(new SettingColor(0, 255, 0, 75))
         .visible(findLadderShafts::get)
-        .build());
-
-    // ------------------------------------------------------------------ //
-    //  Render                                                              //
-    // ------------------------------------------------------------------ //
-
-    private final Setting<ShapeMode> shapeMode = sgRender.add(new EnumSetting.Builder<ShapeMode>()
-        .name("shape-mode")
-        .defaultValue(ShapeMode.Both)
-        .build());
-
-    private final Setting<Boolean> fadeWithDistance = sgRender.add(new BoolSetting.Builder()
-        .name("fade-with-distance")
-        .description("Reduces opacity of highlights that are further away.")
-        .defaultValue(true)
-        .build());
-
-    private final Setting<Integer> maxRenderBoxes = sgRender.add(new IntSetting.Builder()
-        .name("max-render-boxes")
-        .description("Maximum merged boxes rendered per frame. Lower = better FPS in dense areas.")
-        .defaultValue(2000).min(100).sliderMax(8000)
-        .build());
-
-    // ------------------------------------------------------------------ //
-    //  Glow                                                                //
-    // ------------------------------------------------------------------ //
-
-    private final Setting<Boolean> glowEnabled = sgGlow.add(new BoolSetting.Builder()
-        .name("glow")
-        .description("Render a bloom glow around each highlighted box.")
-        .defaultValue(true)
-        .build());
-
-    private final Setting<Integer> glowLayers = sgGlow.add(new IntSetting.Builder()
-        .name("glow-layers")
-        .description("Number of bloom layers rendered around each box.")
-        .defaultValue(4).min(1).sliderMax(8)
-        .visible(glowEnabled::get)
-        .build());
-
-    private final Setting<Double> glowSpread = sgGlow.add(new DoubleSetting.Builder()
-        .name("glow-spread")
-        .description("How far each bloom layer expands outward (in blocks).")
-        .defaultValue(0.05).min(0.01).sliderMax(0.2)
-        .visible(glowEnabled::get)
-        .build());
-
-    private final Setting<Integer> glowBaseAlpha = sgGlow.add(new IntSetting.Builder()
-        .name("glow-base-alpha")
-        .description("Alpha of the innermost glow layer (0-255).")
-        .defaultValue(60).min(4).sliderMax(150)
-        .visible(glowEnabled::get)
         .build());
 
     // ------------------------------------------------------------------ //
@@ -382,14 +444,17 @@ public class Tunnelers extends Module {
 
         final Map<BlockPos, TunnelType> locSnapshot = new HashMap<>(locations);
         final int px = snapPX, py = snapPY, pz = snapPZ;
-        final double maxDistSq = (double)(range.get() * 16) * (range.get() * 16);
-        final int minLength1x1 = min1x1Length.get();
-        final int minLength1x2 = min1x2Length.get();
-        final int minLength2x2 = min2x2Length.get();
+        final double maxDistSq        = (double)(range.get() * 16) * (range.get() * 16);
+        final int minLength1x1        = min1x1Length.get();
+        final int minLength1x2        = min1x2Length.get();
+        final int minLength2x2        = min2x2Length.get();
+        final int minLengthAbnormal   = minAbnormalLength.get();
 
         executor.submit(() -> {
             try {
-                List<MergedBox> merged = buildMergedBoxes(locSnapshot, px, py, pz, maxDistSq, minLength1x1, minLength1x2, minLength2x2);
+                List<MergedBox> merged = buildMergedBoxes(
+                    locSnapshot, px, py, pz, maxDistSq,
+                    minLength1x1, minLength1x2, minLength2x2, minLengthAbnormal);
                 renderSnapshot = merged;
             } finally {
                 mergeScheduled.set(false);
@@ -405,11 +470,11 @@ public class Tunnelers extends Module {
             Map<BlockPos, TunnelType> locs,
             int px, int py, int pz,
             double maxDistSq, int minLength1x1,
-            int minLength1x2, int minLength2x2
+            int minLength1x2, int minLength2x2, int minLengthAbnormal
     ) {
         if (locs.isEmpty()) return Collections.emptyList();
 
-        EnumMap<TunnelType, Set<Long>>   remaining   = new EnumMap<>(TunnelType.class);
+        EnumMap<TunnelType, Set<Long>>   remaining    = new EnumMap<>(TunnelType.class);
         EnumMap<TunnelType, List<int[]>> coordsByType = new EnumMap<>(TunnelType.class);
         for (TunnelType t : TunnelType.values()) {
             remaining.put(t, new HashSet<>());
@@ -417,16 +482,16 @@ public class Tunnelers extends Module {
         }
 
         for (Map.Entry<BlockPos, TunnelType> e : locs.entrySet()) {
-            BlockPos p = e.getKey();
+            BlockPos   p = e.getKey();
             TunnelType t = e.getValue();
             remaining.get(t).add(pack(p.getX(), p.getY(), p.getZ()));
             coordsByType.get(t).add(new int[]{ p.getX(), p.getY(), p.getZ() });
         }
 
-        // Filter tunnels by length
-        filterTunnelTypeByLength(TunnelType.TUNNEL_1x1, minLength1x1, coordsByType, remaining);
-        filterTunnelTypeByLength(TunnelType.TUNNEL_1x2, minLength1x2, coordsByType, remaining);
-        filterTunnelTypeByLength(TunnelType.TUNNEL_2x2, minLength2x2, coordsByType, remaining);
+        filterTunnelTypeByLength(TunnelType.TUNNEL_1x1,      minLength1x1,      coordsByType, remaining);
+        filterTunnelTypeByLength(TunnelType.TUNNEL_1x2,      minLength1x2,      coordsByType, remaining);
+        filterTunnelTypeByLength(TunnelType.TUNNEL_2x2,      minLength2x2,      coordsByType, remaining);
+        filterTunnelTypeByLength(TunnelType.ABNORMAL_TUNNEL, minLengthAbnormal, coordsByType, remaining);
 
         List<MergedBox> boxes = new ArrayList<>();
 
@@ -453,9 +518,9 @@ public class Tunnelers extends Module {
                         for (int z = oz; z <= z2; z++)
                             rem.remove(pack(x, y, z));
 
-                double cx = (ox + x2) * 0.5 + 0.5;
-                double cy = (oy + y2) * 0.5 + 0.5;
-                double cz = (oz + z2) * 0.5 + 0.5;
+                double cx  = (ox + x2) * 0.5 + 0.5;
+                double cy  = (oy + y2) * 0.5 + 0.5;
+                double cz  = (oz + z2) * 0.5 + 0.5;
                 double ddx = cx - px, ddy = cy - py, ddz = cz - pz;
                 double distSq = Math.min(ddx * ddx + ddy * ddy + ddz * ddz, maxDistSq);
 
@@ -467,49 +532,54 @@ public class Tunnelers extends Module {
         return boxes;
     }
 
-    private static void filterTunnelTypeByLength(TunnelType type, int minLength,
-            EnumMap<TunnelType, List<int[]>> coordsByType, EnumMap<TunnelType, Set<Long>> remaining) {
+    private static void filterTunnelTypeByLength(
+            TunnelType type, int minLength,
+            EnumMap<TunnelType, List<int[]>> coordsByType,
+            EnumMap<TunnelType, Set<Long>>   remaining) {
+
         if (minLength <= 1) return;
 
         List<int[]> coords = coordsByType.get(type);
         if (coords == null || coords.isEmpty()) return;
 
-        Set<BlockPos> allBlocks = new HashSet<>(coords.size());
-        for (int[] c : coords) allBlocks.add(new BlockPos(c[0], c[1], c[2]));
+        Set<Long> allBlocks = new HashSet<>(coords.size());
+        for (int[] c : coords) allBlocks.add(pack(c[0], c[1], c[2]));
 
-        Set<BlockPos> blocksToKeep = new HashSet<>();
-        Set<BlockPos> visited = new HashSet<>();
+        Set<Long> blocksToKeep = new HashSet<>();
+        Set<Long> visited      = new HashSet<>();
 
-        for (BlockPos startPos : allBlocks) {
-            if (visited.contains(startPos)) continue;
+        for (int[] startCoord : coords) {
+            long startKey = pack(startCoord[0], startCoord[1], startCoord[2]);
+            if (visited.contains(startKey)) continue;
 
-            List<BlockPos> component = new ArrayList<>();
-            Queue<BlockPos> queue = new LinkedList<>();
+            List<long[]> component = new ArrayList<>();
+            Queue<long[]> queue    = new LinkedList<>();
+            long[] startEntry      = { startCoord[0], startCoord[1], startCoord[2], startKey };
 
-            queue.add(startPos);
-            visited.add(startPos);
+            queue.add(startEntry);
+            visited.add(startKey);
 
             while (!queue.isEmpty()) {
-                BlockPos current = queue.poll();
-                component.add(current);
+                long[] cur = queue.poll();
+                component.add(cur);
+                int cx = (int) cur[0], cy = (int) cur[1], cz = (int) cur[2];
 
-                for (Direction dir : Direction.values()) {
-                    BlockPos neighbor = current.offset(dir);
-                    if (allBlocks.contains(neighbor) && visited.add(neighbor)) {
-                        queue.add(neighbor);
+                for (int[] d : HORIZONTAL_DIRS) {
+                    int nx = cx + d[0], ny = cy + d[1], nz = cz + d[2];
+                    long nk = pack(nx, ny, nz);
+                    if (allBlocks.contains(nk) && visited.add(nk)) {
+                        queue.add(new long[]{ nx, ny, nz, nk });
                     }
                 }
             }
 
             if (component.size() >= minLength) {
-                blocksToKeep.addAll(component);
+                for (long[] entry : component) blocksToKeep.add(entry[3]);
             }
         }
 
-        coordsByType.get(type).removeIf(c -> !blocksToKeep.contains(new BlockPos(c[0], c[1], c[2])));
-        Set<Long> newRemaining = new HashSet<>(blocksToKeep.size());
-        for (BlockPos pos : blocksToKeep) newRemaining.add(pack(pos.getX(), pos.getY(), pos.getZ()));
-        remaining.put(type, newRemaining);
+        coords.removeIf(c -> !blocksToKeep.contains(pack(c[0], c[1], c[2])));
+        remaining.put(type, blocksToKeep);
     }
 
     private static boolean canExtendZ(Set<Long> rem, int ox, int x2, int y, int z) {
@@ -744,136 +814,109 @@ public class Tunnelers extends Module {
     }
 
     private boolean is1x1Tunnel(int x, int y, int z, ScanContext ctx) {
-        // Check for solid floor, air tunnel space, and solid ceiling.
-        if (!ctx.isSolid(x, y, z) || !ctx.isAir(x, y + 1, z) || !ctx.isSolid(x, y + 2, z)) {
-            return false;
-        }
+        if (!ctx.isSolid(x, y, z) || !ctx.isAir(x, y + 1, z) || !ctx.isSolid(x, y + 2, z)) return false;
 
         boolean northSolid = ctx.isSolid(x, y + 1, z - 1);
         boolean southSolid = ctx.isSolid(x, y + 1, z + 1);
-        boolean eastSolid = ctx.isSolid(x + 1, y + 1, z);
-        boolean westSolid = ctx.isSolid(x - 1, y + 1, z);
+        boolean eastSolid  = ctx.isSolid(x + 1, y + 1, z);
+        boolean westSolid  = ctx.isSolid(x - 1, y + 1, z);
 
-        int solidHorizontalSides = (northSolid ? 1 : 0) + (southSolid ? 1 : 0) + (eastSolid ? 1 : 0) + (westSolid ? 1 : 0);
+        boolean neSolid = ctx.isSolid(x + 1, y + 1, z - 1);
+        boolean nwSolid = ctx.isSolid(x - 1, y + 1, z - 1);
+        boolean seSolid = ctx.isSolid(x + 1, y + 1, z + 1);
+        boolean swSolid = ctx.isSolid(x - 1, y + 1, z + 1);
 
-        // A tunnel segment should be enclosed on 2 or 3 sides horizontally.
-        // This was too permissive and highlighted corners in open caves.
-        // The new logic only allows dead-ends (3 walls) or straight passages (2 opposing walls).
-        if (solidHorizontalSides == 3) return true;
-        if (solidHorizontalSides == 2) {
-            return (northSolid && southSolid) || (eastSolid && westSolid);
+        int solidCardinal = (northSolid ? 1 : 0) + (southSolid ? 1 : 0)
+                          + (eastSolid  ? 1 : 0) + (westSolid  ? 1 : 0);
+
+        if (solidCardinal == 3) return neSolid && nwSolid && seSolid && swSolid;
+        if (solidCardinal == 2) {
+            boolean straight = (northSolid && southSolid) || (eastSolid && westSolid);
+            return straight && neSolid && nwSolid && seSolid && swSolid;
         }
         return false;
     }
 
     private boolean is1x2Tunnel(int x, int y, int z, ScanContext ctx) {
-        // Check for the vertical 1x2 air column with floor and ceiling
         if (!is1x2Slice(x, y, z, ctx)) return false;
+        if (isMineshaftBlock(ctx.get(x, y, z)) || isMineshaftBlock(ctx.get(x, y + 3, z))) return false;
 
-        // Optional: ignore tunnels that look like mineshafts
-        if (isMineshaftBlock(ctx.get(x,y,z)) || isMineshaftBlock(ctx.get(x,y+3,z))) return false;
-
-        // Check horizontal walls for both layers of the tunnel
         boolean northSolid = ctx.isSolid(x, y + 1, z - 1) && ctx.isSolid(x, y + 2, z - 1);
         boolean southSolid = ctx.isSolid(x, y + 1, z + 1) && ctx.isSolid(x, y + 2, z + 1);
         boolean eastSolid  = ctx.isSolid(x + 1, y + 1, z) && ctx.isSolid(x + 1, y + 2, z);
         boolean westSolid  = ctx.isSolid(x - 1, y + 1, z) && ctx.isSolid(x - 1, y + 2, z);
 
-        int solidWalls = (northSolid ? 1 : 0) + (southSolid ? 1 : 0) + (eastSolid ? 1 : 0) + (westSolid ? 1 : 0);
+        int solidWalls = (northSolid ? 1 : 0) + (southSolid ? 1 : 0)
+                       + (eastSolid  ? 1 : 0) + (westSolid  ? 1 : 0);
 
-        // A dead-end has 3 solid walls.
         if (solidWalls == 3) return true;
-
-        // A straight tunnel segment has 2 opposing solid walls.
-        if (solidWalls == 2) {
-            return (northSolid && southSolid) || (eastSolid && westSolid);
-        }
-
+        if (solidWalls == 2) return (northSolid && southSolid) || (eastSolid && westSolid);
         return false;
     }
 
     private boolean is1x2Slice(int x, int y, int z, ScanContext ctx) {
-        return ctx.isSolid(x,y,z) && ctx.isAir(x,y+1,z) && ctx.isAir(x,y+2,z) && ctx.isSolid(x,y+3,z);
+        return ctx.isSolid(x, y, z) && ctx.isAir(x, y + 1, z)
+            && ctx.isAir(x, y + 2, z) && ctx.isSolid(x, y + 3, z);
     }
 
     private boolean is2x2Tunnel(int x, int y, int z, ScanContext ctx) {
-        // Check for 2x2 floor, 2x2x2 air space, and 2x2 ceiling
         for (int dx = 0; dx < 2; dx++) {
             for (int dz = 0; dz < 2; dz++) {
-                if (!ctx.isSolid(x + dx, y, z + dz) || !ctx.isSolid(x + dx, y + 3, z + dz)) return false;
-                if (!ctx.isAir(x + dx, y + 1, z + dz) || !ctx.isAir(x + dx, y + 2, z + dz)) return false;
+                if (!ctx.isSolid(x + dx, y,     z + dz)) return false;
+                if (!ctx.isSolid(x + dx, y + 3, z + dz)) return false;
+                if (!ctx.isAir  (x + dx, y + 1, z + dz)) return false;
+                if (!ctx.isAir  (x + dx, y + 2, z + dz)) return false;
             }
         }
 
-        // Check for walls. A wall is solid if all its blocks are solid.
         boolean northSolid = true;
-        outer: for (int dx = 0; dx < 2; dx++) {
-            for (int dy = 1; dy <= 2; dy++) {
-                if (!ctx.isSolid(x + dx, y + dy, z - 1)) {
-                    northSolid = false;
-                    break outer;
-                }
-            }
-        }
+        northCheck:
+        for (int dx = 0; dx < 2; dx++)
+            for (int dy = 1; dy <= 2; dy++)
+                if (!ctx.isSolid(x + dx, y + dy, z - 1)) { northSolid = false; break northCheck; }
 
         boolean southSolid = true;
-        outer: for (int dx = 0; dx < 2; dx++) {
-            for (int dy = 1; dy <= 2; dy++) {
-                if (!ctx.isSolid(x + dx, y + dy, z + 2)) {
-                    southSolid = false;
-                    break outer;
-                }
-            }
-        }
+        southCheck:
+        for (int dx = 0; dx < 2; dx++)
+            for (int dy = 1; dy <= 2; dy++)
+                if (!ctx.isSolid(x + dx, y + dy, z + 2)) { southSolid = false; break southCheck; }
 
         boolean eastSolid = true;
-        outer: for (int dz = 0; dz < 2; dz++) {
-            for (int dy = 1; dy <= 2; dy++) {
-                if (!ctx.isSolid(x + 2, y + dy, z + dz)) {
-                    eastSolid = false;
-                    break outer;
-                }
-            }
-        }
+        eastCheck:
+        for (int dz = 0; dz < 2; dz++)
+            for (int dy = 1; dy <= 2; dy++)
+                if (!ctx.isSolid(x + 2, y + dy, z + dz)) { eastSolid = false; break eastCheck; }
 
         boolean westSolid = true;
-        outer: for (int dz = 0; dz < 2; dz++) {
-            for (int dy = 1; dy <= 2; dy++) {
-                if (!ctx.isSolid(x - 1, y + dy, z + dz)) {
-                    westSolid = false;
-                    break outer;
-                }
-            }
-        }
+        westCheck:
+        for (int dz = 0; dz < 2; dz++)
+            for (int dy = 1; dy <= 2; dy++)
+                if (!ctx.isSolid(x - 1, y + dy, z + dz)) { westSolid = false; break westCheck; }
 
-        int solidWalls = (northSolid ? 1 : 0) + (southSolid ? 1 : 0) + (eastSolid ? 1 : 0) + (westSolid ? 1 : 0);
+        int solidWalls = (northSolid ? 1 : 0) + (southSolid ? 1 : 0)
+                       + (eastSolid  ? 1 : 0) + (westSolid  ? 1 : 0);
 
-        // A dead-end has 3 solid walls.
         if (solidWalls == 3) return true;
-
-        // A straight tunnel segment has 2 opposing solid walls.
-        if (solidWalls == 2) {
-            return (northSolid && southSolid) || (eastSolid && westSolid);
-        }
+        if (solidWalls == 2) return (northSolid && southSolid) || (eastSolid && westSolid);
         return false;
     }
 
     private int getAbnormalTunnelSize(int x, int y, int z, ScanContext ctx) {
-        if (isTunnelOfSize(x,y,z,ctx,5)) return 5;
-        if (isTunnelOfSize(x,y,z,ctx,4)) return 4;
-        if (isTunnelOfSize(x,y,z,ctx,3)) return 3;
+        if (isTunnelOfSize(x, y, z, ctx, 5)) return 5;
+        if (isTunnelOfSize(x, y, z, ctx, 4)) return 4;
+        if (isTunnelOfSize(x, y, z, ctx, 3)) return 3;
         return 0;
     }
 
     private boolean isTunnelOfSize(int x, int y, int z, ScanContext ctx, int s) {
         for (int fx = 0; fx < s; fx++) for (int fz = 0; fz < s; fz++)
-            if (!ctx.isSolid(x+fx,y,z+fz) || !ctx.isSolid(x+fx,y+s+1,z+fz)) return false;
+            if (!ctx.isSolid(x+fx, y,   z+fz) || !ctx.isSolid(x+fx, y+s+1, z+fz)) return false;
         for (int fx = 0; fx < s; fx++) for (int fy = 1; fy <= s; fy++) for (int fz = 0; fz < s; fz++)
-            if (!ctx.isAir(x+fx,y+fy,z+fz)) return false;
+            if (!ctx.isAir(x+fx, y+fy, z+fz)) return false;
         for (int fx = 0; fx < s; fx++) for (int fy = 1; fy <= s; fy++)
-            if (!ctx.isSolid(x+fx,y+fy,z-1) || !ctx.isSolid(x+fx,y+fy,z+s)) return false;
+            if (!ctx.isSolid(x+fx, y+fy, z-1) || !ctx.isSolid(x+fx, y+fy, z+s)) return false;
         for (int fz = 0; fz < s; fz++) for (int fy = 1; fy <= s; fy++)
-            if (!ctx.isSolid(x-1,y+fy,z+fz) || !ctx.isSolid(x+s,y+fy,z+fz)) return false;
+            if (!ctx.isSolid(x-1, y+fy, z+fz) || !ctx.isSolid(x+s, y+fy, z+fz)) return false;
         return true;
     }
 
@@ -884,17 +927,17 @@ public class Tunnelers extends Module {
     }
 
     private boolean isLadderShaft(int x, int y, int z, ScanContext ctx, int minH) {
-        if (!ctx.isSolid(x,y-1,z)) return false;
+        if (!ctx.isSolid(x, y - 1, z)) return false;
         for (int i = 0; i < minH; i++) {
             int cy = y + i;
-            if (!ctx.isAir(x,cy,z)) return false;
-            if (!ctx.isLadder(x-1,cy,z) && !ctx.isLadder(x+1,cy,z)
-                    && !ctx.isLadder(x,cy,z-1) && !ctx.isLadder(x,cy,z+1)) return false;
+            if (!ctx.isAir(x, cy, z)) return false;
+            if (!ctx.isLadder(x-1, cy, z) && !ctx.isLadder(x+1, cy, z)
+                    && !ctx.isLadder(x, cy, z-1) && !ctx.isLadder(x, cy, z+1)) return false;
             int walls = 0;
-            if (ctx.isSolid(x-1,cy,z)) walls++;
-            if (ctx.isSolid(x+1,cy,z)) walls++;
-            if (ctx.isSolid(x,cy,z-1)) walls++;
-            if (ctx.isSolid(x,cy,z+1)) walls++;
+            if (ctx.isSolid(x-1, cy, z)) walls++;
+            if (ctx.isSolid(x+1, cy, z)) walls++;
+            if (ctx.isSolid(x,   cy, z-1)) walls++;
+            if (ctx.isSolid(x,   cy, z+1)) walls++;
             if (walls < 3) return false;
         }
         return true;
@@ -948,68 +991,112 @@ public class Tunnelers extends Module {
         List<MergedBox> snapshot = renderSnapshot; // single volatile read
         if (snapshot.isEmpty()) return;
 
-        boolean   doFade    = fadeWithDistance.get();
-        boolean   doGlow    = glowEnabled.get();
-        double    maxDistSq = (double)(range.get() * 16) * (range.get() * 16);
-        int       limit     = maxRenderBoxes.get();
-        ShapeMode sm        = shapeMode.get();
+        boolean        doFade    = fadeWithDistance.get();
+        double         maxDistSq = (double)(range.get() * 16) * (range.get() * 16);
+        int            limit     = maxRenderBoxes.get();
+        ShapeMode      sm        = shapeMode.get();
+        HighlightStyle style     = highlightStyle.get();
+
+        // Spectral: sample the pulse multiplier once per frame so all boxes share the same phase.
+        double spectralPulseMultiplier = 1.0;
+        if (style == HighlightStyle.SPECTRAL && spectralPulse.get()) {
+            spectralPulseMultiplier = 0.6 + 0.4 * (0.5 + 0.5 * Math.sin(System.currentTimeMillis() / 750.0 * Math.PI));
+        }
 
         SettingColor reusable = new SettingColor(0, 0, 0, 0);
 
         int drawn = 0;
         for (MergedBox box : snapshot) {
             if (drawn >= limit) break;
+
             SettingColor base = getColor(box.type);
             if (base == null) continue;
 
-            SettingColor c;
-            if (doFade) {
-                float frac   = (float) Math.max(0.0, 1.0 - box.distSq / maxDistSq);
-                int   fadedA = Math.max(8, (int)(base.a * frac));
-                reusable.r = base.r; reusable.g = base.g; reusable.b = base.b; reusable.a = fadedA;
-                c = reusable;
+            // Compute fade fraction (1.0 = close, 0.0 = at max range edge).
+            float fadeFrac = doFade
+                ? (float) Math.max(0.0, 1.0 - box.distSq / maxDistSq)
+                : 1.0f;
+
+            // Build the primary faded color used for the solid box fill / lines.
+            int fadedA = Math.max(8, (int)(base.a * fadeFrac));
+            reusable.r = base.r; reusable.g = base.g; reusable.b = base.b; reusable.a = fadedA;
+
+            if (style == HighlightStyle.GLOW) {
+                renderGlowBox(event, box, reusable, fadeFrac, sm);
             } else {
-                c = base;
+                renderSpectralBox(event, box, reusable, fadeFrac, spectralPulseMultiplier, sm);
             }
 
-            // Bloom glow — drawn before the solid box so layers sit behind it.
-            // Uses the same per-type color as the fill, tinted down via quadratic
-            // alpha falloff so the glow is brightest near the box surface and
-            // fades quickly outward. Fade-with-distance is also applied so distant
-            // boxes don't bloom brighter than their fill.
-            if (doGlow) {
-                int    layers    = glowLayers.get();
-                double spread    = glowSpread.get();
-                int    baseAlpha = glowBaseAlpha.get();
-
-                for (int i = layers; i >= 1; i--) {
-                    double expansion = spread * i;
-
-                    // t=0 innermost (brightest), t=1 outermost (most transparent).
-                    // Squaring keeps the core bright and drops sharply at the edges.
-                    double t          = (double)(i - 1) / layers;
-                    int    layerAlpha = Math.max(4, (int)(baseAlpha * (1.0 - t * t)));
-
-                    // Apply distance fade to glow alpha as well so it scales with the fill.
-                    if (doFade) {
-                        float frac = (float) Math.max(0.0, 1.0 - box.distSq / maxDistSq);
-                        layerAlpha = Math.max(4, (int)(layerAlpha * frac));
-                    }
-
-                    event.renderer.box(
-                        box.x1 - expansion, box.y1 - expansion, box.z1 - expansion,
-                        box.x2 + expansion, box.y2 + expansion, box.z2 + expansion,
-                        withAlpha(c, layerAlpha),
-                        withAlpha(c, 0),
-                        ShapeMode.Sides, 0
-                    );
-                }
-            }
-
-            // Solid highlight box on top of glow layers.
-            event.renderer.box(box.x1, box.y1, box.z1, box.x2, box.y2, box.z2, c, c, sm, 0);
             drawn++;
         }
+    }
+
+    // ------------------------------------------------------------------ //
+    //  Glow rendering                                                      //
+    // ------------------------------------------------------------------ //
+
+    /**
+     * Renders layered bloom quads expanding outward from the box surface, then
+     * draws the solid box on top. Alpha uses a quadratic falloff so the core is
+     * vivid and the outer halos drop off sharply, matching the filled-sides look.
+     */
+    private void renderGlowBox(Render3DEvent event, MergedBox box,
+            SettingColor faded, float fadeFrac, ShapeMode sm) {
+
+        int    layers    = glowLayers.get();
+        double spread    = glowSpread.get();
+        int    baseAlpha = glowBaseAlpha.get();
+
+        for (int i = layers; i >= 1; i--) {
+            double expansion  = spread * i;
+            double t          = (double)(i - 1) / layers;         // 0 = innermost, 1 = outermost
+            int    layerAlpha = Math.max(4, (int)(baseAlpha * (1.0 - t * t)));
+            layerAlpha = Math.max(4, (int)(layerAlpha * fadeFrac));
+
+            event.renderer.box(
+                box.x1 - expansion, box.y1 - expansion, box.z1 - expansion,
+                box.x2 + expansion, box.y2 + expansion, box.z2 + expansion,
+                withAlpha(faded, layerAlpha), withAlpha(faded, 0),
+                ShapeMode.Sides, 0
+            );
+        }
+
+        event.renderer.box(box.x1, box.y1, box.z1, box.x2, box.y2, box.z2,
+            faded, faded, sm, 0);
+    }
+
+    // ------------------------------------------------------------------ //
+    //  Spectral rendering                                                  //
+    // ------------------------------------------------------------------ //
+
+    /**
+     * Renders a crisp outline box slightly expanded beyond the tunnel surface,
+     * mimicking the spectral arrow / vanilla glowing effect.
+     *
+     * Line alpha and fill alpha are scaled by both the fade fraction and the
+     * shared per-frame pulse multiplier so all boxes breathe in unison.
+     */
+    private void renderSpectralBox(Render3DEvent event, MergedBox box,
+            SettingColor faded, float fadeFrac, double pulseMult, ShapeMode sm) {
+
+        double expand    = spectralExpand.get();
+        double ex1 = box.x1 - expand, ey1 = box.y1 - expand, ez1 = box.z1 - expand;
+        double ex2 = box.x2 + expand, ey2 = box.y2 + expand, ez2 = box.z2 + expand;
+
+        int lineAlpha = Math.max(4, (int)(spectralLineAlpha.get() * fadeFrac * pulseMult));
+        int fillAlpha = Math.max(0, (int)(spectralFillAlpha.get() * fadeFrac * pulseMult));
+
+        // Faint interior fill — uses the box's own type color tinted.
+        if (fillAlpha > 0) {
+            event.renderer.box(ex1, ey1, ez1, ex2, ey2, ez2,
+                withAlpha(faded, fillAlpha), withAlpha(faded, 0),
+                ShapeMode.Sides, 0);
+        }
+
+        // Crisp lines-only outline — no filled sides, just the edges.
+        event.renderer.box(ex1, ey1, ez1, ex2, ey2, ez2,
+            withAlpha(faded, 0), withAlpha(faded, lineAlpha),
+            ShapeMode.Lines, 0);
     }
 
     // ------------------------------------------------------------------ //

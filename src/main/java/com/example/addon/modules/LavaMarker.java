@@ -16,8 +16,10 @@ import meteordevelopment.meteorclient.events.render.Render3DEvent;
 import meteordevelopment.meteorclient.events.world.BlockUpdateEvent;
 import meteordevelopment.meteorclient.events.world.TickEvent;
 import meteordevelopment.meteorclient.renderer.ShapeMode;
+import meteordevelopment.meteorclient.settings.BoolSetting;
 import meteordevelopment.meteorclient.settings.ColorSetting;
 import meteordevelopment.meteorclient.settings.DoubleSetting;
+import meteordevelopment.meteorclient.settings.EnumSetting;
 import meteordevelopment.meteorclient.settings.IntSetting;
 import meteordevelopment.meteorclient.settings.Setting;
 import meteordevelopment.meteorclient.settings.SettingGroup;
@@ -36,16 +38,42 @@ import net.minecraft.world.chunk.Chunk;
 import net.minecraft.world.chunk.ChunkSection;
 
 /**
- * LavaMarker — highlights fully-flowed lava in the Nether with a bloom/glow effect.
+ * LavaMarker — highlights fully-flowed lava falls in the Nether.
+ *
+ * Supports two render modes:
+ *   GLOW     – original layered bloom-box renderer (default).
+ *   SPECTRAL – subtle filled box only (outline shader is entity-only;
+ *              lava is a block so SPECTRAL falls back to a configurable fill).
  */
 public class LavaMarker extends Module {
+
+    // ═══════════════════════════════════════════════════════════════════════════
+    // Enum
+    // ═══════════════════════════════════════════════════════════════════════════
+
+    /**
+     * Controls how tracked lava-fall blocks are rendered.
+     *
+     * GLOW     – The original layered bloom-box renderer. Draws expanding
+     *            transparent boxes around every target with configurable
+     *            layers, spread, and alpha.
+     *
+     * SPECTRAL – Because lava blocks are not entities, Minecraft's outline
+     *            shader cannot be applied. Instead a subtle filled box is drawn
+     *            using {@code spectralFillAlpha} so the position is still visible
+     *            without the bloom overhead.
+     */
+    public enum RenderMode {
+        GLOW,
+        SPECTRAL
+    }
 
     // ═══════════════════════════════════════════════════════════════════════════
     // Setting Groups
     // ═══════════════════════════════════════════════════════════════════════════
 
     private final SettingGroup sgGeneral = settings.getDefaultGroup();
-    private final SettingGroup sgGlow    = settings.createGroup("Glow");
+    private final SettingGroup sgRender  = settings.createGroup("Render");
 
     // ═══════════════════════════════════════════════════════════════════════════
     // Settings — General
@@ -87,27 +115,68 @@ public class LavaMarker extends Module {
     );
 
     // ═══════════════════════════════════════════════════════════════════════════
-    // Settings — Glow
+    // Settings — Render
     // ═══════════════════════════════════════════════════════════════════════════
 
-    private final Setting<Integer> glowLayers = sgGlow.add(new IntSetting.Builder()
+    /**
+     * Top-level render mode selector.
+     *
+     * GLOW     – Layered bloom boxes (original behaviour).
+     * SPECTRAL – Subtle filled box only (outline shader is entity-only;
+     *            lava blocks cannot use it directly).
+     */
+    private final Setting<RenderMode> renderMode = sgRender.add(new EnumSetting.Builder<RenderMode>()
+        .name("render-mode")
+        .description("GLOW = layered bloom boxes. SPECTRAL = subtle fill box (outline shader is entity-only).")
+        .defaultValue(RenderMode.GLOW)
+        .build()
+    );
+
+    // ── Glow-only settings ────────────────────────────────────────────────────
+
+    private final Setting<Integer> glowLayers = sgRender.add(new IntSetting.Builder()
         .name("glow-layers")
         .description("Number of bloom layers rendered around each lava block.")
         .defaultValue(3).min(1).sliderMax(6)
+        .visible(() -> renderMode.get() == RenderMode.GLOW)
         .build()
     );
 
-    private final Setting<Double> glowSpread = sgGlow.add(new DoubleSetting.Builder()
+    private final Setting<Double> glowSpread = sgRender.add(new DoubleSetting.Builder()
         .name("glow-spread")
         .description("How far each bloom layer expands outward (in blocks).")
         .defaultValue(0.04).min(0.01).sliderMax(0.15)
+        .visible(() -> renderMode.get() == RenderMode.GLOW)
         .build()
     );
 
-    private final Setting<Integer> glowBaseAlpha = sgGlow.add(new IntSetting.Builder()
+    private final Setting<Integer> glowBaseAlpha = sgRender.add(new IntSetting.Builder()
         .name("glow-base-alpha")
         .description("Alpha of the innermost glow layer (0-255).")
         .defaultValue(40).min(4).sliderMax(120)
+        .visible(() -> renderMode.get() == RenderMode.GLOW)
+        .build()
+    );
+
+    // ── Spectral-only settings ────────────────────────────────────────────────
+
+    /**
+     * Fill alpha used in SPECTRAL mode. Since the outline shader only applies
+     * to entities, lava blocks are drawn as a solid-ish fill box instead.
+     */
+    private final Setting<Integer> spectralFillAlpha = sgRender.add(new IntSetting.Builder()
+        .name("spectral-fill-alpha")
+        .description("Fill alpha for lava blocks in SPECTRAL mode (0 = invisible, 80 = subtle).")
+        .defaultValue(40).min(0).max(200).sliderMax(120)
+        .visible(() -> renderMode.get() == RenderMode.SPECTRAL)
+        .build()
+    );
+
+    private final Setting<Boolean> spectralOutline = sgRender.add(new BoolSetting.Builder()
+        .name("spectral-outline")
+        .description("Draw a solid outline around lava blocks in SPECTRAL mode.")
+        .defaultValue(true)
+        .visible(() -> renderMode.get() == RenderMode.SPECTRAL)
         .build()
     );
 
@@ -358,6 +427,7 @@ public class LavaMarker extends Module {
     private void onRender(Render3DEvent event) {
         if (mc.world == null) return;
 
+        boolean isSpectral = renderMode.get() == RenderMode.SPECTRAL;
         int count = 0;
         int max   = maxRenderBlocks.get();
 
@@ -373,8 +443,18 @@ public class LavaMarker extends Module {
                 if (isBottomBlock && mc.world.getBlockState(pos.down()).isAir()) continue;
 
                 Box box = new Box(pos);
-                renderGlowLayers(event, box, color.get());
-                event.renderer.box(box, withAlpha(color.get(), color.get().a), color.get(), ShapeMode.Both, 0);
+
+                if (isSpectral) {
+                    // Outline shader is entity-only — draw a configurable fill + optional outline.
+                    int fillAlpha = spectralFillAlpha.get();
+                    ShapeMode mode = spectralOutline.get() ? ShapeMode.Both : ShapeMode.Sides;
+                    SettingColor outlineColor = spectralOutline.get() ? color.get() : withAlpha(color.get(), 0);
+                    event.renderer.box(box, withAlpha(color.get(), fillAlpha), outlineColor, mode, 0);
+                } else {
+                    renderGlowLayers(event, box, color.get());
+                    event.renderer.box(box, withAlpha(color.get(), color.get().a), color.get(), ShapeMode.Both, 0);
+                }
+
                 count++;
             }
         }

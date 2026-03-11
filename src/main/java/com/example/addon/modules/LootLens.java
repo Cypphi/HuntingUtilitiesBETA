@@ -16,6 +16,7 @@ import meteordevelopment.meteorclient.renderer.ShapeMode;
 import meteordevelopment.meteorclient.settings.BoolSetting;
 import meteordevelopment.meteorclient.settings.ColorSetting;
 import meteordevelopment.meteorclient.settings.DoubleSetting;
+import meteordevelopment.meteorclient.settings.EnumSetting;
 import meteordevelopment.meteorclient.settings.IntSetting;
 import meteordevelopment.meteorclient.settings.ItemListSetting;
 import meteordevelopment.meteorclient.settings.Setting;
@@ -53,6 +54,25 @@ import net.minecraft.world.chunk.WorldChunk;
 
 public class LootLens extends Module {
 
+    // ─────────────────────────── Enums ───────────────────────────
+
+    /**
+     * Controls how tracked containers are rendered.
+     *
+     * GLOW     – The original layered bloom-box renderer. Draws expanding
+     *            transparent boxes around every target with configurable
+     *            layers, spread, and alpha.
+     *
+     * SPECTRAL – Uses Minecraft's spectral arrow (glowing outline) effect on
+     *            chest minecart entities via GlowingRegistry. Block containers
+     *            fall back to a subtle filled box because the outline shader
+     *            is entity-only.
+     */
+    public enum RenderMode {
+        GLOW,
+        SPECTRAL
+    }
+
     // ─────────────────────────── State ───────────────────────────
 
     private final Map<BlockPos, StorageType>      containers                 = new HashMap<>();
@@ -81,7 +101,7 @@ public class LootLens extends Module {
     private final SettingGroup sgStorage    = settings.createGroup("Storage");
     private final SettingGroup sgUtility    = settings.createGroup("Utility");
     private final SettingGroup sgDecorative = settings.createGroup("Decorative");
-    private final SettingGroup sgGlow       = settings.createGroup("Glow");
+    private final SettingGroup sgBeam       = settings.createGroup("Beam");
 
     // ── General ──
 
@@ -108,33 +128,67 @@ public class LootLens extends Module {
         .build()
     );
 
-    // ── Glow ──
+    // ── Highlight rendering ───────────────────────────────────────────────
 
-    private final Setting<Integer> glowLayers = sgGlow.add(new IntSetting.Builder()
+    /**
+     * GLOW     – Layered bloom boxes (original behaviour).
+     * SPECTRAL – Spectral arrow outline effect for chest minecart entities
+     *            (via GlowingRegistry); subtle fill box fallback for block
+     *            containers (the outline shader is entity-only).
+     */
+    private final Setting<RenderMode> renderMode = sgGeneral.add(new EnumSetting.Builder<RenderMode>()
+        .name("render-mode")
+        .description("GLOW = layered bloom boxes. SPECTRAL = spectral arrow outline for entities, subtle fill for blocks.")
+        .defaultValue(RenderMode.GLOW)
+        .build()
+    );
+
+    private final Setting<Integer> glowLayers = sgGeneral.add(new IntSetting.Builder()
         .name("glow-layers")
         .description("Number of bloom layers rendered around each container.")
         .defaultValue(4)
         .min(1).sliderMax(8)
+        .visible(() -> renderMode.get() == RenderMode.GLOW)
         .build()
     );
 
-    private final Setting<Double> glowSpread = sgGlow.add(new DoubleSetting.Builder()
+    private final Setting<Double> glowSpread = sgGeneral.add(new DoubleSetting.Builder()
         .name("glow-spread")
         .description("How far each bloom layer expands outward (in blocks).")
         .defaultValue(0.04)
         .min(0.01).sliderMax(0.15)
+        .visible(() -> renderMode.get() == RenderMode.GLOW)
         .build()
     );
 
-    private final Setting<Integer> glowBaseAlpha = sgGlow.add(new IntSetting.Builder()
+    private final Setting<Integer> glowBaseAlpha = sgGeneral.add(new IntSetting.Builder()
         .name("glow-base-alpha")
         .description("Alpha of the innermost glow layer (0-255).")
         .defaultValue(60)
         .min(10).sliderMax(150)
+        .visible(() -> renderMode.get() == RenderMode.GLOW)
         .build()
     );
 
-    private final Setting<Integer> beamWidth = sgGlow.add(new IntSetting.Builder()
+    private final Setting<Integer> spectralFillAlpha = sgGeneral.add(new IntSetting.Builder()
+        .name("spectral-fill-alpha")
+        .description("Fill alpha for block containers in SPECTRAL mode (0 = invisible, 40 = subtle).")
+        .defaultValue(40).min(0).max(200).sliderMax(120)
+        .visible(() -> renderMode.get() == RenderMode.SPECTRAL)
+        .build()
+    );
+
+    private final Setting<Boolean> spectralOutline = sgGeneral.add(new BoolSetting.Builder()
+        .name("spectral-outline")
+        .description("Draw a crisp outline around block containers in SPECTRAL mode.")
+        .defaultValue(true)
+        .visible(() -> renderMode.get() == RenderMode.SPECTRAL)
+        .build()
+    );
+
+    // ── Beam ──
+
+    private final Setting<Integer> beamWidth = sgBeam.add(new IntSetting.Builder()
         .name("beam-width")
         .description("Beam width (in hundredths of a block).")
         .defaultValue(15)
@@ -143,14 +197,14 @@ public class LootLens extends Module {
         .build()
     );
 
-    private final Setting<Boolean> mergeBeams = sgGlow.add(new BoolSetting.Builder()
+    private final Setting<Boolean> mergeBeams = sgBeam.add(new BoolSetting.Builder()
         .name("merge-beams")
         .description("Merge beams for nearby shulker containers to reduce clutter.")
         .defaultValue(true)
         .build()
     );
 
-    private final Setting<Double> mergeDistance = sgGlow.add(new DoubleSetting.Builder()
+    private final Setting<Double> mergeDistance = sgBeam.add(new DoubleSetting.Builder()
         .name("merge-distance")
         .description("Distance within which beams are merged.")
         .defaultValue(2.0)
@@ -451,7 +505,7 @@ public class LootLens extends Module {
             }
             if (!previouslyHadShulker && notification.get()) {
                 mc.player.playSound(SoundEvents.ENTITY_EXPERIENCE_ORB_PICKUP, 1.0f, 1.0f);
-                info("§a%d %s found!", shulkerCount, shulkerCount == 1 ? "item" : "items");
+                info("%d %s found!", shulkerCount, shulkerCount == 1 ? "item" : "items");
             }
         } else {
             containers.remove(lastOpenedContainer);
@@ -462,7 +516,7 @@ public class LootLens extends Module {
                 shulkerContainers.remove(adjacentChest);
                 shulkerCounts.remove(adjacentChest);
             }
-            if (previouslyHadShulker && notification.get()) info("§70 items found, removing highlight.");
+            if (previouslyHadShulker && notification.get()) info("0 items found, removing highlight.");
         }
     }
 
@@ -486,7 +540,10 @@ public class LootLens extends Module {
                 for (BlockEntity be : chunk.getBlockEntities().values()) {
                     BlockPos pos = be.getPos();
                     if (pos.getSquaredDistance(playerPos) > maxDistSq) continue;
-                    if (scannedByScanner.contains(pos) && !shulkerContainers.contains(pos)) continue;
+
+                    if (scannedByScanner.contains(pos)
+                            && !shulkerContainers.contains(pos)
+                            && !inventoryCheckedContainers.contains(pos)) continue;
 
                     Block block = mc.world.getBlockState(pos).getBlock();
                     StorageType type = classifyBlock(block);
@@ -573,7 +630,7 @@ public class LootLens extends Module {
 
             if (notifiedItemFrames.add(pos) && notification.get()) {
                 if (isShulker) info("Shulker found in item frame!");
-                else           info("§aTracked item found in item frame!");
+                else           info("Tracked item found in item frame!");
                 mc.player.playSound(SoundEvents.ENTITY_EXPERIENCE_ORB_PICKUP, 1.0f, 1.0f);
             }
         }
@@ -627,7 +684,10 @@ public class LootLens extends Module {
     private void cleanupDistantContainers() {
         if (mc.player == null) return;
         BlockPos playerPos = mc.player.getBlockPos();
-        int cleanupRangeSq = (int) Math.pow(range.get() * 1.5, 2);
+
+        int cleanupRange   = range.get() + (range.get() >> 1);
+        int cleanupRangeSq = cleanupRange * cleanupRange;
+
         containers.entrySet().removeIf(entry -> {
             if (entry.getKey().getSquaredDistance(playerPos) <= cleanupRangeSq) return false;
             BlockPos pos = entry.getKey();
@@ -644,6 +704,8 @@ public class LootLens extends Module {
     @EventHandler
     private void onRender(Render3DEvent event) {
         if (mc.player == null || mc.world == null) return;
+
+        boolean isSpectral = renderMode.get() == RenderMode.SPECTRAL;
 
         Set<BlockPos>  toRemove             = new HashSet<>();
         Set<BlockPos>  renderedDoubleChests = new HashSet<>();
@@ -693,13 +755,18 @@ public class LootLens extends Module {
 
             if (baseColor == null) continue;
 
-            // Render bloom layers — outermost first (most transparent), innermost last (most opaque)
-            renderGlowLayers(event, renderBox, baseColor);
+            if (isSpectral) {
+                // Spectral arrow outline effect is entity-only (via GlowingRegistry for chest minecarts).
+                // Block containers fall back to a fill box; entity targets are handled by the shader.
+                int fillAlpha = (type == StorageType.CHEST_MINECART) ? 0 : spectralFillAlpha.get();
+                int lineAlpha = (type == StorageType.CHEST_MINECART || !spectralOutline.get()) ? 0 : baseColor.a;
+                event.renderer.box(renderBox, withAlpha(baseColor, fillAlpha), withAlpha(baseColor, lineAlpha),
+                    spectralOutline.get() ? ShapeMode.Both : ShapeMode.Sides, 0);
+            } else {
+                renderGlowLayers(event, renderBox, baseColor);
+                event.renderer.box(renderBox, withAlpha(baseColor, 0), baseColor, ShapeMode.Lines, 0);
+            }
 
-            // Render solid outline on top
-            event.renderer.box(renderBox, withAlpha(baseColor, 0), baseColor, ShapeMode.Lines, 0);
-
-            // Beams only for shulker-confirmed containers
             if (isShulkerConfirmed) beamsToRender.add(new BeamData(renderBox, baseColor));
         }
 
@@ -718,22 +785,19 @@ public class LootLens extends Module {
 
     /**
      * Renders a bloom/glow effect by drawing multiple progressively larger filled
-     * boxes with decreasing alpha around the given box. The result looks like a
-     * soft light halo emanating from the container.
+     * boxes with decreasing alpha. Quadratic falloff keeps the glow bright near
+     * the container surface and drops off sharply at the edges.
      */
     private void renderGlowLayers(Render3DEvent event, Box box, SettingColor color) {
-        int   layers    = glowLayers.get();
-        double spread   = glowSpread.get();
-        int   baseAlpha = glowBaseAlpha.get();
+        int    layers    = glowLayers.get();
+        double spread    = glowSpread.get();
+        int    baseAlpha = glowBaseAlpha.get();
 
         for (int i = layers; i >= 1; i--) {
             double expansion = spread * i;
-            // Alpha falls off sharply as we go outward
-            int layerAlpha = Math.max(4, (int) (baseAlpha * (1.0 - (double)(i - 1) / layers)));
-            Box expanded = box.expand(expansion);
-            SettingColor layerColor = withAlpha(color, layerAlpha);
-            // Filled quads only — no outline on bloom layers
-            event.renderer.box(expanded, layerColor, withAlpha(color, 0), ShapeMode.Sides, 0);
+            double t          = (double)(i - 1) / layers;
+            int    layerAlpha = Math.max(4, (int)(baseAlpha * (1.0 - t * t)));
+            event.renderer.box(box.expand(expansion), withAlpha(color, layerAlpha), withAlpha(color, 0), ShapeMode.Sides, 0);
         }
     }
 
@@ -767,18 +831,16 @@ public class LootLens extends Module {
         int    worldBot = mc.world.getBottomY();
         int    worldTop = worldBot + mc.world.getHeight();
 
-        // Core beam
         Box beamBox = new Box(
             centerX - beamSize, worldBot, centerZ - beamSize,
             centerX + beamSize, worldTop, centerZ + beamSize
         );
         event.renderer.box(beamBox, withAlpha(color, 80), color, ShapeMode.Both, 0);
 
-        // Bloom around the beam — two outer layers
         for (int i = 1; i <= 2; i++) {
-            double exp = beamSize * i * 1.5;
-            int alpha  = Math.max(4, 30 / i);
-            Box bloom  = new Box(
+            double exp   = beamSize * i * 1.5;
+            int    alpha = Math.max(4, 30 / i);
+            Box    bloom = new Box(
                 centerX - beamSize - exp, worldBot, centerZ - beamSize - exp,
                 centerX + beamSize + exp, worldTop, centerZ + beamSize + exp
             );
@@ -787,26 +849,38 @@ public class LootLens extends Module {
     }
 
     private void renderItemFrames(Render3DEvent event, List<BeamData> beams) {
-        SettingColor color = itemFrameColor.get();
+        if (!scanItemFramesSetting.get()) return;
+        SettingColor color     = itemFrameColor.get();
+        boolean      isSpectral = renderMode.get() == RenderMode.SPECTRAL;
 
         for (ItemFrameEntity frame : itemFrameEntities.values()) {
             if (frame == null || frame.isRemoved()) continue;
-            renderGlowLayers(event, frame.getBoundingBox(), color);
-            event.renderer.box(frame.getBoundingBox(), withAlpha(color, 0), color, ShapeMode.Lines, 0);
+            if (isSpectral) {
+                event.renderer.box(frame.getBoundingBox(),
+                    withAlpha(color, spectralFillAlpha.get()),
+                    withAlpha(color, spectralOutline.get() ? color.a : 0),
+                    spectralOutline.get() ? ShapeMode.Both : ShapeMode.Sides, 0);
+            } else {
+                renderGlowLayers(event, frame.getBoundingBox(), color);
+                event.renderer.box(frame.getBoundingBox(), withAlpha(color, 0), color, ShapeMode.Lines, 0);
+            }
         }
         for (GlowItemFrameEntity frame : glowItemFrameEntities.values()) {
             if (frame == null || frame.isRemoved()) continue;
-            renderGlowLayers(event, frame.getBoundingBox(), color);
-            event.renderer.box(frame.getBoundingBox(), withAlpha(color, 0), color, ShapeMode.Lines, 0);
+            if (isSpectral) {
+                event.renderer.box(frame.getBoundingBox(),
+                    withAlpha(color, spectralFillAlpha.get()),
+                    withAlpha(color, spectralOutline.get() ? color.a : 0),
+                    spectralOutline.get() ? ShapeMode.Both : ShapeMode.Sides, 0);
+            } else {
+                renderGlowLayers(event, frame.getBoundingBox(), color);
+                event.renderer.box(frame.getBoundingBox(), withAlpha(color, 0), color, ShapeMode.Lines, 0);
+            }
         }
     }
 
     // ─────────────────────────── Color Helpers ───────────────────────────
 
-    /**
-     * Returns a copy of the given SettingColor with a different alpha.
-     * Does not mutate the original.
-     */
     private SettingColor withAlpha(SettingColor color, int alpha) {
         return new SettingColor(color.r, color.g, color.b, Math.min(255, Math.max(0, alpha)));
     }
@@ -814,11 +888,11 @@ public class LootLens extends Module {
     // ─────────────────────────── Box Helpers ───────────────────────────
 
     private Box getMinecartChestBox(ChestMinecartEntity minecart) {
-        Box entityBox  = minecart.getBoundingBox();
-        double chestSz = 14.0 / 16.0;
-        double xPad    = (entityBox.getLengthX() - chestSz) / 2.0;
-        double zPad    = (entityBox.getLengthZ() - chestSz) / 2.0;
-        double minY    = entityBox.maxY - (10.0 / 16.0);
+        Box    entityBox = minecart.getBoundingBox();
+        double chestSz   = 14.0 / 16.0;
+        double xPad      = (entityBox.getLengthX() - chestSz) / 2.0;
+        double zPad      = (entityBox.getLengthZ() - chestSz) / 2.0;
+        double minY      = entityBox.maxY - (10.0 / 16.0);
         return new Box(
             entityBox.minX + xPad, minY,           entityBox.minZ + zPad,
             entityBox.maxX - xPad, entityBox.maxY, entityBox.maxZ - zPad
@@ -833,8 +907,8 @@ public class LootLens extends Module {
 
     private Box createShulkerBox(BlockPos pos, BlockState state) {
         try {
-            Box shape = state.getOutlineShape(mc.world, pos).getBoundingBox();
-            double p  = 0.5 / 16.0;
+            Box    shape = state.getOutlineShape(mc.world, pos).getBoundingBox();
+            double p     = 0.5 / 16.0;
             return new Box(
                 pos.getX() + shape.minX - p, pos.getY() + shape.minY - p, pos.getZ() + shape.minZ - p,
                 pos.getX() + shape.maxX + p, pos.getY() + shape.maxY + p, pos.getZ() + shape.maxZ + p

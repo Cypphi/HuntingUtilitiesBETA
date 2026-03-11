@@ -1,9 +1,12 @@
 package com.example.addon.modules;
 
+import java.util.HashMap;
 import java.util.HashSet;
+import java.util.Map;
 import java.util.Set;
 
 import com.example.addon.HuntingUtilities;
+import com.example.addon.utils.GlowingRegistry;
 
 import meteordevelopment.meteorclient.events.render.Render3DEvent;
 import meteordevelopment.meteorclient.events.world.TickEvent;
@@ -37,6 +40,22 @@ public class Illushine extends Module {
 
     private enum MobCategory { PASSIVE, NEUTRAL, HOSTILE }
 
+    /**
+     * Wireframe — custom geometry outline drawn by WireframeEntityRenderer.
+     * Spectral  — vanilla glowing outline (spectral arrow effect) driven by
+     *             GlowingRegistry → existing EntityGlowingMixin pipeline.
+     * Both modes render the bloom box-expand halo on top.
+     */
+    public enum HighlightMode {
+        Wireframe("Wireframe"),
+        Spectral("Spectral");
+
+        private final String title;
+        HighlightMode(String title) { this.title = title; }
+
+        @Override public String toString() { return title; }
+    }
+
     public enum CrosshairMode {
         None("None"),
         WhiteDot("White Dot"),
@@ -45,9 +64,29 @@ public class Illushine extends Module {
         private final String title;
         CrosshairMode(String title) { this.title = title; }
 
-        @Override
-        public String toString() { return title; }
+        @Override public String toString() { return title; }
     }
+
+    // ═══════════════════════════════════════════════════════════════════════════
+    // Category override table
+    // ═══════════════════════════════════════════════════════════════════════════
+
+    private static final Map<EntityType<?>, MobCategory> CATEGORY_OVERRIDES = Map.of(
+        // Hostile — implement Monster but do NOT extend HostileEntity
+        EntityType.GHAST,      MobCategory.HOSTILE,
+        EntityType.SHULKER,    MobCategory.HOSTILE,
+        EntityType.PHANTOM,    MobCategory.HOSTILE,
+        EntityType.SLIME,      MobCategory.HOSTILE,
+        EntityType.MAGMA_CUBE, MobCategory.HOSTILE,
+        EntityType.HOGLIN,     MobCategory.HOSTILE,
+        // Neutral — extend AnimalEntity (PassiveEntity) but attack unprovoked
+        EntityType.FOX,        MobCategory.NEUTRAL,
+        EntityType.GOAT,       MobCategory.NEUTRAL,
+        // Piglin extends AbstractPiglinEntity → HostileEntity, but is neutral
+        // toward players wearing gold armor — wiki categorises as NEUTRAL.
+        // PiglinBrute always attacks regardless of armor, stays HOSTILE.
+        EntityType.PIGLIN,     MobCategory.NEUTRAL
+    );
 
     // ═══════════════════════════════════════════════════════════════════════════
     // Setting Groups
@@ -64,12 +103,17 @@ public class Illushine extends Module {
     // Settings — General
     // ═══════════════════════════════════════════════════════════════════════════
 
+    private final Setting<HighlightMode> highlightMode = sgGeneral.add(new EnumSetting.Builder<HighlightMode>()
+        .name("highlight-mode")
+        .description("How mobs are outlined. Wireframe draws custom geometry; Spectral uses the vanilla glow pipeline.")
+        .defaultValue(HighlightMode.Wireframe)
+        .build()
+    );
+
     private final Setting<Integer> range = sgGeneral.add(new IntSetting.Builder()
         .name("range")
         .description("Range to highlight mobs.")
-        .defaultValue(64)
-        .min(1)
-        .sliderMax(256)
+        .defaultValue(64).min(1).sliderMax(256)
         .build()
     );
 
@@ -82,11 +126,9 @@ public class Illushine extends Module {
 
     private final Setting<Double> outlineScale = sgGeneral.add(new DoubleSetting.Builder()
         .name("outline-scale")
-        .description("Scale of the wireframe outline relative to the mob's actual size. " +
-                     "Values slightly above 1.0 push the outline just outside the model surface.")
-        .defaultValue(1.0)
-        .min(0.1)
-        .sliderMax(2.0)
+        .description("Scale of the wireframe outline (Wireframe mode only).")
+        .defaultValue(1.0).min(0.1).sliderMax(2.0)
+        .visible(() -> highlightMode.get() == HighlightMode.Wireframe)
         .build()
     );
 
@@ -110,156 +152,90 @@ public class Illushine extends Module {
     );
 
     private final Setting<Integer> crosshairSize = sgCrosshair.add(new IntSetting.Builder()
-        .name("crosshair-size")
-        .description("Half-length of each crosshair arm in pixels.")
-        .defaultValue(5)
-        .min(1)
-        .sliderMax(20)
+        .name("crosshair-size").description("Half-length of each crosshair arm in pixels.")
+        .defaultValue(5).min(1).sliderMax(20)
         .visible(() -> crosshairMode.get() == CrosshairMode.Normal)
         .build()
     );
 
     private final Setting<Integer> crosshairGap = sgCrosshair.add(new IntSetting.Builder()
-        .name("crosshair-gap")
-        .description("Gap (in pixels) between center and each arm.")
-        .defaultValue(2)
-        .min(0)
-        .sliderMax(10)
+        .name("crosshair-gap").description("Gap (in pixels) between center and each arm.")
+        .defaultValue(2).min(0).sliderMax(10)
         .visible(() -> crosshairMode.get() == CrosshairMode.Normal)
         .build()
     );
 
     private final Setting<Integer> crosshairThickness = sgCrosshair.add(new IntSetting.Builder()
-        .name("crosshair-thickness")
-        .description("Thickness of the crosshair lines in pixels.")
-        .defaultValue(1)
-        .min(1)
-        .sliderMax(5)
+        .name("crosshair-thickness").description("Thickness of the crosshair lines in pixels.")
+        .defaultValue(1).min(1).sliderMax(5)
         .visible(() -> crosshairMode.get() == CrosshairMode.Normal)
         .build()
     );
 
     // ═══════════════════════════════════════════════════════════════════════════
-    // Settings — Passive
+    // Settings — Passive / Neutral / Hostile
     // ═══════════════════════════════════════════════════════════════════════════
 
     private final Setting<Boolean> highlightPassive = sgPassive.add(new BoolSetting.Builder()
-        .name("highlight-passive")
-        .description("Highlight passive mobs (cows, pigs, sheep, etc.).")
-        .defaultValue(true)
-        .build()
-    );
+        .name("highlight-passive").description("Highlight passive mobs.").defaultValue(true).build());
 
     private final Setting<SettingColor> passiveColor = sgPassive.add(new ColorSetting.Builder()
-        .name("passive-color")
-        .description("Outline color for passive mobs.")
-        .defaultValue(new SettingColor(0, 255, 100, 255))
-        .visible(highlightPassive::get)
-        .build()
-    );
-
-    // ═══════════════════════════════════════════════════════════════════════════
-    // Settings — Neutral
-    // ═══════════════════════════════════════════════════════════════════════════
+        .name("passive-color").description("Outline color for passive mobs.")
+        .defaultValue(new SettingColor(0, 255, 100, 255)).visible(highlightPassive::get).build());
 
     private final Setting<Boolean> highlightNeutral = sgNeutral.add(new BoolSetting.Builder()
-        .name("highlight-neutral")
-        .description("Highlight neutral mobs (wolves, bees, endermen, etc.).")
-        .defaultValue(true)
-        .build()
-    );
+        .name("highlight-neutral").description("Highlight neutral mobs.").defaultValue(true).build());
 
     private final Setting<SettingColor> neutralColor = sgNeutral.add(new ColorSetting.Builder()
-        .name("neutral-color")
-        .description("Outline color for neutral mobs.")
-        .defaultValue(new SettingColor(255, 200, 0, 255))
-        .visible(highlightNeutral::get)
-        .build()
-    );
-
-    // ═══════════════════════════════════════════════════════════════════════════
-    // Settings — Hostile
-    // ═══════════════════════════════════════════════════════════════════════════
+        .name("neutral-color").description("Outline color for neutral mobs.")
+        .defaultValue(new SettingColor(255, 200, 0, 255)).visible(highlightNeutral::get).build());
 
     private final Setting<Boolean> highlightHostile = sgHostile.add(new BoolSetting.Builder()
-        .name("highlight-hostile")
-        .description("Highlight hostile mobs (zombies, skeletons, creepers, etc.).")
-        .defaultValue(true)
-        .build()
-    );
+        .name("highlight-hostile").description("Highlight hostile mobs.").defaultValue(true).build());
 
     private final Setting<SettingColor> hostileColor = sgHostile.add(new ColorSetting.Builder()
-        .name("hostile-color")
-        .description("Outline color for hostile mobs.")
-        .defaultValue(new SettingColor(255, 50, 50, 255))
-        .visible(highlightHostile::get)
-        .build()
-    );
+        .name("hostile-color").description("Outline color for hostile mobs.")
+        .defaultValue(new SettingColor(255, 50, 50, 255)).visible(highlightHostile::get).build());
 
     // ═══════════════════════════════════════════════════════════════════════════
-    // Settings — Glow
+    // Settings — Glow (bloom — applies to both modes)
     // ═══════════════════════════════════════════════════════════════════════════
 
     private final Setting<Boolean> glowEnabled = sgGlow.add(new BoolSetting.Builder()
-        .name("glow")
-        .description("Render a bloom halo around each mob in addition to the wireframe outline.")
-        .defaultValue(true)
-        .build()
-    );
+        .name("glow").description("Render a bloom halo around each mob.").defaultValue(true).build());
 
     private final Setting<Integer> glowLayers = sgGlow.add(new IntSetting.Builder()
-        .name("glow-layers")
-        .description("Number of bloom layers rendered around each mob.")
-        .defaultValue(4)
-        .min(1)
-        .sliderMax(8)
-        .visible(glowEnabled::get)
-        .build()
-    );
+        .name("glow-layers").description("Number of bloom layers.")
+        .defaultValue(4).min(1).sliderMax(8).visible(glowEnabled::get).build());
 
     private final Setting<Double> glowSpread = sgGlow.add(new DoubleSetting.Builder()
-        .name("glow-spread")
-        .description("How far each bloom layer expands outward (in blocks).")
-        .defaultValue(0.05)
-        .min(0.01)
-        .sliderMax(0.2)
-        .visible(glowEnabled::get)
-        .build()
-    );
+        .name("glow-spread").description("How far each bloom layer expands (blocks).")
+        .defaultValue(0.05).min(0.01).sliderMax(0.2).visible(glowEnabled::get).build());
 
     private final Setting<Integer> glowBaseAlpha = sgGlow.add(new IntSetting.Builder()
-        .name("glow-base-alpha")
-        .description("Alpha of the innermost glow layer (0-255).")
-        .defaultValue(60)
-        .min(10)
-        .sliderMax(150)
-        .visible(glowEnabled::get)
-        .build()
-    );
+        .name("glow-base-alpha").description("Alpha of the innermost glow layer.")
+        .defaultValue(60).min(10).sliderMax(150).visible(glowEnabled::get).build());
 
     // ═══════════════════════════════════════════════════════════════════════════
     // State
     // ═══════════════════════════════════════════════════════════════════════════
 
-    // IDs of mobs currently being highlighted — rebuilt every tick so it's
-    // always fresh and onRender never needs a second full entity scan.
-    private final Set<Integer> activelyOutlined = new HashSet<>();
+    private final Map<Integer, MobCategory> activelyOutlined = new HashMap<>();
 
     // ═══════════════════════════════════════════════════════════════════════════
     // Constructor
     // ═══════════════════════════════════════════════════════════════════════════
 
     public Illushine() {
-        super(HuntingUtilities.CATEGORY, "illushine", "Highlights mobs with a wireframe outline by hostility type.");
+        super(HuntingUtilities.CATEGORY, "illushine",
+            "Highlights mobs with a wireframe or spectral outline by hostility type.");
     }
 
     // ═══════════════════════════════════════════════════════════════════════════
-    // Public Getters
+    // Public API
     // ═══════════════════════════════════════════════════════════════════════════
 
-    public CrosshairMode getCrosshairMode() {
-        return crosshairMode.get();
-    }
+    public CrosshairMode getCrosshairMode() { return crosshairMode.get(); }
 
     // ═══════════════════════════════════════════════════════════════════════════
     // Lifecycle
@@ -268,15 +244,17 @@ public class Illushine extends Module {
     @Override
     public void onActivate() {
         activelyOutlined.clear();
+        GlowingRegistry.clear();
     }
 
     @Override
     public void onDeactivate() {
         activelyOutlined.clear();
+        GlowingRegistry.clear();
     }
 
     // ═══════════════════════════════════════════════════════════════════════════
-    // Tick — rebuild active set (ID-only, no rendering)
+    // Tick — rebuild active set, sync GlowingRegistry for Spectral mode
     // ═══════════════════════════════════════════════════════════════════════════
 
     @EventHandler
@@ -284,6 +262,14 @@ public class Illushine extends Module {
         if (mc.world == null || mc.player == null) return;
 
         activelyOutlined.clear();
+        // Always clear registry entries we own. We re-add below if still needed.
+        // Note: if Mobanom is also running it will re-add its own entries after
+        // this clear — that's fine because Mobanom's onTick runs independently.
+        // If the two modules clash on an entity ID, last-writer wins, which is
+        // acceptable since both agree the entity should glow.
+        GlowingRegistry.clear();
+
+        boolean spectral = highlightMode.get() == HighlightMode.Spectral;
 
         for (Entity entity : mc.world.getEntities()) {
             if (!(entity instanceof MobEntity mob)) continue;
@@ -298,55 +284,52 @@ public class Illushine extends Module {
             };
             if (!shouldHighlight) continue;
 
-            activelyOutlined.add(mob.getId());
+            activelyOutlined.put(mob.getId(), category);
+
+            // In Spectral mode, register into GlowingRegistry with our category
+            // color. The existing EntityGlowingMixin reads isGlowing() from here,
+            // and the existing color mixin reads getColor() to paint the outline.
+            if (spectral) {
+                SettingColor c = colorForCategory(category);
+                GlowingRegistry.add(mob.getId(), (255 << 24) | (c.r << 16) | (c.g << 8) | c.b);
+            }
         }
     }
 
     // ═══════════════════════════════════════════════════════════════════════════
-    // Render — wireframe outline + optional bloom halo
+    // Render
+    // Wireframe mode  — WireframeEntityRenderer draws the outline here.
+    // Spectral mode   — outline is drawn by vanilla's glow pipeline via the
+    //                   existing mixin; we only draw the bloom halo here.
     // ═══════════════════════════════════════════════════════════════════════════
 
     @EventHandler
     private void onRender(Render3DEvent event) {
         if (mc.world == null || mc.player == null || activelyOutlined.isEmpty()) return;
 
-        for (int entityId : activelyOutlined) {
-            Entity entity = mc.world.getEntityById(entityId);
-            if (entity == null || !(entity instanceof MobEntity mob)) continue;
+        boolean wireframe = highlightMode.get() == HighlightMode.Wireframe;
 
-            MobCategory  category = categorise(mob);
-            SettingColor color    = switch (category) {
-                case PASSIVE -> passiveColor.get();
-                case NEUTRAL -> neutralColor.get();
-                case HOSTILE -> hostileColor.get();
-            };
+        for (Map.Entry<Integer, MobCategory> entry : activelyOutlined.entrySet()) {
+            Entity entity = mc.world.getEntityById(entry.getKey());
+            if (!(entity instanceof MobEntity mob)) continue;
 
-            // Bloom halo drawn first so it sits behind the wireframe lines.
+            SettingColor color = colorForCategory(entry.getValue());
+
             if (glowEnabled.get()) {
                 renderGlowLayers(event, mob.getBoundingBox(), color);
             }
 
-            // WireframeEntityRenderer traces the actual rendered model geometry
-            // (vertices and quads) using the same render pipeline Meteor's own
-            // ESP "Shader" mode uses internally.
-            //
-            // sideColor = subtle transparent fill inside the mesh faces
-            // lineColor = the solid outline edges that follow the mob's shape
-            // scale     = 1.0 traces the exact surface; nudge above 1.0 to push
-            //             the outline slightly outside so it isn't clipped by the skin
-            WireframeEntityRenderer.render(
-                event,
-                mob,
-                outlineScale.get(),
-                withAlpha(color, 25),  // subtle fill so the mob shape reads in dark areas
-                color,                 // solid edge lines
-                ShapeMode.Both
-            );
+            if (wireframe) {
+                WireframeEntityRenderer.render(
+                    event, mob, outlineScale.get(),
+                    withAlpha(color, 25), color, ShapeMode.Both
+                );
+            }
         }
     }
 
     // ═══════════════════════════════════════════════════════════════════════════
-    // Bloom Rendering (box-space halo behind the wireframe)
+    // Bloom
     // ═══════════════════════════════════════════════════════════════════════════
 
     private void renderGlowLayers(Render3DEvent event, Box box, SettingColor color) {
@@ -356,24 +339,22 @@ public class Illushine extends Module {
 
         for (int i = layers; i >= 1; i--) {
             double expansion = spread * i;
-            // Quadratic falloff: bright at the mob surface, drops off sharply outward.
             double t          = (double)(i - 1) / layers;
             int    layerAlpha = Math.max(4, (int)(baseAlpha * (1.0 - t * t)));
-
             event.renderer.box(
                 box.expand(expansion),
-                withAlpha(color, layerAlpha),
-                withAlpha(color, 0),
+                withAlpha(color, layerAlpha), withAlpha(color, 0),
                 ShapeMode.Sides, 0
             );
         }
     }
 
     // ═══════════════════════════════════════════════════════════════════════════
-    // Crosshair Drawing (called from mixin with the real DrawContext)
+    // Crosshair
     // ═══════════════════════════════════════════════════════════════════════════
 
     public void drawCrosshair(DrawContext context) {
+        if (mc.getWindow() == null) return;
         if (!mc.options.getPerspective().isFirstPerson()) return;
         if (mc.currentScreen != null) return;
 
@@ -388,20 +369,18 @@ public class Illushine extends Module {
     }
 
     private void drawNormalCrosshair(DrawContext context, int cx, int cy) {
-        int arm  = crosshairSize.get();
-        int gap  = crosshairGap.get();
-        int th   = crosshairThickness.get();
-        int half = th / 2;
-        int col  = toARGB(crosshairColor.get());
+        int arm = crosshairSize.get();
+        int gap = crosshairGap.get();
+        int th  = crosshairThickness.get();
+        int col = toARGB(crosshairColor.get());
 
-        // Horizontal left arm
-        context.fill(cx - arm - gap, cy - half,      cx - gap,       cy - half + th, col);
-        // Horizontal right arm
-        context.fill(cx + gap,       cy - half,      cx + arm + gap, cy - half + th, col);
-        // Vertical top arm
-        context.fill(cx - half,      cy - arm - gap, cx - half + th, cy - gap,       col);
-        // Vertical bottom arm
-        context.fill(cx - half,      cy + gap,       cx - half + th, cy + arm + gap, col);
+        int halfU = th / 2;
+        int halfD = th - halfU;
+
+        context.fill(cx - arm - gap, cy - halfU, cx - gap,       cy + halfD, col);
+        context.fill(cx + gap,       cy - halfU, cx + arm + gap, cy + halfD, col);
+        context.fill(cx - halfU,     cy - arm - gap, cx + halfD, cy - gap,   col);
+        context.fill(cx - halfU,     cy + gap,       cx + halfD, cy + arm + gap, col);
     }
 
     // ═══════════════════════════════════════════════════════════════════════════
@@ -409,15 +388,26 @@ public class Illushine extends Module {
     // ═══════════════════════════════════════════════════════════════════════════
 
     private MobCategory categorise(MobEntity mob) {
-        if (mob instanceof Angerable)     return MobCategory.NEUTRAL;
+        MobCategory override = CATEGORY_OVERRIDES.get(mob.getType());
+        if (override != null) return override;
+
         if (mob instanceof HostileEntity) return MobCategory.HOSTILE;
+        if (mob instanceof Angerable)     return MobCategory.NEUTRAL;
         if (mob instanceof PassiveEntity) return MobCategory.PASSIVE;
-        return MobCategory.HOSTILE;
+        return MobCategory.NEUTRAL;
     }
 
     // ═══════════════════════════════════════════════════════════════════════════
-    // Color Helpers
+    // Helpers
     // ═══════════════════════════════════════════════════════════════════════════
+
+    private SettingColor colorForCategory(MobCategory cat) {
+        return switch (cat) {
+            case PASSIVE -> passiveColor.get();
+            case NEUTRAL -> neutralColor.get();
+            case HOSTILE -> hostileColor.get();
+        };
+    }
 
     private SettingColor withAlpha(SettingColor color, int alpha) {
         return new SettingColor(color.r, color.g, color.b, Math.min(255, Math.max(0, alpha)));

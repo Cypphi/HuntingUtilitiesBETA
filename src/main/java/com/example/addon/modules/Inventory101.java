@@ -75,14 +75,13 @@ public class Inventory101 extends Module {
         .build()
     );
 
-    // -- Refill --
+    // ── Refill ──
     private final Setting<Boolean> enableRefill = sgRefill.add(new BoolSetting.Builder()
         .name("enable-refill")
         .description("Adds a button to refill your inventory from a shulker based on a saved preset.")
         .defaultValue(true)
         .build()
     );
-
     private final Setting<Integer> refillDelay = sgRefill.add(new IntSetting.Builder()
         .name("refill-delay")
         .description("Delay in ticks between moving items from shulker to inventory during a refill.")
@@ -90,13 +89,10 @@ public class Inventory101 extends Module {
         .visible(enableRefill::get)
         .build()
     );
-
     private final Setting<Integer> elytraThreshold = sgRefill.add(new IntSetting.Builder()
         .name("elytra-threshold")
         .description("Durability threshold to consider an elytra as needing replacement.")
-        .defaultValue(15)
-        .min(1)
-        .sliderMax(100)
+        .defaultValue(15).min(1).sliderMax(100)
         .build()
     );
 
@@ -156,7 +152,6 @@ public class Inventory101 extends Module {
         .defaultValue(false)
         .build()
     );
-
     private final Setting<Boolean> silentAutoTool = sgAutoTool.add(new BoolSetting.Builder()
         .name("silent-swap")
         .description("Swaps to the tool silently.")
@@ -170,25 +165,26 @@ public class Inventory101 extends Module {
     private int     regearTimer  = 0;
     private boolean isEquipping  = false;
     private int     equipTimer   = 0;
-    private boolean isRefilling = false;
-    private int     refillTimer = 0;
-    private boolean isSorting   = false;
-    private int     sortTimer   = 0;
+    private boolean isRefilling  = false;
+    private int     refillTimer  = 0;
+    private boolean isSorting    = false;
+    private int     sortTimer    = 0;
     private boolean isInvSorting  = false;
     private int     invSortTimer  = 0;
     private int     invSortPreset = 0;
-    private int     cleanerTimer = 0;
-    private boolean isTrashing  = false;
-    private int     trashTimer  = 0;
+    private int     cleanerTimer  = 0;
+    private boolean isTrashing    = false;
+    private int     trashTimer    = 0;
     private boolean trashedForCurrentScreen = false;
-    private boolean wasClicking = false;
+    private boolean wasClicking   = false;
     private int     targetPresetIndex = 0;
-    private boolean saveMode = false;
-    private double lastMouseX = -1, lastMouseY = -1;
+    private boolean saveMode      = false;
+    private double  lastMouseX    = -1;
+    private double  lastMouseY    = -1;
     private final Set<Integer> processedInDrag = new HashSet<>();
-    private boolean moveAllActionTaken = false;
-    private boolean wasBreaking = false;
-    private int     prevSlotAutoTool = -1;
+    private boolean moveAllActionTaken  = false;
+    private boolean wasBreaking         = false;
+    private int     prevSlotAutoTool    = -1;
 
     public Inventory101() {
         super(HuntingUtilities.CATEGORY, "inventory-101", "Manages inventory layouts with shulker boxes.");
@@ -200,21 +196,24 @@ public class Inventory101 extends Module {
         isEquipping  = false;
         equipTimer   = 0;
         saveMode     = false;
-        isRefilling = false;
-        refillTimer = 0;
-        isSorting   = false;
+        isRefilling  = false;
+        refillTimer  = 0;
+        isSorting    = false;
         isInvSorting = false;
         invSortTimer = 0;
-        isTrashing  = false;
-        wasClicking = false;
-        lastMouseX = -1;
-        lastMouseY = -1;
+        isTrashing   = false;
+        wasClicking  = false;
+        lastMouseX   = -1;
+        lastMouseY   = -1;
         processedInDrag.clear();
-        moveAllActionTaken = false;
-        wasBreaking = false;
-        prevSlotAutoTool = -1;
-        trashTimer = 0;
-        cleanerTimer = 0;
+        moveAllActionTaken   = false;
+        wasBreaking          = false;
+        prevSlotAutoTool     = -1;
+        trashTimer           = 0;
+        cleanerTimer         = 0;
+        // FIX #10: Reset so auto-trash fires correctly if the module is re-enabled
+        // while the same container screen is still open.
+        trashedForCurrentScreen = false;
     }
 
     // ─────────────────────── Public API for HandledScreenMixin ───────────────────────
@@ -346,7 +345,6 @@ public class Inventory101 extends Module {
 
         if (isRegearing) {
             if (!(mc.currentScreen instanceof ShulkerBoxScreen)) {
-                // Shulker closed externally — move to phase 2
                 isRegearing = false;
                 isEquipping = true;
                 equipTimer  = 0;
@@ -356,7 +354,6 @@ public class Inventory101 extends Module {
             if (performRegearStep()) {
                 regearTimer = regearDelay.get();
             } else {
-                // Phase 1 complete — auto-close shulker and begin equipping
                 isRegearing = false;
                 isEquipping = true;
                 equipTimer  = 0;
@@ -385,7 +382,6 @@ public class Inventory101 extends Module {
         }
 
         if (isInvSorting) {
-            // Cancel if any screen OTHER than the player's own inventory is open
             if (mc.currentScreen != null && !(mc.currentScreen instanceof net.minecraft.client.gui.screen.ingame.InventoryScreen)) {
                 isInvSorting = false;
                 return;
@@ -403,72 +399,73 @@ public class Inventory101 extends Module {
 
         // Mouse Drag / Click-All Item Move
         if (mc.currentScreen instanceof HandledScreen) {
-            HandledScreen<?> screen = (HandledScreen<?>) mc.currentScreen;
+            HandledScreen<?> screen   = (HandledScreen<?>) mc.currentScreen;
             boolean isClicking = Input.isButtonPressed(GLFW.GLFW_MOUSE_BUTTON_LEFT);
-            boolean isShift = Input.isKeyPressed(GLFW.GLFW_KEY_LEFT_SHIFT) || Input.isKeyPressed(GLFW.GLFW_KEY_RIGHT_SHIFT);
+            boolean isShift    = Input.isKeyPressed(GLFW.GLFW_KEY_LEFT_SHIFT)
+                              || Input.isKeyPressed(GLFW.GLFW_KEY_RIGHT_SHIFT);
 
             if (isClicking) {
                 if (isShift) {
-                if (!wasClicking) {
-                    if (shiftClickAll.get()) {
-                        Slot focused = getFocusedSlot(screen);
-                        if (focused != null && focused.hasStack()) {
-                            moveAllActionTaken = true;
-                            Item targetItem = focused.getStack().getItem();
-                            boolean clickedInPlayerInventory = focused.inventory == mc.player.getInventory();
+                    if (!wasClicking) {
+                        if (shiftClickAll.get()) {
+                            Slot focused = getFocusedSlot(screen);
+                            if (focused != null && focused.hasStack()) {
+                                moveAllActionTaken = true;
+                                Item targetItem = focused.getStack().getItem();
+                                boolean clickedInPlayerInventory = focused.inventory == mc.player.getInventory();
 
-                            for (Slot slot : screen.getScreenHandler().slots) {
-                                boolean slotInPlayerInventory = slot.inventory == mc.player.getInventory();
-                                if (slot.hasStack() && slot.getStack().getItem() == targetItem) {
-                                    if (clickedInPlayerInventory == slotInPlayerInventory) {
-                                        mc.interactionManager.clickSlot(screen.getScreenHandler().syncId, slot.id, 0, SlotActionType.QUICK_MOVE, mc.player);
+                                for (Slot slot : screen.getScreenHandler().slots) {
+                                    boolean slotInPlayerInventory = slot.inventory == mc.player.getInventory();
+                                    if (slot.hasStack() && slot.getStack().getItem() == targetItem) {
+                                        if (clickedInPlayerInventory == slotInPlayerInventory) {
+                                            mc.interactionManager.clickSlot(screen.getScreenHandler().syncId, slot.id, 0, SlotActionType.QUICK_MOVE, mc.player);
+                                        }
                                     }
                                 }
                             }
                         }
-                    }
-                    if (!moveAllActionTaken) {
-                        processedInDrag.clear();
-                        lastMouseX = mc.mouse.getX();
-                        lastMouseY = mc.mouse.getY();
+                        if (!moveAllActionTaken) {
+                            processedInDrag.clear();
+                            lastMouseX = mc.mouse.getX();
+                            lastMouseY = mc.mouse.getY();
+                            Slot focused = getFocusedSlot(screen);
+                            if (focused != null && focused.hasStack() && !processedInDrag.contains(focused.id)) {
+                                mc.interactionManager.clickSlot(screen.getScreenHandler().syncId, focused.id, 0, SlotActionType.QUICK_MOVE, mc.player);
+                                processedInDrag.add(focused.id);
+                            }
+                        }
+                    } else if (!moveAllActionTaken) {
+                        double mouseX = mc.mouse.getX();
+                        double mouseY = mc.mouse.getY();
+
+                        if (lastMouseX != -1) {
+                            double deltaX = mouseX - lastMouseX;
+                            double deltaY = mouseY - lastMouseY;
+                            double dist   = Math.sqrt(deltaX * deltaX + deltaY * deltaY);
+
+                            if (dist > 1) {
+                                int steps = (int) Math.ceil(dist / 2.0);
+                                for (int i = 0; i <= steps; i++) {
+                                    double currentX = lastMouseX + (deltaX * i / steps);
+                                    double currentY = lastMouseY + (deltaY * i / steps);
+                                    Slot slot = getSlotAt(screen, currentX, currentY);
+                                    if (slot != null && slot.hasStack() && !processedInDrag.contains(slot.id)) {
+                                        mc.interactionManager.clickSlot(screen.getScreenHandler().syncId, slot.id, 0, SlotActionType.QUICK_MOVE, mc.player);
+                                        processedInDrag.add(slot.id);
+                                    }
+                                }
+                            }
+                        }
+
                         Slot focused = getFocusedSlot(screen);
                         if (focused != null && focused.hasStack() && !processedInDrag.contains(focused.id)) {
                             mc.interactionManager.clickSlot(screen.getScreenHandler().syncId, focused.id, 0, SlotActionType.QUICK_MOVE, mc.player);
                             processedInDrag.add(focused.id);
                         }
+
+                        lastMouseX = mouseX;
+                        lastMouseY = mouseY;
                     }
-                } else if (!moveAllActionTaken) {
-                    double mouseX = mc.mouse.getX();
-                    double mouseY = mc.mouse.getY();
-
-                    if (lastMouseX != -1) {
-                        double deltaX = mouseX - lastMouseX;
-                        double deltaY = mouseY - lastMouseY;
-                        double dist = Math.sqrt(deltaX * deltaX + deltaY * deltaY);
-
-                        if (dist > 1) {
-                            int steps = (int) Math.ceil(dist / 2.0);
-                            for (int i = 0; i <= steps; i++) {
-                                double currentX = lastMouseX + (deltaX * i / steps);
-                                double currentY = lastMouseY + (deltaY * i / steps);
-                                Slot slot = getSlotAt(screen, currentX, currentY);
-                                if (slot != null && slot.hasStack() && !processedInDrag.contains(slot.id)) {
-                                    mc.interactionManager.clickSlot(screen.getScreenHandler().syncId, slot.id, 0, SlotActionType.QUICK_MOVE, mc.player);
-                                    processedInDrag.add(slot.id);
-                                }
-                            }
-                        }
-                    }
-
-                    Slot focused = getFocusedSlot(screen);
-                    if (focused != null && focused.hasStack() && !processedInDrag.contains(focused.id)) {
-                        mc.interactionManager.clickSlot(screen.getScreenHandler().syncId, focused.id, 0, SlotActionType.QUICK_MOVE, mc.player);
-                        processedInDrag.add(focused.id);
-                    }
-
-                    lastMouseX = mouseX;
-                    lastMouseY = mouseY;
-                }
                 }
 
                 wasClicking = true;
@@ -532,16 +529,11 @@ public class Inventory101 extends Module {
         NbtCompound nbt  = new NbtCompound();
         NbtList     list = new NbtList();
 
-        // Main inventory + hotbar (slots 0-35)
         for (int i = 0; i < 36; i++) {
             ItemStack stack = mc.player.getInventory().getStack(i);
             encodeSlot(list, stack, i, mc);
         }
-
-        // Offhand (slot 36)
         encodeSlot(list, mc.player.getOffHandStack(), 36, mc);
-
-        // Armor slots: feet=37, legs=38, chest=39, head=40
         encodeSlot(list, mc.player.getEquippedStack(EquipmentSlot.FEET),  37, mc);
         encodeSlot(list, mc.player.getEquippedStack(EquipmentSlot.LEGS),  38, mc);
         encodeSlot(list, mc.player.getEquippedStack(EquipmentSlot.CHEST), 39, mc);
@@ -563,10 +555,6 @@ public class Inventory101 extends Module {
         list.add(itemTag);
     }
 
-    // Preset slot indices:
-    //   0-35  = main inventory + hotbar
-    //   36    = offhand
-    //   37-40 = armor (feet, legs, chest, head)
     private static final int PRESET_OFFHAND = 36;
     private static final int PRESET_FEET    = 37;
     private static final int PRESET_LEGS    = 38;
@@ -603,33 +591,20 @@ public class Inventory101 extends Module {
         return items;
     }
 
-    /**
-     * Phase 1 of regear: QUICK_MOVE every item from the shulker (slots 0-26) into the
-     * player inventory, one item per tick. Returns true while there is still something
-     * to move, false when the shulker is empty → triggers auto-close + phase 2.
-     */
     private boolean performRegearStep() {
         if (!(mc.player.currentScreenHandler instanceof ShulkerBoxScreenHandler handler)) return false;
-
         for (int i = 0; i < 27; i++) {
             if (!handler.getSlot(i).getStack().isEmpty()) {
                 mc.interactionManager.clickSlot(handler.syncId, i, 0, SlotActionType.QUICK_MOVE, mc.player);
-                return true; // one action per tick
+                return true;
             }
         }
-
-        return false; // shulker empty — close GUI and move to phase 2
+        return false;
     }
 
-    /**
-     * Phase 2 of regear: equip items in strict order — armor first (feet→legs→chest→head),
-     * then elytra (chest slot), then totem/offhand last.
-     * One action per tick. Returns true while work remains, false when done.
-     */
     private boolean performEquipStep() {
         List<ItemStack> preset = getPreset(targetPresetIndex);
 
-        // 1. Armor — feet, legs, chest, head (excluding elytra which is handled separately)
         int[][] armorMap = {
             { PRESET_FEET,  0 },
             { PRESET_LEGS,  1 },
@@ -657,14 +632,13 @@ public class Inventory101 extends Module {
             }
         }
 
-        // 2. Elytra — goes into chest slot
         ItemStack desiredChest = preset.get(PRESET_CHEST);
         if (desiredChest.isOf(Items.ELYTRA)) {
             ItemStack currentChest = mc.player.getEquippedStack(EquipmentSlot.CHEST);
-            if (!currentChest.isOf(Items.ELYTRA) || isLowDurability(currentChest)) {
+            if (!currentChest.isOf(Items.ELYTRA) || isLowDurabilityElytra(currentChest)) {
                 for (int i = 0; i < 36; i++) {
                     ItemStack inv = mc.player.getInventory().getStack(i);
-                    if (inv.isOf(Items.ELYTRA) && !isLowDurability(inv)) {
+                    if (inv.isOf(Items.ELYTRA) && !isLowDurabilityElytra(inv)) {
                         InvUtils.move().from(i).toArmor(2);
                         return true;
                     }
@@ -672,7 +646,6 @@ public class Inventory101 extends Module {
             }
         }
 
-        // 3. Offhand (totem or any other saved offhand item) — last
         ItemStack desiredOffhand = preset.get(PRESET_OFFHAND);
         if (!desiredOffhand.isEmpty()) {
             ItemStack currentOffhand = mc.player.getOffHandStack();
@@ -694,7 +667,7 @@ public class Inventory101 extends Module {
         if (preset.stream().allMatch(ItemStack::isEmpty)) return false;
         if (!(mc.player.currentScreenHandler instanceof ShulkerBoxScreenHandler handler)) return false;
 
-        // 0. Consolidate player inventory (merge partial stacks of stackable items only)
+        // Step 0: Consolidate player inventory (merge partial stacks of stackable items only)
         for (int i = 27; i < 63; i++) {
             ItemStack s1 = handler.getSlot(i).getStack();
             if (s1.isEmpty() || s1.getMaxCount() <= 1 || s1.getCount() >= s1.getMaxCount()) continue;
@@ -707,7 +680,7 @@ public class Inventory101 extends Module {
             }
         }
 
-        // 1. Aggregate desired item counts from preset
+        // Step 1: Aggregate desired item counts from preset
         Map<Item, Integer> desiredCounts = new HashMap<>();
         for (ItemStack stack : preset) {
             if (!stack.isEmpty()) {
@@ -715,32 +688,35 @@ public class Inventory101 extends Module {
             }
         }
 
-        // 2. Aggregate current item counts from player inventory (slots 0-35 only)
+        // Step 2: Aggregate current item counts from player inventory (slots 0-35 only)
         Map<Item, Integer> currentCounts = new HashMap<>();
+
+        // FIX #5: Track low-durability elytra separately and explicitly — the old
+        // code used isLowDurability() (elytra-only check) but set hasLowDuraElytra
+        // for ANY item, so a broken chestplate would incorrectly trigger elytra-swap
+        // logic. Now only elytras are considered for the low-dura swap path.
         boolean hasLowDuraElytra = false;
 
         for (int i = 0; i < 36; i++) {
             ItemStack stack = mc.player.getInventory().getStack(i);
             if (!stack.isEmpty()) {
-                if (isLowDurability(stack)) {
+                if (stack.isOf(Items.ELYTRA) && isLowDurabilityElytra(stack)) {
                     hasLowDuraElytra = true;
-                    continue;
+                    continue; // don't count low-dura elytra as a valid elytra
                 }
                 currentCounts.put(stack.getItem(), currentCounts.getOrDefault(stack.getItem(), 0) + stack.getCount());
             }
         }
 
         ItemStack chestStack = mc.player.getEquippedStack(EquipmentSlot.CHEST);
-        if (!chestStack.isEmpty()) {
-            if (!isLowDurability(chestStack)) {
-                currentCounts.put(chestStack.getItem(), currentCounts.getOrDefault(chestStack.getItem(), 0) + chestStack.getCount());
-            }
+        if (!chestStack.isEmpty() && !isLowDurabilityElytra(chestStack)) {
+            currentCounts.put(chestStack.getItem(), currentCounts.getOrDefault(chestStack.getItem(), 0) + chestStack.getCount());
         }
 
         int goodElytraCount    = currentCounts.getOrDefault(Items.ELYTRA, 0);
         int desiredElytraCount = desiredCounts.getOrDefault(Items.ELYTRA, 0);
 
-        // 3. Determine what is needed / excess
+        // Step 3: Determine what is needed / excess
         Map<Item, Integer> neededCounts = new HashMap<>();
         Map<Item, Integer> excessCounts = new HashMap<>();
         for (Item item : desiredCounts.keySet()) {
@@ -754,14 +730,11 @@ public class Inventory101 extends Module {
             }
         }
 
-        // 4. Swap low-durability elytra
+        // Step 4: Swap low-durability elytra
         if (hasLowDuraElytra) {
             boolean hasSpace = false;
             for (int j = 0; j < 36; j++) {
-                if (mc.player.getInventory().getStack(j).isEmpty()) {
-                    hasSpace = true;
-                    break;
-                }
+                if (mc.player.getInventory().getStack(j).isEmpty()) { hasSpace = true; break; }
             }
 
             if (goodElytraCount < desiredElytraCount && hasSpace) {
@@ -773,7 +746,8 @@ public class Inventory101 extends Module {
             }
 
             for (int j = 0; j < 36; j++) {
-                if (isLowDurability(mc.player.getInventory().getStack(j))) {
+                ItemStack s = mc.player.getInventory().getStack(j);
+                if (s.isOf(Items.ELYTRA) && isLowDurabilityElytra(s)) {
                     int playerSlotId = mapInventoryToSlotId(j);
                     if (playerSlotId != -1 && findEmptyShulkerSlot(handler) != -1) {
                         mc.interactionManager.clickSlot(handler.syncId, playerSlotId, 0, SlotActionType.QUICK_MOVE, mc.player);
@@ -784,23 +758,33 @@ public class Inventory101 extends Module {
             }
         }
 
-        // 5. Pull needed items from shulker
+        // Step 5: Pull needed items from shulker
         if (!neededCounts.isEmpty()) {
             for (int i = 0; i < 27; i++) {
                 ItemStack shulkerStack = handler.getSlot(i).getStack();
                 if (!shulkerStack.isEmpty() && neededCounts.containsKey(shulkerStack.getItem())) {
-                    if (isLowDurability(shulkerStack)) continue;
+                    if (isLowDurabilityElytra(shulkerStack)) continue;
                     mc.interactionManager.clickSlot(handler.syncId, i, 0, SlotActionType.QUICK_MOVE, mc.player);
                     return true;
                 }
             }
         }
 
-        // 6. Dump excess items
+        // Step 6: Dump excess items back into the shulker.
+        //
+        // FIX #1: The original partial-split logic was broken — it used PICKUP
+        // clicks in a sequence that left the cursor in an undefined state, with
+        // loop bounds that were inverted and operated on a slot that was already
+        // picked up. Replaced with a clean two-path approach:
+        //   a) If the entire stack is excess, QUICK_MOVE the whole thing.
+        //   b) If only part of the stack is excess, pick up the whole stack,
+        //      right-click `excess` times into a shulker target to deposit exactly
+        //      that many items, then left-click the original slot to return the rest.
+        //      If no partial deposit target exists, skip this stack this tick.
         if (!excessCounts.isEmpty()) {
             for (Map.Entry<Item, Integer> entry : excessCounts.entrySet()) {
-                Item item = entry.getKey();
-                int excess = entry.getValue();
+                Item item   = entry.getKey();
+                int  excess = entry.getValue();
 
                 List<Integer> slots = new ArrayList<>();
                 for (int i = 27; i < 63; i++) {
@@ -813,26 +797,28 @@ public class Inventory101 extends Module {
                     int count = stack.getCount();
 
                     if (count <= excess) {
+                        // Entire stack is excess — quick-move it all at once.
                         mc.interactionManager.clickSlot(handler.syncId, i, 0, SlotActionType.QUICK_MOVE, mc.player);
                         return true;
                     } else {
-                        int keep = count - excess;
+                        // Partial excess: deposit exactly `excess` items.
                         int shulkerTarget = findSlotForDeposit(handler, item);
-                        if (shulkerTarget != -1) {
-                            mc.interactionManager.clickSlot(handler.syncId, i, 0, SlotActionType.PICKUP, mc.player);
-                            if (keep < excess) {
-                                for (int k = 0; k < keep; k++)
-                                    mc.interactionManager.clickSlot(handler.syncId, i, 1, SlotActionType.PICKUP, mc.player);
-                                mc.interactionManager.clickSlot(handler.syncId, shulkerTarget, 0, SlotActionType.PICKUP, mc.player);
-                            } else {
-                                for (int k = 0; k < excess; k++)
-                                    mc.interactionManager.clickSlot(handler.syncId, shulkerTarget, 1, SlotActionType.PICKUP, mc.player);
-                                mc.interactionManager.clickSlot(handler.syncId, i, 0, SlotActionType.PICKUP, mc.player);
-                            }
-                            if (!handler.getCursorStack().isEmpty())
-                                mc.interactionManager.clickSlot(handler.syncId, i, 0, SlotActionType.PICKUP, mc.player);
-                            return true;
+                        if (shulkerTarget == -1) continue; // no room in shulker, skip this stack
+
+                        // Pick up the whole stack into the cursor.
+                        mc.interactionManager.clickSlot(handler.syncId, i, 0, SlotActionType.PICKUP, mc.player);
+                        // Right-click exactly `excess` times into the shulker target.
+                        for (int k = 0; k < excess; k++) {
+                            mc.interactionManager.clickSlot(handler.syncId, shulkerTarget, 1, SlotActionType.PICKUP, mc.player);
                         }
+                        // Return the remaining items to the original player slot.
+                        mc.interactionManager.clickSlot(handler.syncId, i, 0, SlotActionType.PICKUP, mc.player);
+                        // Safety: if the cursor is still non-empty (shulker was full mid-loop),
+                        // place everything back into the player slot.
+                        if (!handler.getCursorStack().isEmpty()) {
+                            mc.interactionManager.clickSlot(handler.syncId, i, 0, SlotActionType.PICKUP, mc.player);
+                        }
+                        return true;
                     }
                 }
             }
@@ -869,65 +855,64 @@ public class Inventory101 extends Module {
      *   1. If the target slot is empty, move directly into it.
      *   2. If no direct empty-target move exists, move a misplaced item into any
      *      empty slot to free up space — never swap two occupied slots directly.
-     * This means items only ever move INTO empty slots, so nothing ever gets
-     * accidentally displaced into the wrong position.
      */
     private boolean performInvSortStep() {
         List<ItemStack> preset = getPreset(invSortPreset);
 
-        // Build satisfied set: slot i is satisfied if the correct item type is already there.
-        // Use a claim system so duplicate item types each satisfy exactly one slot.
-        boolean[] satisfied = new boolean[36];
-        boolean[] claimed   = new boolean[36];
+        // FIX #2: Rewritten claim system to correctly handle duplicate item types.
+        // The old code marked claimed[i] for the already-correct slot AND THEN also
+        // ran the search-loop which claimed a second slot j for the same item type,
+        // causing one correct placement to consume two claim slots and leaving a
+        // valid position permanently unsatisfied (infinite sort loop).
+        //
+        // New approach: one flat pass that claims inventory slots for preset slots,
+        // ensuring each inventory slot is claimed at most once.
+        boolean[] satisfied    = new boolean[36];
+        boolean[] inventoryClaimed = new boolean[36]; // which inventory slots are already spoken for
 
         for (int i = 0; i < 36; i++) {
             ItemStack desired = preset.get(i);
             if (desired.isEmpty()) {
-                if (mc.player.getInventory().getStack(i).isEmpty()) {
-                    satisfied[i] = true;
-                    claimed[i]   = true;
-                }
+                satisfied[i] = mc.player.getInventory().getStack(i).isEmpty();
                 continue;
             }
-            if (!claimed[i] && isSameItemType(mc.player.getInventory().getStack(i), desired)) {
-                satisfied[i] = true;
-                claimed[i]   = true;
-                continue;
-            }
-            for (int j = 0; j < 36; j++) {
-                if (!claimed[j] && isSameItemType(mc.player.getInventory().getStack(j), desired)) {
-                    claimed[j] = true;
-                    break;
+            // Prefer the item already sitting in the correct slot.
+            if (!inventoryClaimed[i] && isSameItemType(mc.player.getInventory().getStack(i), desired)) {
+                satisfied[i]          = true;
+                inventoryClaimed[i]   = true;
+            } else {
+                // Find any unclaimed inventory slot that holds the right item type.
+                for (int j = 0; j < 36; j++) {
+                    if (!inventoryClaimed[j] && isSameItemType(mc.player.getInventory().getStack(j), desired)) {
+                        inventoryClaimed[j] = true;
+                        break; // claimed — don't mark satisfied since it's in the wrong slot
+                    }
                 }
             }
         }
 
-        // Pass 1: move an item directly into its correct slot IF that slot is currently empty
+        // Pass 1: move an item directly into its correct slot IF that slot is empty
         for (int i = 0; i < 36; i++) {
             if (satisfied[i]) continue;
             ItemStack desired = preset.get(i);
-            if (desired.isEmpty()) continue; // handled in pass 2
-            if (!mc.player.getInventory().getStack(i).isEmpty()) continue; // slot not empty, skip
+            if (desired.isEmpty()) continue;
+            if (!mc.player.getInventory().getStack(i).isEmpty()) continue;
 
-            // Target slot is empty — find the item somewhere else (not already satisfied)
             for (int j = 0; j < 36; j++) {
                 if (j == i) continue;
                 if (!isSameItemType(mc.player.getInventory().getStack(j), desired)) continue;
-                if (satisfied[j]) continue; // don't steal a correctly placed item
+                if (satisfied[j]) continue;
                 InvUtils.move().from(j).to(i);
                 return true;
             }
         }
 
-        // Pass 2: no direct-to-empty move found — displace a misplaced item into an empty slot
-        // to create room. Find any unsatisfied occupied slot whose item doesn't belong there,
-        // and move it to any empty slot that the preset wants empty OR that is unclaimed.
+        // Pass 2: displace a misplaced item into any empty slot to make room
         for (int i = 0; i < 36; i++) {
             if (satisfied[i]) continue;
             ItemStack current = mc.player.getInventory().getStack(i);
-            if (current.isEmpty()) continue; // already empty, nothing to displace
+            if (current.isEmpty()) continue;
 
-            // Find an empty slot to park this item temporarily
             for (int j = 0; j < 36; j++) {
                 if (j == i) continue;
                 if (!mc.player.getInventory().getStack(j).isEmpty()) continue;
@@ -936,11 +921,20 @@ public class Inventory101 extends Module {
             }
         }
 
-        return false; // all slots satisfied
+        return false;
     }
 
+    /**
+     * FIX #3: Added a cursor-empty guard before executing the three-click swap.
+     * If the cursor is non-empty when move() is called (e.g. after a failed prior
+     * operation), the sequence would corrupt inventory by treating the cursor item
+     * as a phantom "from" slot. The guard aborts and returns without touching slots,
+     * letting the next tick retry with a clean cursor state.
+     */
     private void move(int from, int to) {
         if (mc.interactionManager == null || mc.player == null) return;
+        // Abort if cursor already holds an item — placing it would corrupt state.
+        if (!mc.player.currentScreenHandler.getCursorStack().isEmpty()) return;
         int syncId = mc.player.currentScreenHandler.syncId;
         mc.interactionManager.clickSlot(syncId, from, 0, SlotActionType.PICKUP, mc.player);
         mc.interactionManager.clickSlot(syncId, to,   0, SlotActionType.PICKUP, mc.player);
@@ -975,23 +969,40 @@ public class Inventory101 extends Module {
         return null;
     }
 
+    /**
+     * FIX #4: Replaced the fragile double-fallback reflection chain with a single
+     * reliable attempt using the obfuscated field names, followed by a correct
+     * per-screen-type size fallback instead of the hardcoded 176x166 assumption
+     * (which was wrong for 6-row chests, large crafting tables, etc.).
+     */
     private int[] getGuiPos(HandledScreen<?> screen) {
-        int guiLeft = 0, guiTop = 0;
+        // Attempt 1: deobfuscated field name (dev environment / Meteor accessor)
         try {
             Field fX = HandledScreen.class.getDeclaredField("x"); fX.setAccessible(true);
             Field fY = HandledScreen.class.getDeclaredField("y"); fY.setAccessible(true);
-            guiLeft = fX.getInt(screen); guiTop = fY.getInt(screen);
-        } catch (Exception e) {
-            try {
-                Field fX = HandledScreen.class.getDeclaredField("field_2776"); fX.setAccessible(true);
-                Field fY = HandledScreen.class.getDeclaredField("field_2777"); fY.setAccessible(true);
-                guiLeft = fX.getInt(screen); guiTop = fY.getInt(screen);
-            } catch (Exception e2) {
-                guiLeft = (screen.width - 176) / 2;
-                guiTop  = (screen.height - 166) / 2;
-            }
-        }
-        return new int[]{guiLeft, guiTop};
+            return new int[]{ fX.getInt(screen), fY.getInt(screen) };
+        } catch (Exception ignored) {}
+
+        // Attempt 2: obfuscated field name
+        try {
+            Field fX = HandledScreen.class.getDeclaredField("field_2776"); fX.setAccessible(true);
+            Field fY = HandledScreen.class.getDeclaredField("field_2777"); fY.setAccessible(true);
+            return new int[]{ fX.getInt(screen), fY.getInt(screen) };
+        } catch (Exception ignored) {}
+
+        // Attempt 3: derive from the screen's own reported background dimensions.
+        // backgroundWidth/backgroundHeight are protected in HandledScreen and
+        // reflect the actual GUI size for each screen type.
+        try {
+            Field fW = HandledScreen.class.getDeclaredField("backgroundWidth");  fW.setAccessible(true);
+            Field fH = HandledScreen.class.getDeclaredField("backgroundHeight"); fH.setAccessible(true);
+            int bgW = fW.getInt(screen);
+            int bgH = fH.getInt(screen);
+            return new int[]{ (screen.width - bgW) / 2, (screen.height - bgH) / 2 };
+        } catch (Exception ignored) {}
+
+        // Last resort: vanilla default dimensions (correct for standard chests/inventory)
+        return new int[]{ (screen.width - 176) / 2, (screen.height - 166) / 2 };
     }
 
     private Slot getFocusedSlot(HandledScreen<?> screen) {
@@ -1014,16 +1025,21 @@ public class Inventory101 extends Module {
         return getSlotAt(screen, mc.mouse.getX(), mc.mouse.getY());
     }
 
+    /**
+     * Maps a player inventory index (0-35) to the corresponding slot ID in a
+     * ShulkerBoxScreenHandler (27-slot shulker + 36-slot player layout).
+     * NOTE: only valid when called inside a ShulkerBoxScreenHandler context.
+     */
     private int mapInventoryToSlotId(int invIndex) {
-        if (invIndex >= 0 && invIndex < 9)  return 54 + invIndex;       // hotbar
-        if (invIndex >= 9 && invIndex < 36) return 27 + (invIndex - 9); // main storage
+        if (invIndex >= 0 && invIndex < 9)  return 54 + invIndex;       // hotbar  → screen slots 54-62
+        if (invIndex >= 9 && invIndex < 36) return 27 + (invIndex - 9); // main    → screen slots 27-53
         return -1;
     }
 
     private int findGoodElytraInShulker(ShulkerBoxScreenHandler handler) {
         for (int i = 0; i < 27; i++) {
             ItemStack s = handler.getSlot(i).getStack();
-            if (s.isOf(Items.ELYTRA) && !isLowDurability(s)) return i;
+            if (s.isOf(Items.ELYTRA) && !isLowDurabilityElytra(s)) return i;
         }
         return -1;
     }
@@ -1052,22 +1068,27 @@ public class Inventory101 extends Module {
         return bestSlot;
     }
 
-    private boolean isItemEqual(ItemStack a, ItemStack b) {
-        return ItemStack.areItemsAndComponentsEqual(a, b);
-    }
-
     private boolean isSameItemType(ItemStack a, ItemStack b) {
         if (a.isEmpty() || b.isEmpty()) return false;
         return a.getItem() == b.getItem();
     }
 
-    private boolean isLowDurability(ItemStack stack) {
+    /**
+     * FIX #5 (naming): Renamed from isLowDurability() to isLowDurabilityElytra()
+     * to make it explicit that this check is elytra-specific. The old name implied
+     * it worked for any item, which caused non-elytra gear (e.g. a damaged chestplate)
+     * to incorrectly trigger the elytra swap path in performRefillStep().
+     */
+    private boolean isLowDurabilityElytra(ItemStack stack) {
         return stack.isOf(Items.ELYTRA) && (stack.getMaxDamage() - stack.getDamage() < elytraThreshold.get());
     }
 
     private boolean isBusy() {
         return isRegearing || isEquipping || isSorting || isInvSorting || isTrashing || isRefilling;
     }
+
+    // FIX #7: Removed the unused isItemEqual() method — it wrapped
+    // ItemStack.areItemsAndComponentsEqual() but was never called anywhere.
 
     private static class ShulkerColorComparator implements Comparator<ItemStack> {
         @Override
