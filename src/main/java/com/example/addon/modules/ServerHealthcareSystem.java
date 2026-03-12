@@ -30,6 +30,8 @@ import net.minecraft.entity.EquipmentSlot;
 import net.minecraft.item.Item;
 import net.minecraft.item.ItemStack;
 import net.minecraft.item.Items;
+import net.minecraft.network.packet.c2s.play.PlayerInteractItemC2SPacket;
+import net.minecraft.util.Hand;
 import net.minecraft.network.packet.s2c.play.EntityStatusS2CPacket;
 import net.minecraft.registry.RegistryKey;
 import net.minecraft.registry.entry.RegistryEntry;
@@ -123,18 +125,29 @@ public class ServerHealthcareSystem extends Module {
 
     private final Setting<Boolean> autoEat = sgAutoEat.add(new BoolSetting.Builder()
         .name("auto-eat")
-        .description("Automatically eats Golden Apples when low on health or on fire.")
+        .description("Automatically eats Golden Apples when low on health, hunger, or on fire.")
         .defaultValue(true)
         .build()
     );
 
     private final Setting<Integer> healthThreshold = sgAutoEat.add(new IntSetting.Builder()
         .name("health-threshold")
-        .description("Health at which auto-eat triggers (out of 20).")
+        .description("Health at which auto-eat triggers (out of 20). Set to 0 to disable health-based eating.")
         .defaultValue(10)
-        .min(1)
+        .min(0)
         .max(19)
-        .sliderRange(1, 19)
+        .sliderRange(0, 19)
+        .visible(autoEat::get)
+        .build()
+    );
+
+    private final Setting<Integer> hungerLoss = sgAutoEat.add(new IntSetting.Builder()
+        .name("hunger-loss")
+        .description("How many hunger points must be lost before auto-eat triggers (out of 20).")
+        .defaultValue(2)
+        .min(1)
+        .max(20)
+        .sliderRange(1, 10)
         .visible(autoEat::get)
         .build()
     );
@@ -155,9 +168,15 @@ public class ServerHealthcareSystem extends Module {
     private boolean ateForFire            = false;
     private boolean tookDamageWhileOnFire = false;
     private int     eatHotbarSlot         = -1;
-    private Item    eatTargetItem         = null; // the item we committed to eating this session
-    private int     eatStartupTicks       = 0;   // grace ticks after starting eat before we check active item
+    private Item    eatTargetItem         = null;
+    private int     eatStartupTicks       = 0;
+    private int     eatTicksRemaining     = 0;   // counts down from 32 (eating duration) when screen is open
     private float   lastHealth            = -1;
+
+    // Hunger tracking — stored as full hunger points (0-20).
+    // We record the hunger level when the player is full (or on activate)
+    // and trigger eating once it has dropped by hungerLoss points.
+    private int     fullHunger            = -1;
 
     // Auto Armor
     private int swapTimer = 0;
@@ -174,7 +193,8 @@ public class ServerHealthcareSystem extends Module {
     @Override
     public void onActivate() {
         if (mc.player != null) {
-            lastHealth = mc.player.getHealth();
+            lastHealth  = mc.player.getHealth();
+            fullHunger  = mc.player.getHungerManager().getFoodLevel();
         }
         resetState();
     }
@@ -183,6 +203,7 @@ public class ServerHealthcareSystem extends Module {
     public void onDeactivate() {
         stopEating();
         lastHealth = -1;
+        fullHunger = -1;
         resetState();
     }
 
@@ -190,6 +211,7 @@ public class ServerHealthcareSystem extends Module {
     private void onGameJoined(GameJoinedEvent event) {
         if (mc.player != null) {
             lastHealth = mc.player.getHealth();
+            fullHunger = mc.player.getHungerManager().getFoodLevel();
         }
         resetState();
         if (autoTotem.get()) {
@@ -207,7 +229,6 @@ public class ServerHealthcareSystem extends Module {
         autoTotem.set(enabled);
     }
 
-    /** Clears all transient session state. */
     private void resetState() {
         isEating              = false;
         ateForFire            = false;
@@ -215,6 +236,7 @@ public class ServerHealthcareSystem extends Module {
         eatHotbarSlot         = -1;
         eatTargetItem         = null;
         eatStartupTicks       = 0;
+        eatTicksRemaining     = 0;
         swapTimer             = 0;
     }
 
@@ -223,7 +245,25 @@ public class ServerHealthcareSystem extends Module {
         isEating        = false;
         eatHotbarSlot   = -1;
         eatTargetItem   = null;
-        eatStartupTicks = 0;
+        eatStartupTicks   = 0;
+        eatTicksRemaining = 0;
+    }
+
+    /**
+     * Sends a use-item packet directly to the server, bypassing
+     * mc.options.useKey which is ignored while any GUI screen is open.
+     */
+    private void sendUseItemPacket() {
+        if (mc.player == null) return;
+        mc.player.networkHandler.sendPacket(
+            new PlayerInteractItemC2SPacket(
+                Hand.MAIN_HAND,
+                mc.player.currentScreenHandler.getRevision(),
+                mc.player.getYaw(),
+                mc.player.getPitch()
+            )
+        );
+        mc.player.swingHand(Hand.MAIN_HAND);
     }
 
     // ── Tick ──────────────────────────────────────────────────────────────────
@@ -252,6 +292,13 @@ public class ServerHealthcareSystem extends Module {
             tookDamageWhileOnFire = false;
         }
         lastHealth = health;
+
+        // Track fullHunger: whenever the player's hunger goes up (e.g. after
+        // eating), update the reference point so the loss threshold resets.
+        int currentHunger = mc.player.getHungerManager().getFoodLevel();
+        if (fullHunger == -1 || currentHunger > fullHunger) {
+            fullHunger = currentHunger;
+        }
     }
 
     private void tickAutoRespawn() {
@@ -318,18 +365,21 @@ public class ServerHealthcareSystem extends Module {
 
         if (!isEating) {
             // ── Decide whether to start eating ───────────────────────────────
-            boolean needsHealth = mc.player.getHealth() <= healthThreshold.get();
+            boolean needsHealth = healthThreshold.get() > 0
+                && mc.player.getHealth() <= healthThreshold.get();
+
+            boolean needsHunger = fullHunger != -1
+                && (fullHunger - mc.player.getHungerManager().getFoodLevel()) >= hungerLoss.get();
+
             boolean needsFireEat = mc.player.isOnFire() && tookDamageWhileOnFire && !ateForFire;
 
-            if (!needsHealth && !needsFireEat) return;
+            if (!needsHealth && !needsHunger && !needsFireEat) return;
 
             int gappleSlot = findBestGapple();
             if (gappleSlot == -1) return;
 
-            // Remember what item type we are eating so we can validate it later
             eatTargetItem = mc.player.getInventory().getStack(gappleSlot).getItem();
 
-            // Move to hotbar if needed
             if (gappleSlot < 9) {
                 eatHotbarSlot = gappleSlot;
             } else {
@@ -338,12 +388,11 @@ public class ServerHealthcareSystem extends Module {
             }
             mc.player.getInventory().selectedSlot = eatHotbarSlot;
 
-            // Give the server/client 3 ticks to reflect the item move before
-            // we check whether the active item is correct. Without this grace
-            // period the stop-condition fires on the very first tick.
-            eatStartupTicks = 3;
+            eatStartupTicks   = 3;
+            eatTicksRemaining = 32; // vanilla eating duration in ticks
 
             mc.options.useKey.setPressed(true);
+            sendUseItemPacket();
             isEating = true;
 
             if (needsFireEat) {
@@ -354,37 +403,43 @@ public class ServerHealthcareSystem extends Module {
         } else {
             // ── Already eating — keep holding or stop ─────────────────────────
 
-            // During startup grace period just hold the key and wait
             if (eatStartupTicks > 0) {
                 eatStartupTicks--;
-                // Make sure we are still on the right hotbar slot
                 mc.player.getInventory().selectedSlot = eatHotbarSlot;
                 mc.options.useKey.setPressed(true);
+                // The packet was already sent at eat-start. Do not resend
+                // during startup ticks — that would consume extra items.
+                if (eatTicksRemaining > 0) eatTicksRemaining--;
                 return;
             }
 
-            // After grace period, check that we are actually eating the right item
             ItemStack hotbarStack = mc.player.getInventory().getStack(eatHotbarSlot);
             boolean hotbarHasGapple = eatTargetItem != null && hotbarStack.isOf(eatTargetItem);
 
-            // Also accept if the player is actively using a gapple (covers edge cases
-            // where the item animates but selectedSlot temporarily differs)
             ItemStack activeItem = mc.player.getActiveItem();
             boolean activeIsGapple = activeItem.isOf(Items.GOLDEN_APPLE)
                     || activeItem.isOf(Items.ENCHANTED_GOLDEN_APPLE);
 
             if (!hotbarHasGapple && !activeIsGapple) {
-                // Gapple is gone (eaten or moved) — stop
                 stopEating();
                 return;
             }
 
-            // Keep hotbar slot and use key locked
             mc.player.getInventory().selectedSlot = eatHotbarSlot;
             mc.options.useKey.setPressed(true);
 
-            // Stop once the player finishes using the item naturally
-            if (!mc.player.isUsingItem()) {
+            if (mc.currentScreen != null) {
+                // useKey is suppressed by the GUI — use tick countdown instead.
+                // Eating takes exactly 32 ticks in vanilla. We sent the first
+                // packet at eat-start, so just count down and stop when done.
+                // Do NOT send another packet here — one packet starts the eat,
+                // sending more would consume additional items.
+                if (eatTicksRemaining > 0) {
+                    eatTicksRemaining--;
+                } else {
+                    stopEating();
+                }
+            } else if (!mc.player.isUsingItem()) {
                 stopEating();
             }
         }
@@ -490,13 +545,6 @@ public class ServerHealthcareSystem extends Module {
         return count;
     }
 
-    /**
-     * Finds the best gapple to eat based on a fixed priority:
-     * 1. Enchanted Gapple (Hotbar)
-     * 2. Gapple (Hotbar)
-     * 3. Enchanted Gapple (Inventory)
-     * 4. Gapple (Inventory)
-     */
     private int findBestGapple() {
         int hotbarGapple      = -1;
         int inventoryEgapple  = -1;

@@ -605,8 +605,6 @@ public class DungeonAssistant extends Module {
                     && stackedMinecartCounts.getOrDefault(pos, 0) >= stackedMinecartThreshold.get();
                 color = isStacked ? stackedMinecartColor.get() : chestMinecartColor.get();
 
-                // In SPECTRAL mode entities are outlined by the shader — skip the beam,
-                // just draw a faint fill so the position is visible when not looking directly.
                 if (!isSpectral) {
                     if (isStacked) renderBeam(event, renderBox, color);
                 }
@@ -627,10 +625,6 @@ public class DungeonAssistant extends Module {
             if (color == null) continue;
 
             if (isSpectral) {
-                // Block targets: the outline shader does not apply to blocks, so draw
-                // a subtle filled box so the player can still see their position.
-                // Entity targets (CHEST_MINECART): already registered in GlowingRegistry
-                // during scan; the outline shader handles them — only draw the fill here.
                 int fillAlpha = (type == TargetType.CHEST_MINECART) ? 0 : spectralBlockFillAlpha.get();
                 event.renderer.box(renderBox, withAlpha(color, fillAlpha), withAlpha(color, 0), ShapeMode.Sides, 0);
             } else {
@@ -639,19 +633,16 @@ public class DungeonAssistant extends Module {
             }
         }
 
-        // Record broken spawners (only when chunk is confirmed loaded + block is air)
         for (BlockPos pos : toRemove) {
             TargetType removedType = targets.get(pos);
             if (removedType == TargetType.SPAWNER && trackSpawners.get()
                     && mc.world.getChunkManager().isChunkLoaded(pos.getX() >> 4, pos.getZ() >> 4)
                     && mc.world.getBlockState(pos).isAir()) {
-                info("Spawner broken at %d, %d, %d", pos.getX(), pos.getY(), pos.getZ());
                 brokenSpawners.put(pos, System.currentTimeMillis() + (brokenSpawnerDuration.get() * 1000L));
             }
             targets.remove(pos);
         }
 
-        // Render broken spawner beams
         if (!brokenSpawners.isEmpty()) {
             long         now      = System.currentTimeMillis();
             SettingColor color    = brokenSpawnerColor.get();
@@ -670,14 +661,12 @@ public class DungeonAssistant extends Module {
             }
         }
 
-        // Render endermites
         if (trackEndermites.get() && !endermiteTargets.isEmpty()) {
             SettingColor color = endermiteColor.get();
             for (EndermiteEntity endermite : endermiteTargets) {
                 if (!endermite.isAlive()) continue;
 
                 if (!isSpectral) {
-                    // GLOW mode: draw layered bloom + beam
                     renderGlowLayers(event, endermite.getBoundingBox(), color);
                     event.renderer.box(endermite.getBoundingBox(), withAlpha(color, 0), color, ShapeMode.Lines, 0);
 
@@ -690,11 +679,9 @@ public class DungeonAssistant extends Module {
                     renderGlowLayers(event, beamBox, color);
                     event.renderer.box(beamBox, withAlpha(color, 60), color, ShapeMode.Both, 0);
                 }
-                // SPECTRAL mode: the outline shader (via GlowingRegistry) handles rendering.
             }
         }
 
-        // Render spawner torches (always glow — torches are blocks, not entities)
         if (!spawnerTorches.isEmpty()) {
             SettingColor color = spawnerTorchColor.get();
             for (BlockPos pos : spawnerTorches) {
@@ -712,15 +699,10 @@ public class DungeonAssistant extends Module {
     // Spectral Registry Helpers
     // ═══════════════════════════════════════════════════════════════════════════
 
-    /**
-     * Rebuilds GlowingRegistry from the current entity target lists whenever
-     * the render mode changes. Called via onChanged on the renderMode setting.
-     */
     private void rebuildSpectralRegistry() {
         GlowingRegistry.clear();
         if (renderMode.get() != RenderMode.SPECTRAL) return;
 
-        // Chest minecarts
         if (mc.world != null && mc.player != null && trackChestMinecarts.get()) {
             int blockRange = range.get() * 16;
             Box searchBox  = new Box(mc.player.getBlockPos()).expand(blockRange, 64, blockRange);
@@ -733,7 +715,6 @@ public class DungeonAssistant extends Module {
             }
         }
 
-        // Endermites
         if (trackEndermites.get()) {
             for (EndermiteEntity e : endermiteTargets) {
                 if (e.isAlive()) GlowingRegistry.add(e.getId(), toArgb(endermiteColor.get()));
@@ -790,15 +771,18 @@ public class DungeonAssistant extends Module {
                     Block targetBlock = mc.world.getBlockState(blockToBreak).getBlock();
                     if (targetBlock == Blocks.CHEST || targetBlock == Blocks.TRAPPED_CHEST || targetBlock == Blocks.SPAWNER) {
                         isBreaking = true;
+                        // FIX: always explicitly derive isBreakingChest from the actual target block.
+                        // Previously the guard `previousSlot < 0` could leave a stale axe slot from a
+                        // prior chest break active when the next target is a spawner.
                         isBreakingChest = (targetBlock == Blocks.CHEST || targetBlock == Blocks.TRAPPED_CHEST);
-                        if (silentSwitch.get() && previousSlot < 0) previousSlot = mc.player.getInventory().selectedSlot;
+                        if (silentSwitch.get()) previousSlot = mc.player.getInventory().selectedSlot;
                     } else {
                         blockToBreak = null;
                     }
                 } else if (entityToBreak != null) {
                     if (entityToBreak instanceof ChestMinecartEntity) {
                         isBreakingEntity = true;
-                        if (silentSwitch.get() && previousSlot < 0) previousSlot = mc.player.getInventory().selectedSlot;
+                        if (silentSwitch.get()) previousSlot = mc.player.getInventory().selectedSlot;
                     } else {
                         entityToBreak = null;
                     }
@@ -830,6 +814,7 @@ public class DungeonAssistant extends Module {
                     int axeSlot = findAxe();
                     if (axeSlot != -1) mc.player.getInventory().selectedSlot = axeSlot;
                 } else {
+                    // Spawner — use pickaxe, never axe
                     int pickaxeSlot = findPickaxe();
                     if (pickaxeSlot != -1) mc.player.getInventory().selectedSlot = pickaxeSlot;
                 }
@@ -1173,7 +1158,6 @@ public class DungeonAssistant extends Module {
             endermiteTargets.add(endermite);
             currentIds.add(endermite.getId());
 
-            // Register/deregister with GlowingRegistry based on current render mode
             if (isSpectral) {
                 GlowingRegistry.add(endermite.getId(), toArgb(endermiteColor.get()));
             } else {
@@ -1332,7 +1316,6 @@ public class DungeonAssistant extends Module {
             minecartCountMap.put(pos, minecartCountMap.getOrDefault(pos, 0) + 1);
             targets.put(pos, TargetType.CHEST_MINECART);
 
-            // Update spectral registry per-minecart so color reflects stacked status
             if (isSpectral) {
                 boolean isStacked = highlightStacked.get()
                     && minecartCountMap.getOrDefault(pos, 0) >= stackedMinecartThreshold.get();
@@ -1472,10 +1455,6 @@ public class DungeonAssistant extends Module {
         return new SettingColor(color.r, color.g, color.b, Math.min(255, Math.max(0, alpha)));
     }
 
-    /**
-     * Packs a SettingColor into a standard ARGB int for GlowingRegistry.
-     * Alpha is preserved so fully-opaque colors (a=255) produce correct outlines.
-     */
     private int toArgb(SettingColor c) {
         return (c.a << 24) | (c.r << 16) | (c.g << 8) | c.b;
     }
