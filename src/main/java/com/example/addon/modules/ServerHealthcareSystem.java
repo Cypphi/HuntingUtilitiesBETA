@@ -31,20 +31,20 @@ import net.minecraft.item.Item;
 import net.minecraft.item.ItemStack;
 import net.minecraft.item.Items;
 import net.minecraft.network.packet.c2s.play.PlayerInteractItemC2SPacket;
-import net.minecraft.util.Hand;
 import net.minecraft.network.packet.s2c.play.EntityStatusS2CPacket;
 import net.minecraft.registry.RegistryKey;
 import net.minecraft.registry.entry.RegistryEntry;
 import net.minecraft.text.Text;
+import net.minecraft.util.Hand;
 
 public class ServerHealthcareSystem extends Module {
 
     // ── Setting Groups ────────────────────────────────────────────────────────
 
-    private final SettingGroup sgGeneral    = settings.getDefaultGroup();
-    private final SettingGroup sgAutoArmor  = settings.createGroup("Auto Armor");
-    private final SettingGroup sgAutoEat    = settings.createGroup("Auto Eat");
-    private final SettingGroup sgSafety     = settings.createGroup("Safety");
+    private final SettingGroup sgGeneral   = settings.getDefaultGroup();
+    private final SettingGroup sgAutoArmor = settings.createGroup("Auto Armor");
+    private final SettingGroup sgAutoEat   = settings.createGroup("Auto Eat");
+    private final SettingGroup sgSafety    = settings.createGroup("Safety");
 
     // ── General ───────────────────────────────────────────────────────────────
 
@@ -161,6 +161,13 @@ public class ServerHealthcareSystem extends Module {
         .build()
     );
 
+    private final Setting<Boolean> disconnectOnNoTotems = sgSafety.add(new BoolSetting.Builder()
+        .name("disconnect-on-no-totems")
+        .description("Disconnects if totem count reaches zero.")
+        .defaultValue(false)
+        .build()
+    );
+
     // ── State ─────────────────────────────────────────────────────────────────
 
     // Auto Eat
@@ -170,13 +177,11 @@ public class ServerHealthcareSystem extends Module {
     private int     eatHotbarSlot         = -1;
     private Item    eatTargetItem         = null;
     private int     eatStartupTicks       = 0;
-    private int     eatTicksRemaining     = 0;   // counts down from 32 (eating duration) when screen is open
+    private int     eatTicksRemaining     = 0;
     private float   lastHealth            = -1;
 
-    // Hunger tracking — stored as full hunger points (0-20).
-    // We record the hunger level when the player is full (or on activate)
-    // and trigger eating once it has dropped by hungerLoss points.
-    private int     fullHunger            = -1;
+    // Hunger tracking
+    private int fullHunger = -1;
 
     // Auto Armor
     private int swapTimer = 0;
@@ -193,8 +198,8 @@ public class ServerHealthcareSystem extends Module {
     @Override
     public void onActivate() {
         if (mc.player != null) {
-            lastHealth  = mc.player.getHealth();
-            fullHunger  = mc.player.getHungerManager().getFoodLevel();
+            lastHealth = mc.player.getHealth();
+            fullHunger = mc.player.getHungerManager().getFoodLevel();
         }
         resetState();
     }
@@ -214,20 +219,15 @@ public class ServerHealthcareSystem extends Module {
             fullHunger = mc.player.getHungerManager().getFoodLevel();
         }
         resetState();
-        if (autoTotem.get()) {
-            tickAutoTotem();
-        }
+        if (autoTotem.get()) tickAutoTotem();
     }
 
-    // ── Public API for other modules ──────────────────────────────────────────
+    // ── Public API ────────────────────────────────────────────────────────────
 
-    public boolean isAutoTotemEnabled() {
-        return isActive() && autoTotem.get();
-    }
+    public boolean isAutoTotemEnabled() { return isActive() && autoTotem.get(); }
+    public void setAutoTotem(boolean enabled) { autoTotem.set(enabled); }
 
-    public void setAutoTotem(boolean enabled) {
-        autoTotem.set(enabled);
-    }
+    // ── State Helpers ─────────────────────────────────────────────────────────
 
     private void resetState() {
         isEating              = false;
@@ -242,17 +242,13 @@ public class ServerHealthcareSystem extends Module {
 
     private void stopEating() {
         mc.options.useKey.setPressed(false);
-        isEating        = false;
-        eatHotbarSlot   = -1;
-        eatTargetItem   = null;
+        isEating          = false;
+        eatHotbarSlot     = -1;
+        eatTargetItem     = null;
         eatStartupTicks   = 0;
         eatTicksRemaining = 0;
     }
 
-    /**
-     * Sends a use-item packet directly to the server, bypassing
-     * mc.options.useKey which is ignored while any GUI screen is open.
-     */
     private void sendUseItemPacket() {
         if (mc.player == null) return;
         mc.player.networkHandler.sendPacket(
@@ -293,12 +289,8 @@ public class ServerHealthcareSystem extends Module {
         }
         lastHealth = health;
 
-        // Track fullHunger: whenever the player's hunger goes up (e.g. after
-        // eating), update the reference point so the loss threshold resets.
         int currentHunger = mc.player.getHungerManager().getFoodLevel();
-        if (fullHunger == -1 || currentHunger > fullHunger) {
-            fullHunger = currentHunger;
-        }
+        if (fullHunger == -1 || currentHunger > fullHunger) fullHunger = currentHunger;
     }
 
     private void tickAutoRespawn() {
@@ -310,9 +302,14 @@ public class ServerHealthcareSystem extends Module {
 
     private void tickAutoTotem() {
         if (!autoTotem.get()) return;
+
         if (!mc.player.getOffHandStack().isOf(Items.TOTEM_OF_UNDYING)) {
             FindItemResult totem = InvUtils.find(Items.TOTEM_OF_UNDYING);
-            if (totem.found()) InvUtils.move().from(totem.slot()).toOffhand();
+            if (totem.found()) {
+                InvUtils.move().from(totem.slot()).toOffhand();
+            } else if (disconnectOnNoTotems.get()) {
+                disconnect("[SHS] Disconnected — no totems remaining.");
+            }
         }
     }
 
@@ -350,10 +347,7 @@ public class ServerHealthcareSystem extends Module {
                     value = 1_000_000;
                 }
 
-                if (value > bestValue) {
-                    bestValue = value;
-                    bestSlot  = j;
-                }
+                if (value > bestValue) { bestValue = value; bestSlot = j; }
             }
 
             if (bestSlot != -1) InvUtils.move().from(bestSlot).toArmor(i);
@@ -364,13 +358,10 @@ public class ServerHealthcareSystem extends Module {
         if (!autoEat.get()) return;
 
         if (!isEating) {
-            // ── Decide whether to start eating ───────────────────────────────
             boolean needsHealth = healthThreshold.get() > 0
                 && mc.player.getHealth() <= healthThreshold.get();
-
             boolean needsHunger = fullHunger != -1
                 && (fullHunger - mc.player.getHungerManager().getFoodLevel()) >= hungerLoss.get();
-
             boolean needsFireEat = mc.player.isOnFire() && tookDamageWhileOnFire && !ateForFire;
 
             if (!needsHealth && !needsHunger && !needsFireEat) return;
@@ -389,7 +380,7 @@ public class ServerHealthcareSystem extends Module {
             mc.player.getInventory().selectedSlot = eatHotbarSlot;
 
             eatStartupTicks   = 3;
-            eatTicksRemaining = 32; // vanilla eating duration in ticks
+            eatTicksRemaining = 32;
 
             mc.options.useKey.setPressed(true);
             sendUseItemPacket();
@@ -401,44 +392,28 @@ public class ServerHealthcareSystem extends Module {
             }
 
         } else {
-            // ── Already eating — keep holding or stop ─────────────────────────
-
             if (eatStartupTicks > 0) {
                 eatStartupTicks--;
                 mc.player.getInventory().selectedSlot = eatHotbarSlot;
                 mc.options.useKey.setPressed(true);
-                // The packet was already sent at eat-start. Do not resend
-                // during startup ticks — that would consume extra items.
                 if (eatTicksRemaining > 0) eatTicksRemaining--;
                 return;
             }
 
-            ItemStack hotbarStack = mc.player.getInventory().getStack(eatHotbarSlot);
-            boolean hotbarHasGapple = eatTargetItem != null && hotbarStack.isOf(eatTargetItem);
+            ItemStack hotbarStack    = mc.player.getInventory().getStack(eatHotbarSlot);
+            boolean hotbarHasGapple  = eatTargetItem != null && hotbarStack.isOf(eatTargetItem);
+            ItemStack activeItem     = mc.player.getActiveItem();
+            boolean activeIsGapple   = activeItem.isOf(Items.GOLDEN_APPLE)
+                || activeItem.isOf(Items.ENCHANTED_GOLDEN_APPLE);
 
-            ItemStack activeItem = mc.player.getActiveItem();
-            boolean activeIsGapple = activeItem.isOf(Items.GOLDEN_APPLE)
-                    || activeItem.isOf(Items.ENCHANTED_GOLDEN_APPLE);
-
-            if (!hotbarHasGapple && !activeIsGapple) {
-                stopEating();
-                return;
-            }
+            if (!hotbarHasGapple && !activeIsGapple) { stopEating(); return; }
 
             mc.player.getInventory().selectedSlot = eatHotbarSlot;
             mc.options.useKey.setPressed(true);
 
             if (mc.currentScreen != null) {
-                // useKey is suppressed by the GUI — use tick countdown instead.
-                // Eating takes exactly 32 ticks in vanilla. We sent the first
-                // packet at eat-start, so just count down and stop when done.
-                // Do NOT send another packet here — one packet starts the eat,
-                // sending more would consume additional items.
-                if (eatTicksRemaining > 0) {
-                    eatTicksRemaining--;
-                } else {
-                    stopEating();
-                }
+                if (eatTicksRemaining > 0) eatTicksRemaining--;
+                else stopEating();
             } else if (!mc.player.isUsingItem()) {
                 stopEating();
             }
@@ -450,7 +425,9 @@ public class ServerHealthcareSystem extends Module {
         if (mc.player == null || mc.world == null || !disconnectOnTotemPop.get()) return;
 
         if (event.packet instanceof EntityStatusS2CPacket packet) {
-            if (packet.getStatus() == 35 && packet.getEntity(mc.world) != null && packet.getEntity(mc.world).getId() == mc.player.getId()) {
+            if (packet.getStatus() == 35
+                    && packet.getEntity(mc.world) != null
+                    && packet.getEntity(mc.world).getId() == mc.player.getId()) {
                 disconnect("[SHS] Disconnected on totem pop. " + countTotems() + " totems remaining.");
             }
         }
@@ -541,14 +518,15 @@ public class ServerHealthcareSystem extends Module {
         for (ItemStack stack : mc.player.getInventory().main) {
             if (stack.isOf(Items.TOTEM_OF_UNDYING)) count += stack.getCount();
         }
-        if (mc.player.getOffHandStack().isOf(Items.TOTEM_OF_UNDYING)) count += mc.player.getOffHandStack().getCount();
+        if (mc.player.getOffHandStack().isOf(Items.TOTEM_OF_UNDYING))
+            count += mc.player.getOffHandStack().getCount();
         return count;
     }
 
     private int findBestGapple() {
-        int hotbarGapple      = -1;
-        int inventoryEgapple  = -1;
-        int inventoryGapple   = -1;
+        int hotbarGapple     = -1;
+        int inventoryEgapple = -1;
+        int inventoryGapple  = -1;
 
         for (int i = 0; i < 36; i++) {
             ItemStack stack = mc.player.getInventory().getStack(i);
