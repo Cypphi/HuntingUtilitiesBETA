@@ -22,6 +22,7 @@ Current Modules
 - Tunnelers
 - Third Sight
 - Illushine
+- Handmold
 
 More modules coming soon — 
 
