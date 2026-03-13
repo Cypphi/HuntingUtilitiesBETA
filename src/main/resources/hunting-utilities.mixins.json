@@ -25,6 +25,9 @@
     "ThirdSightCameraMixin",
     "ThirdSightMouseMixin",
     "InGameHudMixin",
+    "HandmoldMixin",
+    "HandmoldBobMixin",
+    "HeldItemRendererAccessor",
     "TunnelersMixin"
   ],
   "injectors": {
