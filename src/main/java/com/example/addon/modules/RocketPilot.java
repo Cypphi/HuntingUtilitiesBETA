@@ -32,7 +32,7 @@ import net.minecraft.world.RaycastContext;
 public class RocketPilot extends Module {
 
     // ─── Enums ───────────────────────────────────────────────────────────────────
-    public enum FlightMode    { Normal, Oscillation, Pitch40 }
+    public enum FlightMode    { Normal, Oscillation, Pitch40, AltitudeBounce }
     public enum FlightPattern { None, Grid, Circle, ZigZag, Lawnmower, FigureEight }
 
     /**
@@ -56,6 +56,7 @@ public class RocketPilot extends Module {
     private final SettingGroup sgFlight       = settings.createGroup("Flight");
     private final SettingGroup sgPitch40      = settings.createGroup("Pitch40");
     private final SettingGroup sgOscillation  = settings.createGroup("Oscillation");
+    private final SettingGroup sgBounce       = settings.createGroup("Altitude Bounce");
     private final SettingGroup sgPatterns     = settings.createGroup("Patterns");
     private final SettingGroup sgDrunk        = settings.createGroup("DrunkPilot");
     private final SettingGroup sgFlightSafety = settings.createGroup("Flight Safety");
@@ -156,9 +157,10 @@ public class RocketPilot extends Module {
             if (!isActive() || mc.world == null) return;
             resetPatternState();
             switch (v) {
-                case Oscillation -> info("Oscillation mode enabled.");
-                case Pitch40     -> info("Pitch40 mode enabled.");
-                default          -> info("Normal flight mode enabled.");
+                case Oscillation    -> info("Oscillation mode enabled.");
+                case Pitch40        -> info("Pitch40 mode enabled.");
+                case AltitudeBounce -> info("Altitude Bounce mode enabled.");
+                default             -> info("Normal flight mode enabled.");
             }
         })
         .build()
@@ -242,7 +244,56 @@ public class RocketPilot extends Module {
         .build()
     );
 
-    // ─── Pattern Settings ────────────────────────────────────────────────────────
+    // ─── Altitude Bounce Settings ─────────────────────────────────────────────────
+    private final Setting<Double> bounceClimbPitch = sgBounce.add(new DoubleSetting.Builder()
+        .name("climb-pitch")
+        .description("Pitch angle while climbing aggressively (negative = nose up).")
+        .defaultValue(-35.0)
+        .min(-60.0).max(-5.0)
+        .sliderRange(-50.0, -10.0)
+        .visible(() -> flightMode.get() == FlightMode.AltitudeBounce)
+        .build()
+    );
+
+    private final Setting<Double> bounceGlidePitch = sgBounce.add(new DoubleSetting.Builder()
+        .name("glide-pitch")
+        .description("Pitch angle during the glide descent phase (positive = nose down).")
+        .defaultValue(20.0)
+        .min(5.0).max(60.0)
+        .sliderRange(5.0, 45.0)
+        .visible(() -> flightMode.get() == FlightMode.AltitudeBounce)
+        .build()
+    );
+
+    private final Setting<Double> bouncePeakY = sgBounce.add(new DoubleSetting.Builder()
+        .name("peak-y")
+        .description("Y level to reach before cutting rockets and beginning the glide.")
+        .defaultValue(130.0)
+        .min(-64.0).max(320.0)
+        .sliderRange(64.0, 256.0)
+        .visible(() -> flightMode.get() == FlightMode.AltitudeBounce)
+        .build()
+    );
+
+    private final Setting<Double> bounceFloorY = sgBounce.add(new DoubleSetting.Builder()
+        .name("floor-y")
+        .description("Y level at which the glide ends and the climb begins again.")
+        .defaultValue(100.0)
+        .min(-64.0).max(320.0)
+        .sliderRange(64.0, 256.0)
+        .visible(() -> flightMode.get() == FlightMode.AltitudeBounce)
+        .build()
+    );
+
+    private final Setting<Double> bouncePitchSmoothing = sgBounce.add(new DoubleSetting.Builder()
+        .name("pitch-smoothing")
+        .description("How smoothly to transition between climb and glide pitches.")
+        .defaultValue(0.08)
+        .min(0.01).max(1.0)
+        .sliderRange(0.02, 0.3)
+        .visible(() -> flightMode.get() == FlightMode.AltitudeBounce)
+        .build()
+    );
     public final Setting<FlightPattern> flightPattern = sgPatterns.add(new EnumSetting.Builder<FlightPattern>()
         .name("flight-pattern")
         .description("The pattern to fly in. Overrides yaw control.")
@@ -550,6 +601,7 @@ public class RocketPilot extends Module {
     private boolean pitch40Climbing          = false;
     private boolean pitch40Rocketing         = false;
     private long    pitch40BelowMinStartTime = -1;
+    private boolean bounceClimbing           = true;
 
     private float   targetPitch              = 0;
     private int     waveTicks                = 0;
@@ -638,6 +690,7 @@ public class RocketPilot extends Module {
         pitch40Climbing          = false;
         pitch40Rocketing         = false;
         pitch40BelowMinStartTime = -1;
+        bounceClimbing           = true;
         rocketsWarningSent       = false;
         ceilingWarningSent       = false;
         emergencyLanding         = false;
@@ -802,9 +855,10 @@ public class RocketPilot extends Module {
             }
 
             desiredPitch = switch (flightMode.get()) {
-                case Pitch40     -> handlePitch40Mode();
-                case Oscillation -> handleOscillationMode();
-                default          -> handleNormalMode();
+                case Pitch40        -> handlePitch40Mode();
+                case Oscillation    -> handleOscillationMode();
+                case AltitudeBounce -> handleAltitudeBounceMode();
+                default             -> handleNormalMode();
             };
 
             if (drunkMode.get() && !isPatternMode()) {
@@ -1075,6 +1129,33 @@ public class RocketPilot extends Module {
             }
         }
         return pitch;
+    }
+
+    // ─── Altitude Bounce Mode ─────────────────────────────────────────────────────
+    private Float handleAltitudeBounceMode() {
+        double currentY = mc.player.getY();
+        double peakY    = bouncePeakY.get();
+        double floorY   = bounceFloorY.get();
+        float  smooth   = bouncePitchSmoothing.get().floatValue();
+
+        // Flip phase at the boundaries
+        if (bounceClimbing && currentY >= peakY)  bounceClimbing = false;
+        if (!bounceClimbing && currentY <= floorY) bounceClimbing = true;
+
+        if (bounceClimbing) {
+            // Aggressive climb — fire rockets to power the ascent
+            long now = System.currentTimeMillis();
+            if (now - lastRocketTime >= rocketDelay.get()
+                    && mc.player.getVelocity().y < 0.5
+                    && shouldFireRocket() && countFireworks() > 0) {
+                fireRocket();
+                lastRocketTime = now;
+            }
+            return MathHelper.lerp(smooth, mc.player.getPitch(), bounceClimbPitch.get().floatValue());
+        } else {
+            // Glide descent — no rockets, nose down and let gravity do the work
+            return MathHelper.lerp(smooth, mc.player.getPitch(), bounceGlidePitch.get().floatValue());
+        }
     }
 
     // ─── Pattern Flight ───────────────────────────────────────────────────────────
