@@ -31,13 +31,26 @@ import net.minecraft.world.RaycastContext;
 
 public class RocketPilot extends Module {
 
-    // ─── Enum ────────────────────────────────────────────────────────────────────
-    public enum FlightMode { Normal, Oscillation, Pitch40 } public enum FlightPattern { None, Grid, Circle, ZigZag, Lawnmower, FigureEight }
+    // ─── Enums ───────────────────────────────────────────────────────────────────
+    public enum FlightMode    { Normal, Oscillation, Pitch40 }
+    public enum FlightPattern { None, Grid, Circle, ZigZag, Lawnmower, FigureEight }
+
+    /**
+     * Controls which coordinate quadrant(s) the drunk-pilot yaw bias targets.
+     *
+     *  None         – fully random yaw, no quadrant bias
+     *  PositiveOnly – bias toward +X / +Z  (SE quadrant)
+     *  NegativeOnly – bias toward -X / -Z  (NW quadrant)
+     *  NegPos       – bias toward -X / +Z  (SW quadrant)
+     *  PosNeg       – bias toward +X / -Z  (NE quadrant)
+     */
+    public enum DrunkBias { None, PositiveOnly, NegativeOnly, NegPos, PosNeg }
+
     // ─── Constants ───────────────────────────────────────────────────────────────
-    private static final int   TAKEOFF_GRACE_TICKS        = 40;
-    private static final float ELYTRA_LOW_PERCENT         = 5.0f;
-    private static final int   ELYTRA_MIN_SWAP_DUR        = 50;
-    private static final long  COLLISION_ROCKET_COOLDOWN  = 200L;
+    private static final int   TAKEOFF_GRACE_TICKS       = 40;
+    private static final float ELYTRA_LOW_PERCENT        = 5.0f;
+    private static final int   ELYTRA_MIN_SWAP_DUR       = 50;
+    private static final long  COLLISION_ROCKET_COOLDOWN = 200L;
 
     // ─── Setting Groups ───────────────────────────────────────────────────────────
     private final SettingGroup sgFlight       = settings.createGroup("Flight");
@@ -367,7 +380,7 @@ public class RocketPilot extends Module {
 
     private final Setting<Double> drunkIntensity = sgDrunk.add(new DoubleSetting.Builder()
         .name("intensity")
-        .description("Maximum yaw change per update (degrees).")
+        .description("Maximum yaw change per update (degrees). Applied when coordinate-bias is None.")
         .defaultValue(120.0)
         .min(1.0).max(180.0)
         .sliderRange(50.0, 180.0)
@@ -375,10 +388,13 @@ public class RocketPilot extends Module {
         .build()
     );
 
-    private final Setting<Boolean> positiveCoordsOnly = sgDrunk.add(new BoolSetting.Builder()
-        .name("positive-coords-only")
-        .description("Biases heading away from origin — deeper into the player's current world quadrant.")
-        .defaultValue(false)
+    /** Constrains drunk-pilot heading to a specific world-coordinate quadrant. */
+    public final Setting<DrunkBias> drunkBias = sgDrunk.add(new EnumSetting.Builder<DrunkBias>()
+        .name("coordinate-bias")
+        .description("Constrains drunk-pilot heading to a specific world quadrant. " +
+                     "None = fully random. PositiveOnly = +X/+Z. NegativeOnly = -X/-Z. " +
+                     "NegPos = -X/+Z. PosNeg = +X/-Z.")
+        .defaultValue(DrunkBias.None)
         .visible(drunkMode::get)
         .build()
     );
@@ -407,6 +423,23 @@ public class RocketPilot extends Module {
         .min(3)
         .sliderRange(5, 20)
         .visible(collisionAvoidance::get)
+        .build()
+    );
+
+    private final Setting<Boolean> netherCeilingSafety = sgFlightSafety.add(new BoolSetting.Builder()
+        .name("nether-ceiling-safety")
+        .description("Automatically pitches down when approaching the nether bedrock ceiling (Y=128) to prevent death.")
+        .defaultValue(true)
+        .build()
+    );
+
+    private final Setting<Integer> netherCeilingBuffer = sgFlightSafety.add(new IntSetting.Builder()
+        .name("nether-ceiling-buffer")
+        .description("How many blocks below the ceiling to start diving.")
+        .defaultValue(15)
+        .min(3)
+        .sliderRange(5, 30)
+        .visible(netherCeilingSafety::get)
         .build()
     );
 
@@ -524,41 +557,26 @@ public class RocketPilot extends Module {
     private float   targetDrunkYaw           = 0;
     private int     currentDrunkDuration     = 0;
     private boolean rocketsWarningSent       = false;
+    private boolean ceilingWarningSent       = false;
     private int     totemPops                = 0;
     private boolean emergencyLanding         = false;
     private int     takeoffTimer             = 0;
     private boolean panicLanding             = false;
-
-    /**
-     * Counts how many ticks we have been gliding during takeoff without a rocket
-     * being available in the hotbar yet. Once a rocket lands in the hotbar,
-     * we fire immediately rather than waiting for the next rocketDelay window.
-     */
-    private int takeoffWaitTicks = 0;
+    private int     takeoffWaitTicks         = 0;
 
     // Pattern flight state
-    private boolean paused         = false;
-    private Vec3d   origin         = null;
-    private Vec3d   currentTarget  = null;
-
-    // Grid state
-    private int gridStep       = 1;
-    private int gridStepsInLeg = 0;
-    private int gridDirection  = 0;
-
-    // ZigZag state
-    private float   zigzagCurrentYaw = 0;
-    private boolean zigzagTurnRight  = true;
-    private boolean zigzagFirstLeg   = true;
-
-    // Circle state
-    private double circleAngle = 0;
-
-    // Lawnmower state
-    private int lawnmowerWaypoint = 0;
-
-    // FigureEight state
-    private int figureEightWaypoint = 0;
+    private boolean paused              = false;
+    private Vec3d   origin              = null;
+    private Vec3d   currentTarget       = null;
+    private int     gridStep            = 1;
+    private int     gridStepsInLeg      = 0;
+    private int     gridDirection       = 0;
+    private float   zigzagCurrentYaw    = 0;
+    private boolean zigzagTurnRight     = true;
+    private boolean zigzagFirstLeg      = true;
+    private double  circleAngle         = 0;
+    private int     lawnmowerWaypoint   = 0;
+    private int     figureEightWaypoint = 0;
 
     // ─── Constructor ─────────────────────────────────────────────────────────────
     public RocketPilot() {
@@ -585,7 +603,6 @@ public class RocketPilot extends Module {
             info("Panic landing cancelled. Resuming normal flight.");
             return;
         }
-
         if (mc.player == null || !mc.player.isGliding()) {
             info("Not flying, cannot panic land.");
             return;
@@ -595,17 +612,17 @@ public class RocketPilot extends Module {
     }
 
     private void resetPatternState() {
-        paused         = false;
-        origin         = null;
-        currentTarget  = null;
-        gridStep       = 1;
-        gridStepsInLeg = 0;
-        gridDirection  = 0;
-        zigzagCurrentYaw = 0;
-        zigzagTurnRight  = true;
-        zigzagFirstLeg   = true;
-        circleAngle      = 0;
-        lawnmowerWaypoint = 0;
+        paused              = false;
+        origin              = null;
+        currentTarget       = null;
+        gridStep            = 1;
+        gridStepsInLeg      = 0;
+        gridDirection       = 0;
+        zigzagCurrentYaw    = 0;
+        zigzagTurnRight     = true;
+        zigzagFirstLeg      = true;
+        circleAngle         = 0;
+        lawnmowerWaypoint   = 0;
         figureEightWaypoint = 0;
     }
 
@@ -622,6 +639,7 @@ public class RocketPilot extends Module {
         pitch40Rocketing         = false;
         pitch40BelowMinStartTime = -1;
         rocketsWarningSent       = false;
+        ceilingWarningSent       = false;
         emergencyLanding         = false;
         takeoffTimer             = 0;
         panicLanding             = false;
@@ -676,7 +694,6 @@ public class RocketPilot extends Module {
 
         replenishRockets();
 
-        // ── Safety: totem pop disconnect ──
         if (disconnectOnTotemPop.get()) {
             int currentPops = mc.player.getStatHandler().getStat(Stats.USED, Items.TOTEM_OF_UNDYING);
             if (currentPops > totemPops) {
@@ -686,7 +703,6 @@ public class RocketPilot extends Module {
             }
         }
 
-        // ── Safety: low health with totem ──
         if (autoDisableOnLowHealth.get()) {
             boolean hasTotem = mc.player.getOffHandStack().isOf(Items.TOTEM_OF_UNDYING)
                             || mc.player.getMainHandStack().isOf(Items.TOTEM_OF_UNDYING);
@@ -697,7 +713,6 @@ public class RocketPilot extends Module {
             }
         }
 
-        // ── Elytra presence check ──
         ItemStack elytra = mc.player.getEquippedStack(EquipmentSlot.CHEST);
         if (elytra.isEmpty() || !elytra.isOf(Items.ELYTRA)) {
             error("Elytra missing — disabling.");
@@ -707,14 +722,12 @@ public class RocketPilot extends Module {
 
         if (takeoffTimer > 0) takeoffTimer--;
 
-        // ── Land detection ──
         if (disableOnLand.get() && mc.player.isOnGround() && !needsTakeoffRocket && takeoffTimer == 0) {
             info("Landed — disabling.");
             toggle();
             return;
         }
 
-        // ── Re-takeoff if on ground and below target ──
         if (isNearGround() && !mc.player.isGliding()
                 && (!useTargetY.get() || mc.player.getY() < targetY.get())
                 && autoTakeoff.get() && countFireworks() > 0 && !needsTakeoffRocket) {
@@ -726,7 +739,6 @@ public class RocketPilot extends Module {
             info("Re-launching!");
         }
 
-        // ── Takeoff sequence ──
         if (needsTakeoffRocket) {
             handleTakeoff();
             return;
@@ -734,10 +746,8 @@ public class RocketPilot extends Module {
 
         if (!mc.player.isGliding()) return;
 
-        // ── Elytra durability / swap ──
         handleElytraHealth();
 
-        // ── Rocket warning ──
         int rockets = countFireworks();
         if (rockets > 0 && rockets <= minRocketsWarning.get()) {
             if (!rocketsWarningSent) {
@@ -748,10 +758,13 @@ public class RocketPilot extends Module {
             rocketsWarningSent = false;
         }
 
-        // ── Determine desired pitch (priority order) ──
+        // Reset ceiling warning once safely below trigger zone
+        if (ceilingWarningSent && mc.player.getY() < 128.0 - netherCeilingBuffer.get() - 5) {
+            ceilingWarningSent = false;
+        }
+
         Float desiredPitch = null;
 
-        // Priority 0: Panic landing
         if (panicLanding) {
             desiredPitch = handlePanicLanding();
             if (mc.player.isOnGround() && takeoffTimer == 0) {
@@ -761,28 +774,28 @@ public class RocketPilot extends Module {
             }
         }
 
-        // Priority 1: auto-land on low rockets
         if (autoLandOnLowRockets.get() && rockets <= autoLandThreshold.get()) {
             desiredPitch = handleLowRocketLanding();
         }
 
-        // Priority 2: emergency landing (elytra critical, no swap)
         if (desiredPitch == null && emergencyLanding) {
             desiredPitch = handleEmergencyLanding();
             if (desiredPitch == null) return;
         }
 
-        // Priority 3: collision avoidance
+        // Priority 3: nether ceiling avoidance
+        if (desiredPitch == null && netherCeilingSafety.get()) {
+            desiredPitch = handleNetherCeiling();
+        }
+
         if (desiredPitch == null && collisionAvoidance.get()) {
             desiredPitch = handleCollisionAvoidance();
         }
 
-        // Priority 4: safe landing near ground
         if (desiredPitch == null && safeLanding.get() && getDistanceToGround() <= landingHeight.get()) {
             desiredPitch = MathHelper.lerp(0.1f, mc.player.getPitch(), -10.0f);
         }
 
-        // Priority 5: normal flight modes
         if (desiredPitch == null) {
             if (isPatternMode()) {
                 handlePatternYaw();
@@ -812,7 +825,6 @@ public class RocketPilot extends Module {
         }
 
         if (!mc.player.isGliding()) {
-            // Not yet gliding — try to open the elytra
             if (mc.player.networkHandler != null) {
                 mc.player.networkHandler.sendPacket(
                     new ClientCommandC2SPacket(mc.player, ClientCommandC2SPacket.Mode.START_FALL_FLYING)
@@ -821,13 +833,9 @@ public class RocketPilot extends Module {
             return;
         }
 
-        // Now gliding — wait until a rocket is actually present in the hotbar,
-        // since replenishRockets() may have only queued the move this tick.
         boolean rocketInHotbar = hotbarHasRocket();
         if (!rocketInHotbar) {
             takeoffWaitTicks++;
-            // Safety: if no rocket appears in the hotbar after 10 ticks, give up waiting
-            // (countFireworks covers offhand too, so fire from there if available)
             if (takeoffWaitTicks < 10) return;
         }
 
@@ -841,7 +849,6 @@ public class RocketPilot extends Module {
         takeoffTimer       = TAKEOFF_GRACE_TICKS;
     }
 
-    /** Returns true if any hotbar slot (0–8) contains a firework rocket. */
     private boolean hotbarHasRocket() {
         for (int i = 0; i < 9; i++) {
             if (mc.player.getInventory().getStack(i).isOf(Items.FIREWORK_ROCKET)) return true;
@@ -881,7 +888,6 @@ public class RocketPilot extends Module {
     }
 
     // ─── Emergency Landing ────────────────────────────────────────────────────────
-    /** @return desired pitch, or null if the module was toggled inside */
     private Float handleEmergencyLanding() {
         if (mc.player.isOnGround()) {
             info("Emergency landing complete.");
@@ -934,6 +940,41 @@ public class RocketPilot extends Module {
             }
         }
         return MathHelper.lerp(0.3f, currentPitch, -pullUpStr);
+    }
+
+    // ─── Nether Ceiling Safety ────────────────────────────────────────────────────
+    /**
+     * Detects when the player is in the Nether and approaching the bedrock ceiling
+     * (Y=128). Pitches down hard to dive away before impact. Also suppresses rocket
+     * firing while the ceiling is threatening so ascent doesn't continue.
+     */
+    private Float handleNetherCeiling() {
+        if (mc.world == null || mc.player == null) return null;
+
+        // Only active in the Nether dimension
+        if (!mc.world.getRegistryKey().getValue().getPath().equals("the_nether")) return null;
+
+        double currentY    = mc.player.getY();
+        double netherRoof  = 128.0;
+        int    buffer      = netherCeilingBuffer.get();
+        double triggerY    = netherRoof - buffer;
+
+        if (currentY < triggerY) return null; // well below ceiling, nothing to do
+
+        // How close are we: 0.0 = at triggerY, 1.0 = at the roof
+        double danger = (currentY - triggerY) / buffer;
+        danger = MathHelper.clamp(danger, 0.0, 1.0);
+
+        // Interpolate dive pitch: gentle at buffer distance, steep near the bedrock
+        float targetDivePitch = (float) MathHelper.lerp(danger, 10.0, 60.0);
+        float lerpSpeed       = (float) MathHelper.lerp(danger, 0.08, 0.35);
+
+        if (danger > 0.1 && !ceilingWarningSent) {
+            warning("Nether ceiling! Diving to avoid bedrock.");
+            ceilingWarningSent = true;
+        }
+
+        return MathHelper.lerp(lerpSpeed, mc.player.getPitch(), targetDivePitch);
     }
 
     private Float handlePanicLanding() {
@@ -1082,14 +1123,10 @@ public class RocketPilot extends Module {
         double nextX, nextZ;
         FlightPattern pattern = flightPattern.get();
 
-        if (pattern == FlightPattern.None) {
-            currentTarget = null;
-            return;
-        }
+        if (pattern == FlightPattern.None) { currentTarget = null; return; }
 
         if (pattern == FlightPattern.Grid) {
             int spacing = gridSpacing.get() * 16;
-
             if (currentTarget == null) {
                 gridDirection  = 3;
                 gridStepsInLeg = 0;
@@ -1108,16 +1145,13 @@ public class RocketPilot extends Module {
                 nextZ = currentTarget.z + offset.z;
                 gridStepsInLeg++;
             }
-
         } else if (pattern == FlightPattern.ZigZag) {
             double legLength = zigzagLegLength.get() * 16.0;
-
             if (currentTarget == null) {
                 zigzagCurrentYaw = mc.player.getYaw();
                 zigzagTurnRight  = true;
                 zigzagFirstLeg   = true;
             }
-
             if (zigzagFirstLeg) {
                 zigzagFirstLeg = false;
             } else {
@@ -1127,32 +1161,26 @@ public class RocketPilot extends Module {
                 );
                 zigzagTurnRight = !zigzagTurnRight;
             }
-
             double radYaw    = Math.toRadians(zigzagCurrentYaw);
             Vec3d startPoint = (currentTarget != null) ? currentTarget : origin;
             nextX = startPoint.x + (-Math.sin(radYaw) * legLength);
             nextZ = startPoint.z + ( Math.cos(radYaw) * legLength);
-
         } else if (pattern == FlightPattern.Lawnmower) {
             double legLength = lawnmowerLegLength.get() * 16.0;
-            double spacing = lawnmowerSpacing.get() * 16.0;
-
+            double spacing   = lawnmowerSpacing.get() * 16.0;
             int step = lawnmowerWaypoint % 4;
-            int row = lawnmowerWaypoint / 4;
+            int row  = lawnmowerWaypoint / 4;
             double zOffset = row * 2 * spacing;
-
             switch (step) {
-                case 0: nextX = origin.x + legLength; nextZ = origin.z + zOffset; break;
+                case 0: nextX = origin.x + legLength; nextZ = origin.z + zOffset;           break;
                 case 1: nextX = origin.x + legLength; nextZ = origin.z + zOffset + spacing; break;
                 case 2: nextX = origin.x;             nextZ = origin.z + zOffset + spacing; break;
-                default: nextX = origin.x;            nextZ = origin.z + zOffset + 2 * spacing; break;
+                default: nextX = origin.x;            nextZ = origin.z + zOffset + 2*spacing; break;
             }
             lawnmowerWaypoint++;
-
         } else if (pattern == FlightPattern.FigureEight) {
             double r = figureEightRadius.get() * 16.0;
             double x_off, z_off;
-
             switch (figureEightWaypoint) {
                 case 0: x_off =  r; z_off =  r;    break;
                 case 1: x_off =  0; z_off =  2*r;  break;
@@ -1163,21 +1191,17 @@ public class RocketPilot extends Module {
                 case 6: x_off =  r; z_off = -r;    break;
                 default: x_off = 0; z_off =  0;    break;
             }
-
             nextX = origin.x + x_off;
             nextZ = origin.z + z_off;
             figureEightWaypoint = (figureEightWaypoint + 1) % 8;
-
         } else if (pattern == FlightPattern.Circle) {
             double angleStep       = 2.0 * Math.PI / circleSegments.get();
             double expansionBlocks = circleExpansion.get() * 16.0;
             double b               = expansionBlocks / (2.0 * Math.PI);
             double radius          = b * circleAngle;
-
             nextX = origin.x + radius * Math.cos(circleAngle);
             nextZ = origin.z + radius * Math.sin(circleAngle);
             circleAngle += angleStep;
-
         } else {
             return;
         }
@@ -1199,22 +1223,34 @@ public class RocketPilot extends Module {
     private void handleDrunkMode() {
         if (drunkTimer++ >= currentDrunkDuration) {
             float intensity = drunkIntensity.get().floatValue();
+            DrunkBias bias  = drunkBias.get();
 
-            if (positiveCoordsOnly.get()) {
-                double px = mc.player.getX();
-                double pz = mc.player.getZ();
-                float minYaw, maxYaw;
-                if      (px >= 0 && pz >= 0) { minYaw = -90f; maxYaw =   0f; }
-                else if (px <  0 && pz >= 0) { minYaw =   0f; maxYaw =  90f; }
-                else if (px <  0)            { minYaw =  90f; maxYaw = 180f; }
-                else                         { minYaw = -180f; maxYaw = -90f; }
-                targetDrunkYaw = minYaw + (float)(Math.random() * (maxYaw - minYaw));
-            } else {
+            if (bias == DrunkBias.None) {
+                // Fully random drift — no quadrant preference
                 targetDrunkYaw = mc.player.getYaw()
                     + (float)((Math.random() - 0.5) * 2.0 * intensity);
+
+            } else {
+                // Each enum value locks the heading to a specific world quadrant.
+                // Minecraft yaw convention: 0 = south (+Z), 90 = west (-X),
+                //                          -90 = east (+X), ±180 = north (-Z)
+                //
+                //  PositiveOnly → +X / +Z  (SE)  yaw: -90 ..   0
+                //  NegativeOnly → -X / -Z  (NW)  yaw:  90 .. 180
+                //  NegPos       → -X / +Z  (SW)  yaw:   0 ..  90
+                //  PosNeg       → +X / -Z  (NE)  yaw: -180 .. -90
+                float minYaw, maxYaw;
+                switch (bias) {
+                    case PositiveOnly -> { minYaw = -90f;  maxYaw =   0f; }
+                    case NegativeOnly -> { minYaw =  90f;  maxYaw = 180f; }
+                    case NegPos       -> { minYaw =   0f;  maxYaw =  90f; }
+                    case PosNeg       -> { minYaw = -180f; maxYaw = -90f; }
+                    default           -> { minYaw = -180f; maxYaw = 180f; }
+                }
+                targetDrunkYaw = minYaw + (float)(Math.random() * (maxYaw - minYaw));
             }
 
-            drunkTimer = 0;
+            drunkTimer           = 0;
             currentDrunkDuration = drunkInterval.get() + (int)(Math.random() * 10);
         }
 
@@ -1299,8 +1335,7 @@ public class RocketPilot extends Module {
             if (stack.isOf(Items.ELYTRA)) {
                 int dur = stack.getMaxDamage() - stack.getDamage();
                 if (dur > bestDurability && dur > ELYTRA_MIN_SWAP_DUR) {
-                    bestSlot = i;
-                    bestDurability = dur;
+                    bestSlot = i; bestDurability = dur;
                 }
             }
         }
@@ -1335,11 +1370,10 @@ public class RocketPilot extends Module {
         if (mc.player == null || mc.interactionManager == null) return;
 
         int rocketSlot = -1;
-
         for (int i = 0; i < 9; i++) {
             if (mc.player.getInventory().getStack(i).isOf(Items.FIREWORK_ROCKET)) { rocketSlot = i; break; }
         }
-        
+
         if (rocketSlot == -1) {
             if (mc.player.getOffHandStack().isOf(Items.FIREWORK_ROCKET)) {
                 mc.interactionManager.interactItem(mc.player, Hand.OFF_HAND);
