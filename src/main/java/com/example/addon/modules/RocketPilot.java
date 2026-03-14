@@ -269,7 +269,7 @@ public class RocketPilot extends Module {
         .name("peak-y")
         .description("Y level to reach before cutting rockets and beginning the glide.")
         .defaultValue(130.0)
-        .min(-64.0).max(320.0)
+        .min(-64.0).max(10000.0)
         .sliderRange(64.0, 256.0)
         .visible(() -> flightMode.get() == FlightMode.AltitudeBounce)
         .build()
