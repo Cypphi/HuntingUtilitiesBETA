@@ -71,35 +71,30 @@ public class ServerHealthcareSystem extends Module {
         .build()
     );
 
-    private final Setting<ChestplatePreference> chestplatePreference = sgAutoArmor.add(new EnumSetting.Builder<ChestplatePreference>()
-        .name("chestplate-preference")
-        .description("Which item to prefer for the chest slot.")
-        .defaultValue(ChestplatePreference.Elytra)
+    private final Setting<ChestplateMode> chestplateMode = sgAutoArmor.add(new EnumSetting.Builder<ChestplateMode>()
+        .name("chestplate-mode")
+        .description("How to manage the chest slot: always prefer a chestplate, always an elytra, or dynamically swap.")
+        .defaultValue(ChestplateMode.Dynamic)
         .visible(autoArmor::get)
         .build()
     );
 
-    private final Setting<Keybind> switchPreference = sgAutoArmor.add(new KeybindSetting.Builder()
+    private final Setting<Keybind> switchModeKey = sgAutoArmor.add(new KeybindSetting.Builder()
         .name("switch-preference-key")
         .description("Switches between preferring Chestplate or Elytra.")
         .defaultValue(Keybind.none())
         .action(() -> {
             if (mc.currentScreen != null) return;
-            if (chestplatePreference.get() == ChestplatePreference.Chestplate) {
-                chestplatePreference.set(ChestplatePreference.Elytra);
-            } else {
-                chestplatePreference.set(ChestplatePreference.Chestplate);
+            ChestplateMode current = chestplateMode.get();
+            ChestplateMode next;
+            switch (current) {
+                case Chestplate: next = ChestplateMode.Elytra; break;
+                case Elytra:     next = ChestplateMode.Dynamic; break;
+                default:         next = ChestplateMode.Chestplate; break;
             }
-            info("Chestplate preference set to: %s", chestplatePreference.get().name());
+            chestplateMode.set(next);
+            info("Chestplate mode set to: %s", next.name());
         })
-        .visible(autoArmor::get)
-        .build()
-    );
-
-    private final Setting<Boolean> chestplateOnGround = sgAutoArmor.add(new BoolSetting.Builder()
-        .name("chestplate-on-ground")
-        .description("Wears a chestplate on the ground and an elytra in the air.")
-        .defaultValue(false)
         .visible(autoArmor::get)
         .build()
     );
@@ -109,7 +104,7 @@ public class ServerHealthcareSystem extends Module {
         .description("Ticks to wait after performing a chest/elytra swap.")
         .defaultValue(10)
         .min(0)
-        .visible(() -> autoArmor.get() && chestplateOnGround.get())
+        .visible(() -> autoArmor.get() && chestplateMode.get() == ChestplateMode.Dynamic)
         .build()
     );
 
@@ -316,18 +311,17 @@ public class ServerHealthcareSystem extends Module {
     private void tickAutoArmor() {
         if (!autoArmor.get() || swapTimer > 0) return;
 
-        if (chestplateOnGround.get()) handleChestplateElytraSwitch();
+        if (chestplateMode.get() == ChestplateMode.Dynamic) handleChestplateElytraSwitch();
 
         EquipmentSlot[] slots = { EquipmentSlot.FEET, EquipmentSlot.LEGS, EquipmentSlot.CHEST, EquipmentSlot.HEAD };
         for (int i = 0; i < 4; i++) {
             EquipmentSlot slot = slots[i];
-            if (slot == EquipmentSlot.CHEST && chestplateOnGround.get()) continue;
+            if (slot == EquipmentSlot.CHEST && chestplateMode.get() == ChestplateMode.Dynamic) continue;
 
             ItemStack current   = mc.player.getEquippedStack(slot);
             int       bestValue = getArmorValue(current);
 
-            if (slot == EquipmentSlot.CHEST
-                    && chestplatePreference.get() == ChestplatePreference.Elytra
+            if (slot == EquipmentSlot.CHEST && chestplateMode.get() == ChestplateMode.Elytra
                     && current.isOf(Items.ELYTRA)) {
                 bestValue = 1_000_000;
             }
@@ -341,8 +335,7 @@ public class ServerHealthcareSystem extends Module {
                 if (equippable == null || equippable.slot() != slot) continue;
 
                 int value = getArmorValue(stack);
-                if (slot == EquipmentSlot.CHEST
-                        && chestplatePreference.get() == ChestplatePreference.Elytra
+                if (slot == EquipmentSlot.CHEST && chestplateMode.get() == ChestplateMode.Elytra
                         && stack.isOf(Items.ELYTRA)) {
                     value = 1_000_000;
                 }
@@ -447,11 +440,13 @@ public class ServerHealthcareSystem extends Module {
 
         ItemStack chest = mc.player.getEquippedStack(EquipmentSlot.CHEST);
         if (mc.player.isOnGround()) {
-            if (chestplatePreference.get() != ChestplatePreference.Elytra && chest.isOf(Items.ELYTRA)) {
+            // If on ground, we want a chestplate. If we have an elytra, swap it.
+            if (chest.isOf(Items.ELYTRA)) {
                 FindItemResult cp = findBestChestplate();
                 if (cp.found()) { InvUtils.move().from(cp.slot()).toArmor(2); swapTimer = swapDelay.get(); }
             }
         } else {
+            // If in air, we want an elytra. If we don't have one, swap to it.
             if (!chest.isOf(Items.ELYTRA)) {
                 FindItemResult elytra = InvUtils.find(Items.ELYTRA);
                 if (elytra.found()) { InvUtils.move().from(elytra.slot()).toArmor(2); swapTimer = swapDelay.get(); }
@@ -558,5 +553,9 @@ public class ServerHealthcareSystem extends Module {
 
     // ── Enums ─────────────────────────────────────────────────────────────────
 
-    public enum ChestplatePreference { Chestplate, Elytra }
+    public enum ChestplateMode {
+        Chestplate, // Always prefer chestplate
+        Elytra,     // Always prefer elytra
+        Dynamic     // Chestplate on ground, elytra in air
+    }
 }

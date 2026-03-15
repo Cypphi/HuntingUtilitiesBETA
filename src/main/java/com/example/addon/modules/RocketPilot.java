@@ -19,6 +19,7 @@ import net.minecraft.entity.EquipmentSlot;
 import net.minecraft.item.ItemStack;
 import net.minecraft.item.Items;
 import net.minecraft.network.packet.c2s.play.ClientCommandC2SPacket;
+import net.minecraft.network.packet.s2c.play.PlayerPositionLookS2CPacket;
 import net.minecraft.stat.Stats;
 import net.minecraft.text.Text;
 import net.minecraft.util.Hand;
@@ -32,8 +33,17 @@ import net.minecraft.world.RaycastContext;
 public class RocketPilot extends Module {
 
     // ─── Enums ───────────────────────────────────────────────────────────────────
-    public enum FlightMode    { Normal, Oscillation, Pitch40, AltitudeBounce }
-    public enum FlightPattern { None, Grid, Circle, ZigZag, Lawnmower, FigureEight }
+    public enum FlightMode { Normal, Oscillation, Pitch40, AltitudeBounce }
+
+    public enum FlightPattern {
+        Manual,
+        Drunk,
+        Grid,
+        Circle,
+        ZigZag,
+        Lawnmower,
+        FigureEight
+    }
 
     /**
      * Controls which coordinate quadrant(s) the drunk-pilot yaw bias targets.
@@ -294,11 +304,12 @@ public class RocketPilot extends Module {
         .visible(() -> flightMode.get() == FlightMode.AltitudeBounce)
         .build()
     );
+
     public final Setting<FlightPattern> flightPattern = sgPatterns.add(new EnumSetting.Builder<FlightPattern>()
         .name("flight-pattern")
-        .description("The pattern to fly in. Overrides yaw control.")
-        .defaultValue(FlightPattern.None)
-        .visible(() -> true)
+        .description("The flight pattern to follow. Manual allows free mouse look.")
+        .defaultValue(FlightPattern.Manual)
+        .onChanged(v -> { if (isActive()) resetPatternState(); })
         .build()
     );
 
@@ -317,7 +328,7 @@ public class RocketPilot extends Module {
         .defaultValue(0.1)
         .min(0.01).max(1.0)
         .sliderRange(0.05, 0.5)
-        .visible(() -> isPatternMode())
+        .visible(() -> flightPattern.get() != FlightPattern.Manual && flightPattern.get() != FlightPattern.Drunk)
         .build()
     );
 
@@ -327,7 +338,7 @@ public class RocketPilot extends Module {
         .defaultValue(30)
         .min(5)
         .sliderRange(10, 100)
-        .visible(() -> isPatternMode())
+        .visible(() -> flightPattern.get() != FlightPattern.Manual && flightPattern.get() != FlightPattern.Drunk)
         .build()
     );
 
@@ -411,21 +422,13 @@ public class RocketPilot extends Module {
         .build()
     );
 
-    // ─── Drunk Pilot Settings ────────────────────────────────────────────────────
-    public final Setting<Boolean> drunkMode = sgDrunk.add(new BoolSetting.Builder()
-        .name("drunk-mode")
-        .description("Randomly changes facing direction.")
-        .defaultValue(false)
-        .build()
-    );
-
     private final Setting<Integer> drunkInterval = sgDrunk.add(new IntSetting.Builder()
         .name("change-interval")
         .description("Ticks between direction changes.")
         .defaultValue(5)
         .min(1)
         .sliderRange(1, 20)
-        .visible(drunkMode::get)
+        .visible(() -> flightPattern.get() == FlightPattern.Drunk)
         .build()
     );
 
@@ -435,7 +438,7 @@ public class RocketPilot extends Module {
         .defaultValue(120.0)
         .min(1.0).max(180.0)
         .sliderRange(50.0, 180.0)
-        .visible(drunkMode::get)
+        .visible(() -> flightPattern.get() == FlightPattern.Drunk)
         .build()
     );
 
@@ -446,7 +449,7 @@ public class RocketPilot extends Module {
                      "None = fully random. PositiveOnly = +X/+Z. NegativeOnly = -X/-Z. " +
                      "NegPos = -X/+Z. PosNeg = +X/-Z.")
         .defaultValue(DrunkBias.None)
-        .visible(drunkMode::get)
+        .visible(() -> flightPattern.get() == FlightPattern.Drunk)
         .build()
     );
 
@@ -455,7 +458,7 @@ public class RocketPilot extends Module {
         .description("How smoothly to rotate to the new heading (lower = smoother).")
         .defaultValue(0.05)
         .min(0.01).max(1.0)
-        .visible(drunkMode::get)
+        .visible(() -> flightPattern.get() == FlightPattern.Drunk)
         .build()
     );
 
@@ -491,6 +494,22 @@ public class RocketPilot extends Module {
         .min(3)
         .sliderRange(5, 30)
         .visible(netherCeilingSafety::get)
+        .build()
+    );
+
+    private final Setting<Boolean> voidSafety = sgFlightSafety.add(new BoolSetting.Builder()
+        .name("void-safety")
+        .description("Automatically pitches up and fires rockets when falling into the void (The End).")
+        .defaultValue(true)
+        .build()
+    );
+
+    private final Setting<Integer> voidBuffer = sgFlightSafety.add(new IntSetting.Builder()
+        .name("void-buffer")
+        .description("Height above Y=0 to trigger void safety.")
+        .defaultValue(20)
+        .min(0).sliderMax(100)
+        .visible(voidSafety::get)
         .build()
     );
 
@@ -601,6 +620,7 @@ public class RocketPilot extends Module {
     private boolean pitch40Climbing          = false;
     private boolean pitch40Rocketing         = false;
     private long    pitch40BelowMinStartTime = -1;
+    private long    lastLagbackTime          = 0;
     private boolean bounceClimbing           = true;
 
     private float   targetPitch              = 0;
@@ -638,12 +658,12 @@ public class RocketPilot extends Module {
 
     // ─── Utilities ───────────────────────────────────────────────────────────────
     private boolean isPatternMode() {
-        return flightPattern.get() != FlightPattern.None;
+        return flightPattern.get() != FlightPattern.Manual && flightPattern.get() != FlightPattern.Drunk;
     }
 
     private void togglePause() {
         if (mc.currentScreen != null) return;
-        if (!isPatternMode()) return;
+        if (flightPattern.get() == FlightPattern.Manual || flightPattern.get() == FlightPattern.Drunk) return;
         paused = !paused;
         info("Pattern flight %s.", paused ? "paused" : "resumed");
     }
@@ -691,6 +711,7 @@ public class RocketPilot extends Module {
         pitch40Rocketing         = false;
         pitch40BelowMinStartTime = -1;
         bounceClimbing           = true;
+        lastLagbackTime          = 0;
         rocketsWarningSent       = false;
         ceilingWarningSent       = false;
         emergencyLanding         = false;
@@ -743,6 +764,11 @@ public class RocketPilot extends Module {
     // ─── Main Tick ────────────────────────────────────────────────────────────────
     @EventHandler
     private void onTick(TickEvent.Pre event) {
+        // Lagback safety: pause logic briefly if we just rubberbanded
+        if (System.currentTimeMillis() - lastLagbackTime < 500) {
+            return;
+        }
+
         if (mc.player == null || mc.world == null) return;
 
         replenishRockets();
@@ -850,10 +876,6 @@ public class RocketPilot extends Module {
         }
 
         if (desiredPitch == null) {
-            if (isPatternMode()) {
-                handlePatternYaw();
-            }
-
             desiredPitch = switch (flightMode.get()) {
                 case Pitch40        -> handlePitch40Mode();
                 case Oscillation    -> handleOscillationMode();
@@ -861,14 +883,25 @@ public class RocketPilot extends Module {
                 default             -> handleNormalMode();
             };
 
-            if (drunkMode.get() && !isPatternMode()) {
-                double yDiff = Math.abs(mc.player.getY() - targetY.get());
-                if (yDiff <= flightTolerance.get()) handleDrunkMode();
-                else { targetDrunkYaw = mc.player.getYaw(); drunkTimer = 0; }
+            FlightPattern currentPattern = flightPattern.get();
+            if (currentPattern == FlightPattern.Drunk) {
+                handleDrunkMode();
+            } else if (currentPattern != FlightPattern.Manual) {
+                handlePatternYaw();
             }
         }
 
         applyPitch(desiredPitch);
+    }
+
+    @EventHandler
+    private void onPacketReceive(meteordevelopment.meteorclient.events.packets.PacketEvent.Receive event) {
+        if (event.packet instanceof PlayerPositionLookS2CPacket) {
+            // Server rejected our movement; pause flight logic briefly to resync
+            lastLagbackTime = System.currentTimeMillis();
+            // Clear any pending inputs
+            mc.options.forwardKey.setPressed(false);
+        }
     }
 
     // ─── Takeoff ─────────────────────────────────────────────────────────────────
@@ -970,6 +1003,7 @@ public class RocketPilot extends Module {
         Vec3d[] rays = { fwd, fwd.rotateY(0.5f), fwd.rotateY(-0.5f) };
 
         boolean obstacleDetected = false;
+        // Check forward cone
         for (Vec3d dir : rays) {
             BlockHitResult hit = mc.world.raycast(new RaycastContext(
                 camPos, camPos.add(dir.multiply(avoidanceDistance.get())),
@@ -982,6 +1016,36 @@ public class RocketPilot extends Module {
 
         if (!obstacleDetected) return null;
 
+        // Try to steer horizontally first
+        Vec3d leftDir  = fwd.rotateY(1.5f); // ~85 degrees left
+        Vec3d rightDir = fwd.rotateY(-1.5f); // ~85 degrees right
+        double checkDist = avoidanceDistance.get() * 1.5;
+
+        boolean leftClear = mc.world.raycast(new RaycastContext(
+            camPos, camPos.add(leftDir.multiply(checkDist)),
+            RaycastContext.ShapeType.COLLIDER, RaycastContext.FluidHandling.NONE, mc.player
+        )).getType() == HitResult.Type.MISS;
+
+        boolean rightClear = mc.world.raycast(new RaycastContext(
+            camPos, camPos.add(rightDir.multiply(checkDist)),
+            RaycastContext.ShapeType.COLLIDER, RaycastContext.FluidHandling.NONE, mc.player
+        )).getType() == HitResult.Type.MISS;
+
+        float yawSpeed = 5.0f;
+        if (limitRotationSpeed.get()) yawSpeed = Math.min(yawSpeed, maxRotationPerTick.get().floatValue());
+
+        if (leftClear && !rightClear) {
+            mc.player.setYaw(mc.player.getYaw() + yawSpeed);
+        } else if (rightClear && !leftClear) {
+            mc.player.setYaw(mc.player.getYaw() - yawSpeed);
+        } else if (leftClear && rightClear) {
+            // Both clear, pick random or alternating
+            if (mc.player.age % 2 == 0) mc.player.setYaw(mc.player.getYaw() + yawSpeed);
+            else mc.player.setYaw(mc.player.getYaw() - yawSpeed);
+        }
+        // If both blocked, or while steering, we also pull up below
+
+        // Pitch up logic (Vertical Avoidance)
         float currentPitch = mc.player.getPitch();
         double speed       = mc.player.getVelocity().horizontalLength();
         float pullUpStr    = (float) MathHelper.clamp(speed * 20, 20, 60);
@@ -1029,6 +1093,27 @@ public class RocketPilot extends Module {
         }
 
         return MathHelper.lerp(lerpSpeed, mc.player.getPitch(), targetDivePitch);
+    }
+
+    // ─── Void Safety ──────────────────────────────────────────────────────────────
+    private Float handleVoidSafety() {
+        if (mc.world == null || mc.player == null) return null;
+        if (!mc.world.getRegistryKey().getValue().getPath().equals("the_end")) return null;
+
+        double currentY = mc.player.getY();
+        double buffer   = voidBuffer.get();
+
+        if (currentY > buffer) return null;
+
+        // Critical: pitch up and fire
+        if (shouldFireRocket() && countFireworks() > 0) {
+            long now = System.currentTimeMillis();
+            if (now - lastRocketTime >= 300) { // Fire rapidly
+                fireRocket();
+                lastRocketTime = now;
+            }
+        }
+        return -50.0f; // Pitch up steeply
     }
 
     private Float handlePanicLanding() {
@@ -1162,16 +1247,16 @@ public class RocketPilot extends Module {
     private void handlePatternYaw() {
         if (paused) return;
 
-        if (flightPattern.get() != FlightPattern.None) {
+        if (flightPattern.get() != FlightPattern.Manual && flightPattern.get() != FlightPattern.Drunk) {
             if (origin == null) origin = mc.player.getPos();
 
             if (currentTarget == null) {
                 calculateNextTarget();
             } else {
-                double dx = currentTarget.x - mc.player.getX();
-                double dz = currentTarget.z - mc.player.getZ();
-                int radius = waypointReachRadius.get();
-                if (dx * dx + dz * dz < (double)(radius * radius)) {
+                double dx     = currentTarget.x - mc.player.getX();
+                double dz     = currentTarget.z - mc.player.getZ();
+                int    radius = waypointReachRadius.get();
+                if (dx * dx + dz * dz < (double) (radius * radius)) {
                     calculateNextTarget();
                 }
             }
@@ -1202,11 +1287,11 @@ public class RocketPilot extends Module {
 
         double targetYValue = useTargetY.get() ? targetY.get() : mc.player.getY();
         double nextX, nextZ;
-        FlightPattern pattern = flightPattern.get();
+        FlightPattern currentPattern = flightPattern.get();
 
-        if (pattern == FlightPattern.None) { currentTarget = null; return; }
+        if (currentPattern == FlightPattern.Manual || currentPattern == FlightPattern.Drunk) { currentTarget = null; return; }
 
-        if (pattern == FlightPattern.Grid) {
+        if (currentPattern == FlightPattern.Grid) {
             int spacing = gridSpacing.get() * 16;
             if (currentTarget == null) {
                 gridDirection  = 3;
@@ -1226,7 +1311,7 @@ public class RocketPilot extends Module {
                 nextZ = currentTarget.z + offset.z;
                 gridStepsInLeg++;
             }
-        } else if (pattern == FlightPattern.ZigZag) {
+        } else if (currentPattern == FlightPattern.ZigZag) {
             double legLength = zigzagLegLength.get() * 16.0;
             if (currentTarget == null) {
                 zigzagCurrentYaw = mc.player.getYaw();
@@ -1246,7 +1331,7 @@ public class RocketPilot extends Module {
             Vec3d startPoint = (currentTarget != null) ? currentTarget : origin;
             nextX = startPoint.x + (-Math.sin(radYaw) * legLength);
             nextZ = startPoint.z + ( Math.cos(radYaw) * legLength);
-        } else if (pattern == FlightPattern.Lawnmower) {
+        } else if (currentPattern == FlightPattern.Lawnmower) {
             double legLength = lawnmowerLegLength.get() * 16.0;
             double spacing   = lawnmowerSpacing.get() * 16.0;
             int step = lawnmowerWaypoint % 4;
@@ -1259,7 +1344,7 @@ public class RocketPilot extends Module {
                 default: nextX = origin.x;            nextZ = origin.z + zOffset + 2*spacing; break;
             }
             lawnmowerWaypoint++;
-        } else if (pattern == FlightPattern.FigureEight) {
+        } else if (currentPattern == FlightPattern.FigureEight) {
             double r = figureEightRadius.get() * 16.0;
             double x_off, z_off;
             switch (figureEightWaypoint) {
@@ -1275,7 +1360,7 @@ public class RocketPilot extends Module {
             nextX = origin.x + x_off;
             nextZ = origin.z + z_off;
             figureEightWaypoint = (figureEightWaypoint + 1) % 8;
-        } else if (pattern == FlightPattern.Circle) {
+        } else if (currentPattern == FlightPattern.Circle) {
             double angleStep       = 2.0 * Math.PI / circleSegments.get();
             double expansionBlocks = circleExpansion.get() * 16.0;
             double b               = expansionBlocks / (2.0 * Math.PI);

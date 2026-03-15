@@ -26,16 +26,13 @@ public class RocketPilotHud extends HudElement {
         RocketPilot rp = Modules.get().get(RocketPilot.class);
         if (!rp.isActive()) return;
 
-        String status = "Normal";
-        if (rp.drunkMode.get()) {
-            status = "Drunk";
+        String status;
+        RocketPilot.FlightPattern currentPattern = rp.flightPattern.get();
+
+        if (currentPattern == RocketPilot.FlightPattern.Manual) {
+            status = rp.flightMode.get().toString();
         } else {
-            RocketPilot.FlightPattern pattern = rp.flightPattern.get();
-            if (pattern != RocketPilot.FlightPattern.None) {
-                status = pattern.toString();
-            } else {
-                status = rp.flightMode.get().toString();
-            }
+            status = currentPattern.toString();
         }
 
         renderer.text("RocketPilot: " + status, x, y, Color.WHITE, true);

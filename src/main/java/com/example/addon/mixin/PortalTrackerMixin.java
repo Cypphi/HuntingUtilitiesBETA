@@ -6,6 +6,7 @@ import net.minecraft.block.BlockState;
 import net.minecraft.block.Blocks;
 import net.minecraft.util.math.BlockPos;
 import net.minecraft.util.math.ChunkPos;
+import net.minecraft.world.BlockView;
 import net.minecraft.world.World;
 import org.spongepowered.asm.mixin.Mixin;
 import org.spongepowered.asm.mixin.injection.At;
@@ -36,13 +37,15 @@ public abstract class PortalTrackerMixin {
         // Only process if the block state actually changed
         if (!cir.getReturnValue()) return;
 
-        // Check if this is a portal-related block
-        boolean isPortalBlock = newState.isOf(Blocks.NETHER_PORTAL) ||
-                               newState.isOf(Blocks.END_PORTAL) ||
-                               newState.isOf(Blocks.END_GATEWAY) ||
-                               newState.isOf(Blocks.END_PORTAL_FRAME);
+        // We trigger if the NEW block is a portal (placement) 
+        // Note: To detect removal, you'd ideally check the state before replacement,
+        // but checking the new state is the most common use case for "marking dirty".
+        boolean isPortalRelated = newState.isOf(Blocks.NETHER_PORTAL) ||
+                                  newState.isOf(Blocks.END_PORTAL) ||
+                                  newState.isOf(Blocks.END_GATEWAY) ||
+                                  newState.isOf(Blocks.END_PORTAL_FRAME);
 
-        if (isPortalBlock) {
+        if (isPortalRelated) {
             PortalTracker tracker = Modules.get().get(PortalTracker.class);
             if (tracker != null && tracker.isActive()) {
                 // Mark the chunk as dirty so it gets re-scanned

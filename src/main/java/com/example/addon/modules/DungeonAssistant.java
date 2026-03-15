@@ -226,35 +226,24 @@ public class DungeonAssistant extends Module {
     // Settings — Auto Open
     // ═══════════════════════════════════════════════════════════════════════════
 
-    private final Setting<Boolean> autoOpen = sgAutoOpen.add(new BoolSetting.Builder()
-        .name("auto-open").description("Automatically open, check, and close containers.").defaultValue(true)
+    private final Setting<Boolean> autoOpenBreak = sgAutoOpen.add(new BoolSetting.Builder()
+        .name("auto-open/break")
+        .description("Automatically open, check, and break empty containers.")
+        .defaultValue(true)
         .build()
     );
 
     private final Setting<Boolean> silentMode = sgAutoOpen.add(new BoolSetting.Builder()
         .name("silent-mode")
-        .description("Open containers invisibly — GUI is suppressed, inventory is read server-side.")
-        .defaultValue(true).visible(autoOpen::get)
-        .build()
-    );
-
-    private final Setting<Boolean> autoBreak = sgAutoOpen.add(new BoolSetting.Builder()
-        .name("auto-break").description("Break empty containers after checking.")
-        .defaultValue(true).visible(autoOpen::get)
+        .description("Open containers invisibly and switch tools silently.")
+        .defaultValue(true).visible(autoOpenBreak::get)
         .build()
     );
 
     private final Setting<Integer> breakDelay = sgAutoOpen.add(new IntSetting.Builder()
         .name("break-delay").description("Ticks to wait before breaking an empty container.")
         .defaultValue(5).min(0).max(40).sliderMin(0).sliderMax(20)
-        .visible(() -> autoOpen.get() && autoBreak.get())
-        .build()
-    );
-
-    private final Setting<Boolean> silentSwitch = sgAutoOpen.add(new BoolSetting.Builder()
-        .name("silent-switch")
-        .description("Switch to axe (chest) or sword (chest minecart) for breaking, then restore the previous hotbar slot.")
-        .defaultValue(true).visible(() -> autoOpen.get() && autoBreak.get())
+        .visible(autoOpenBreak::get)
         .build()
     );
 
@@ -274,7 +263,7 @@ public class DungeonAssistant extends Module {
             Items.BROWN_SHULKER_BOX,      Items.GREEN_SHULKER_BOX,
             Items.RED_SHULKER_BOX,        Items.BLACK_SHULKER_BOX
         ))
-        .visible(autoOpen::get)
+        .visible(autoOpenBreak::get)
         .build()
     );
 
@@ -325,7 +314,7 @@ public class DungeonAssistant extends Module {
     private final Setting<Boolean> prioritizeSpawners = sgAutoOpen.add(new BoolSetting.Builder()
         .name("prioritize-spawners")
         .description("Break spawners before opening chests when both auto-break and auto-open are active.")
-        .defaultValue(true).visible(() -> autoOpen.get() && autoBreakSpawners.get())
+        .defaultValue(true).visible(() -> autoOpenBreak.get() && autoBreakSpawners.get())
         .build()
     );
 
@@ -334,7 +323,8 @@ public class DungeonAssistant extends Module {
     // ═══════════════════════════════════════════════════════════════════════════
 
     private final Setting<Boolean> trackChests = sgChests.add(new BoolSetting.Builder()
-        .name("track-chests").description("Highlight chests.").defaultValue(true)
+        .name("track-chests").description("Highlight chests and count broken ones.")
+        .defaultValue(true)
         .build()
     );
 
@@ -371,11 +361,6 @@ public class DungeonAssistant extends Module {
         .name("stacked-minecart-color").description("Highlight color for stacked chest minecarts.")
         .defaultValue(new SettingColor(255, 0, 255, 255))
         .visible(() -> trackChestMinecarts.get() && highlightStacked.get()).build()
-    );
-
-    private final Setting<Boolean> brokenChestCounter = sgChests.add(new BoolSetting.Builder()
-        .name("broken-chest-counter").description("Counts and displays how many chests have been broken.")
-        .defaultValue(true).build()
     );
 
     // ═══════════════════════════════════════════════════════════════════════════
@@ -548,7 +533,7 @@ public class DungeonAssistant extends Module {
 
         if (wasAutoOpened) {
             interactTimeoutTimer = 0;
-            if (autoOpen.get() && silentMode.get()
+            if (autoOpenBreak.get() && silentMode.get()
                     && event.screen instanceof HandledScreen<?>
                     && !(event.screen instanceof InventoryScreen)) {
                 silentOpenPending = true;
@@ -775,14 +760,14 @@ public class DungeonAssistant extends Module {
                         // Previously the guard `previousSlot < 0` could leave a stale axe slot from a
                         // prior chest break active when the next target is a spawner.
                         isBreakingChest = (targetBlock == Blocks.CHEST || targetBlock == Blocks.TRAPPED_CHEST);
-                        if (silentSwitch.get()) previousSlot = mc.player.getInventory().selectedSlot;
+                        if (silentMode.get()) previousSlot = mc.player.getInventory().selectedSlot;
                     } else {
                         blockToBreak = null;
                     }
                 } else if (entityToBreak != null) {
                     if (entityToBreak instanceof ChestMinecartEntity) {
                         isBreakingEntity = true;
-                        if (silentSwitch.get()) previousSlot = mc.player.getInventory().selectedSlot;
+                        if (silentMode.get()) previousSlot = mc.player.getInventory().selectedSlot;
                     } else {
                         entityToBreak = null;
                     }
@@ -800,7 +785,7 @@ public class DungeonAssistant extends Module {
                 || Math.sqrt(mc.player.squaredDistanceTo(blockToBreak.toCenterPos())) > 6;
 
             if (done) {
-                if (isBreakingChest && blockIsNowAir && brokenChestCounter.get()) {
+                if (isBreakingChest && blockIsNowAir && trackChests.get()) {
                     brokenChestsCount++;
                     info("Chests broken: " + brokenChestsCount);
                 }
@@ -902,7 +887,7 @@ public class DungeonAssistant extends Module {
             hasPlayedSoundForCurrentScreen = false;
 
             if (!silentFoundWhitelisted) {
-                if (autoBreak.get()) {
+                if (autoOpenBreak.get()) {
                     if (lastOpenedContainer != null) {
                         blockToBreak = lastOpenedContainer;
                         removeNeighborFromChecked(lastOpenedContainer);
@@ -938,7 +923,7 @@ public class DungeonAssistant extends Module {
                 if (!found) {
                     mc.player.closeHandledScreen();
                     wasAutoOpened = false;
-                    if (autoBreak.get()) {
+                    if (autoOpenBreak.get()) {
                         if (lastOpenedContainer != null) {
                             blockToBreak = lastOpenedContainer;
                             removeNeighborFromChecked(lastOpenedContainer);
@@ -969,7 +954,7 @@ public class DungeonAssistant extends Module {
 
             hasPlayedSoundForCurrentScreen = false;
 
-            if (autoOpen.get()) {
+            if (autoOpenBreak.get()) {
                 if (prioritizeSpawners.get() && autoBreakSpawners.get() && isSpawnerInBreakRange()) {
                     if (runSpawnerCheck()) return;
                     if (runMinecartCheck()) return;
@@ -1504,7 +1489,7 @@ public class DungeonAssistant extends Module {
     // ═══════════════════════════════════════════════════════════════════════════
 
     private void restoreSlot() {
-        if (silentSwitch.get() && previousSlot >= 0 && mc.player != null) {
+        if (silentMode.get() && previousSlot >= 0 && mc.player != null) {
             mc.player.getInventory().selectedSlot = previousSlot;
             previousSlot = -1;
         }
