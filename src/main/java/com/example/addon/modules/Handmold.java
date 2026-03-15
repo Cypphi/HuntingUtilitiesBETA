@@ -46,94 +46,9 @@ public class Handmold extends Module {
     // ═══════════════════════════════════════════════════════════════════════════
     // Settings — Main Hand
     // ═══════════════════════════════════════════════════════════════════════════
-
-    private final Setting<Double> mainX = sgMainHand.add(new DoubleSetting.Builder()
-        .name("x").description("Main hand horizontal offset.")
-        .defaultValue(0.0).min(-2.0).max(2.0).sliderRange(-1.0, 1.0)
-        .build()
-    );
-
-    private final Setting<Double> mainY = sgMainHand.add(new DoubleSetting.Builder()
-        .name("y").description("Main hand vertical offset.")
-        .defaultValue(0.0).min(-2.0).max(2.0).sliderRange(-1.0, 1.0)
-        .build()
-    );
-
-    private final Setting<Double> mainZ = sgMainHand.add(new DoubleSetting.Builder()
-        .name("z").description("Main hand depth offset.")
-        .defaultValue(0.0).min(-2.0).max(2.0).sliderRange(-1.0, 1.0)
-        .build()
-    );
-
-    private final Setting<Double> mainScale = sgMainHand.add(new DoubleSetting.Builder()
-        .name("scale").description("Main hand scale multiplier.")
-        .defaultValue(1.0).min(0.1).max(3.0).sliderRange(0.1, 2.0)
-        .build()
-    );
-
-    private final Setting<Double> mainRotX = sgMainHand.add(new DoubleSetting.Builder()
-        .name("rot-x").description("Main hand rotation around the X axis (degrees).")
-        .defaultValue(0.0).min(-180.0).max(180.0).sliderRange(-180.0, 180.0)
-        .build()
-    );
-
-    private final Setting<Double> mainRotY = sgMainHand.add(new DoubleSetting.Builder()
-        .name("rot-y").description("Main hand rotation around the Y axis (degrees).")
-        .defaultValue(0.0).min(-180.0).max(180.0).sliderRange(-180.0, 180.0)
-        .build()
-    );
-
-    private final Setting<Double> mainRotZ = sgMainHand.add(new DoubleSetting.Builder()
-        .name("rot-z").description("Main hand rotation around the Z axis (degrees).")
-        .defaultValue(0.0).min(-180.0).max(180.0).sliderRange(-180.0, 180.0)
-        .build()
-    );
-
-    // ═══════════════════════════════════════════════════════════════════════════
-    // Settings — Off Hand
-    // ═══════════════════════════════════════════════════════════════════════════
-
-    private final Setting<Double> offX = sgOffHand.add(new DoubleSetting.Builder()
-        .name("x").description("Off hand horizontal offset.")
-        .defaultValue(0.0).min(-2.0).max(2.0).sliderRange(-1.0, 1.0)
-        .build()
-    );
-
-    private final Setting<Double> offY = sgOffHand.add(new DoubleSetting.Builder()
-        .name("y").description("Off hand vertical offset.")
-        .defaultValue(0.0).min(-2.0).max(2.0).sliderRange(-1.0, 1.0)
-        .build()
-    );
-
-    private final Setting<Double> offZ = sgOffHand.add(new DoubleSetting.Builder()
-        .name("z").description("Off hand depth offset.")
-        .defaultValue(0.0).min(-2.0).max(2.0).sliderRange(-1.0, 1.0)
-        .build()
-    );
-
-    private final Setting<Double> offScale = sgOffHand.add(new DoubleSetting.Builder()
-        .name("scale").description("Off hand scale multiplier.")
-        .defaultValue(1.0).min(0.1).max(3.0).sliderRange(0.1, 2.0)
-        .build()
-    );
-
-    private final Setting<Double> offRotX = sgOffHand.add(new DoubleSetting.Builder()
-        .name("rot-x").description("Off hand rotation around the X axis (degrees).")
-        .defaultValue(0.0).min(-180.0).max(180.0).sliderRange(-180.0, 180.0)
-        .build()
-    );
-
-    private final Setting<Double> offRotY = sgOffHand.add(new DoubleSetting.Builder()
-        .name("rot-y").description("Off hand rotation around the Y axis (degrees).")
-        .defaultValue(0.0).min(-180.0).max(180.0).sliderRange(-180.0, 180.0)
-        .build()
-    );
-
-    private final Setting<Double> offRotZ = sgOffHand.add(new DoubleSetting.Builder()
-        .name("rot-z").description("Off hand rotation around the Z axis (degrees).")
-        .defaultValue(0.0).min(-180.0).max(180.0).sliderRange(-180.0, 180.0)
-        .build()
-    );
+    
+    private final HandTransformSettings mainHandSettings;
+    private final HandTransformSettings offHandSettings;
 
     // ═══════════════════════════════════════════════════════════════════════════
     // Constructor
@@ -142,29 +57,92 @@ public class Handmold extends Module {
     public Handmold() {
         super(HuntingUtilities.CATEGORY, "handmold",
             "Adjusts the position, scale, and rotation of each hand independently.");
+
+        mainHandSettings = new HandTransformSettings(sgMainHand, "Main");
+        offHandSettings  = new HandTransformSettings(sgOffHand, "Off");
     }
 
     // ═══════════════════════════════════════════════════════════════════════════
     // Public API — read by mixins
     // ═══════════════════════════════════════════════════════════════════════════
 
-    public double getMainX()     { return mainX.get(); }
-    public double getMainY()     { return mainY.get(); }
-    public double getMainZ()     { return mainZ.get(); }
-    public double getMainScale() { return mainScale.get(); }
-    public double getMainRotX()  { return mainRotX.get(); }
-    public double getMainRotY()  { return mainRotY.get(); }
-    public double getMainRotZ()  { return mainRotZ.get(); }
+    public double getMainX()     { return mainHandSettings.getX(); }
+    public double getMainY()     { return mainHandSettings.getY(); }
+    public double getMainZ()     { return mainHandSettings.getZ(); }
+    public double getMainScale() { return mainHandSettings.getScale(); }
+    public double getMainRotX()  { return mainHandSettings.getRotX(); }
+    public double getMainRotY()  { return mainHandSettings.getRotY(); }
+    public double getMainRotZ()  { return mainHandSettings.getRotZ(); }
 
-    public double getOffX()      { return offX.get(); }
-    public double getOffY()      { return offY.get(); }
-    public double getOffZ()      { return offZ.get(); }
-    public double getOffScale()  { return offScale.get(); }
-    public double getOffRotX()   { return offRotX.get(); }
-    public double getOffRotY()   { return offRotY.get(); }
-    public double getOffRotZ()   { return offRotZ.get(); }
+    public double getOffX()      { return offHandSettings.getX(); }
+    public double getOffY()      { return offHandSettings.getY(); }
+    public double getOffZ()      { return offHandSettings.getZ(); }
+    public double getOffScale()  { return offHandSettings.getScale(); }
+    public double getOffRotX()   { return offHandSettings.getRotX(); }
+    public double getOffRotY()   { return offHandSettings.getRotY(); }
+    public double getOffRotZ()   { return offHandSettings.getRotZ(); }
 
     public boolean shouldDisableHandBob()        { return isActive() && noHandBob.get(); }
     public boolean shouldHideEmptyMainhand()     { return isActive() && hideEmptyMainhand.get(); }
     public boolean shouldHideOffhandCompletely() { return isActive() && hideOffhandCompletely.get(); }
+
+    // ═══════════════════════════════════════════════════════════════════════════
+    // Inner Class for Hand Settings
+    // ═══════════════════════════════════════════════════════════════════════════
+
+    private static class HandTransformSettings {
+        public final Setting<Double> x;
+        public final Setting<Double> y;
+        public final Setting<Double> z;
+        public final Setting<Double> scale;
+        public final Setting<Double> rotX;
+        public final Setting<Double> rotY;
+        public final Setting<Double> rotZ;
+
+        public HandTransformSettings(SettingGroup sg, String handName) {
+            x = sg.add(new DoubleSetting.Builder()
+                .name("x").description(handName + " hand horizontal offset.")
+                .defaultValue(0.0).min(-2.0).max(2.0).sliderRange(-1.0, 1.0)
+                .build()
+            );
+            y = sg.add(new DoubleSetting.Builder()
+                .name("y").description(handName + " hand vertical offset.")
+                .defaultValue(0.0).min(-2.0).max(2.0).sliderRange(-1.0, 1.0)
+                .build()
+            );
+            z = sg.add(new DoubleSetting.Builder()
+                .name("z").description(handName + " hand depth offset.")
+                .defaultValue(0.0).min(-2.0).max(2.0).sliderRange(-1.0, 1.0)
+                .build()
+            );
+            scale = sg.add(new DoubleSetting.Builder()
+                .name("scale").description(handName + " hand scale multiplier.")
+                .defaultValue(1.0).min(0.1).max(3.0).sliderRange(0.1, 2.0)
+                .build()
+            );
+            rotX = sg.add(new DoubleSetting.Builder()
+                .name("rot-x").description(handName + " hand rotation around the X axis (degrees).")
+                .defaultValue(0.0).min(-180.0).max(180.0).sliderRange(-180.0, 180.0)
+                .build()
+            );
+            rotY = sg.add(new DoubleSetting.Builder()
+                .name("rot-y").description(handName + " hand rotation around the Y axis (degrees).")
+                .defaultValue(0.0).min(-180.0).max(180.0).sliderRange(-180.0, 180.0)
+                .build()
+            );
+            rotZ = sg.add(new DoubleSetting.Builder()
+                .name("rot-z").description(handName + " hand rotation around the Z axis (degrees).")
+                .defaultValue(0.0).min(-180.0).max(180.0).sliderRange(-180.0, 180.0)
+                .build()
+            );
+        }
+
+        public double getX()     { return x.get(); }
+        public double getY()     { return y.get(); }
+        public double getZ()     { return z.get(); }
+        public double getScale() { return scale.get(); }
+        public double getRotX()  { return rotX.get(); }
+        public double getRotY()  { return rotY.get(); }
+        public double getRotZ()  { return rotZ.get(); }
+    }
 }
