@@ -54,7 +54,7 @@ public class RocketPilot extends Module {
      *  NegPos       – bias toward -X / +Z  (SW quadrant)
      *  PosNeg       – bias toward +X / -Z  (NE quadrant)
      */
-    public enum DrunkBias { None, PositiveOnly, NegativeOnly, NegPos, PosNeg }
+    public enum DrunkBias { None, North, South, East, West, PositiveOnly, NegativeOnly, NegPos, PosNeg }
 
     // ─── Constants ───────────────────────────────────────────────────────────────
     private static final int   TAKEOFF_GRACE_TICKS       = 40;
@@ -445,9 +445,10 @@ public class RocketPilot extends Module {
     /** Constrains drunk-pilot heading to a specific world-coordinate quadrant. */
     public final Setting<DrunkBias> drunkBias = sgDrunk.add(new EnumSetting.Builder<DrunkBias>()
         .name("coordinate-bias")
-        .description("Constrains drunk-pilot heading to a specific world quadrant. " +
-                     "None = fully random. PositiveOnly = +X/+Z. NegativeOnly = -X/-Z. " +
-                     "NegPos = -X/+Z. PosNeg = +X/-Z.")
+        .description("Constrains drunk-pilot heading. " +
+                     "None = fully random. North/South/East/West for cardinal directions. " +
+                     "PositiveOnly = +X/+Z (SE). NegativeOnly = -X/-Z (NW). " +
+                     "NegPos = -X/+Z (SW). PosNeg = +X/-Z (NE).")
         .defaultValue(DrunkBias.None)
         .visible(() -> flightPattern.get() == FlightPattern.Drunk)
         .build()
@@ -1406,14 +1407,25 @@ public class RocketPilot extends Module {
                 //  NegPos       → -X / +Z  (SW)  yaw:   0 ..  90
                 //  PosNeg       → +X / -Z  (NE)  yaw: -180 .. -90
                 float minYaw, maxYaw;
+                boolean isNorth = false;
                 switch (bias) {
+                    case North        -> { isNorth = true; minYaw = 0; maxYaw = 0; } // Handled separately
+                    case South        -> { minYaw = -22.5f; maxYaw =  22.5f; }
+                    case East         -> { minYaw = -112.5f; maxYaw = -67.5f; }
+                    case West         -> { minYaw =  67.5f; maxYaw = 112.5f; }
                     case PositiveOnly -> { minYaw = -90f;  maxYaw =   0f; }
                     case NegativeOnly -> { minYaw =  90f;  maxYaw = 180f; }
                     case NegPos       -> { minYaw =   0f;  maxYaw =  90f; }
                     case PosNeg       -> { minYaw = -180f; maxYaw = -90f; }
                     default           -> { minYaw = -180f; maxYaw = 180f; }
                 }
-                targetDrunkYaw = minYaw + (float)(Math.random() * (maxYaw - minYaw));
+
+                if (isNorth) {
+                    // North is around +/-180. Range is [157.5, 202.5], which wraps.
+                    targetDrunkYaw = 180f + ((float)Math.random() * 45f - 22.5f);
+                } else {
+                    targetDrunkYaw = minYaw + (float)(Math.random() * (maxYaw - minYaw));
+                }
             }
 
             drunkTimer           = 0;
