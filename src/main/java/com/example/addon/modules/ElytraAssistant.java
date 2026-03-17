@@ -12,6 +12,7 @@ import meteordevelopment.meteorclient.settings.KeybindSetting;
 import meteordevelopment.meteorclient.settings.Setting;
 import meteordevelopment.meteorclient.settings.SettingGroup;
 import meteordevelopment.meteorclient.systems.modules.Module;
+import meteordevelopment.meteorclient.systems.modules.Modules;
 import meteordevelopment.meteorclient.utils.misc.Keybind;
 import meteordevelopment.meteorclient.utils.misc.input.Input;
 import meteordevelopment.meteorclient.utils.player.FindItemResult;
@@ -19,9 +20,7 @@ import meteordevelopment.meteorclient.utils.player.InvUtils;
 import meteordevelopment.meteorclient.utils.player.Rotations;
 import meteordevelopment.orbit.EventHandler;
 import net.minecraft.entity.EquipmentSlot;
-import net.minecraft.component.DataComponentTypes;
 import net.minecraft.item.ItemStack;
-import net.minecraft.item.ArmorItem;
 import net.minecraft.item.Item;
 import net.minecraft.item.Items;
 import net.minecraft.sound.SoundEvents;
@@ -34,8 +33,6 @@ public class ElytraAssistant extends Module {
     // ═══════════════════════════════════════════════════════════════════════════
 
     public enum MiddleClickAction { None, Rocket, Pearl }
-    public enum DurabilityMode { None, AutoSwap, AutoMend }
-    public enum MendTarget { Elytra, Tools, Armour, All }
 
     // ═══════════════════════════════════════════════════════════════════════════
     // Setting Groups
@@ -48,10 +45,10 @@ public class ElytraAssistant extends Module {
     // Settings — Durability
     // ═══════════════════════════════════════════════════════════════════════════
 
-    private final Setting<DurabilityMode> durabilityMode = sgDurability.add(new EnumSetting.Builder<DurabilityMode>()
-        .name("durability-mode")
-        .description("How to manage elytra durability.")
-        .defaultValue(DurabilityMode.AutoSwap)
+    private final Setting<Boolean> enableAutoSwap = sgDurability.add(new BoolSetting.Builder()
+        .name("enable-auto-swap")
+        .description("Automatically swap to a fresh elytra when durability is low.")
+        .defaultValue(true)
         .build()
     );
 
@@ -61,7 +58,7 @@ public class ElytraAssistant extends Module {
         .defaultValue(10)
         .min(1)
         .sliderMax(100)
-        .visible(() -> durabilityMode.get() == DurabilityMode.AutoSwap)
+        .visible(enableAutoSwap::get)
         .build()
     );
 
@@ -71,57 +68,10 @@ public class ElytraAssistant extends Module {
         .defaultValue(Keybind.none())
         .action(() -> {
             if (mc.currentScreen != null) return;
-            if (durabilityMode.get() == DurabilityMode.AutoSwap) {
-                durabilityMode.set(DurabilityMode.None);
-            } else {
-                durabilityMode.set(DurabilityMode.AutoSwap);
-            }
-            info("Auto Swap " + (durabilityMode.get() == DurabilityMode.AutoSwap ? "enabled" : "disabled") + ".");
+            boolean val = !enableAutoSwap.get();
+            enableAutoSwap.set(val);
+            info("Auto Swap " + (val ? "enabled" : "disabled") + ".");
         })
-        .build()
-    );
-
-    private final Setting<Keybind> autoMendToggleKey = sgDurability.add(new KeybindSetting.Builder()
-        .name("auto-mend-key")
-        .description("Key to toggle auto mending.")
-        .defaultValue(Keybind.none())
-        .action(() -> {
-            if (mc.currentScreen != null) return;
-            if (durabilityMode.get() == DurabilityMode.AutoMend) {
-                durabilityMode.set(DurabilityMode.None);
-            } else {
-                durabilityMode.set(DurabilityMode.AutoMend);
-            }
-            info("Auto Mend " + (durabilityMode.get() == DurabilityMode.AutoMend ? "enabled" : "disabled") + ".");
-        })
-        .build()
-    );
-
-    private final Setting<MendTarget> mendTarget = sgDurability.add(new EnumSetting.Builder<MendTarget>()
-        .name("mend-target")
-        .description("What to repair with Auto Mend.")
-        .defaultValue(MendTarget.Elytra)
-        .visible(() -> durabilityMode.get() == DurabilityMode.AutoMend)
-        .build()
-    );
-
-    private final Setting<Integer> packetsPerBurst = sgDurability.add(new IntSetting.Builder()
-        .name("packets-per-burst")
-        .description("How many XP bottles to throw per burst.")
-        .defaultValue(3)
-        .min(1)
-        .sliderMax(10)
-        .visible(() -> durabilityMode.get() == DurabilityMode.AutoMend)
-        .build()
-    );
-
-    private final Setting<Integer> burstDelay = sgDurability.add(new IntSetting.Builder()
-        .name("burst-delay")
-        .description("Ticks to wait between bursts.")
-        .defaultValue(4)
-        .min(0)
-        .sliderMax(20)
-        .visible(() -> durabilityMode.get() == DurabilityMode.AutoMend)
         .build()
     );
 
@@ -166,10 +116,8 @@ public class ElytraAssistant extends Module {
     private boolean noReplacementWarned   = false;
     private boolean noUsableElytraWarned  = false;
     private boolean wasMiddlePressed      = false;
-    private int     mendTimer             = 0;
     private int     middleClickTimer      = 0;
     private int     swingTimer            = 0;
-    private int     autoSwapReenableTimer = 0;
 
     // ═══════════════════════════════════════════════════════════════════════════
     // Constructor
@@ -188,10 +136,8 @@ public class ElytraAssistant extends Module {
         noReplacementWarned   = false;
         noUsableElytraWarned  = false;
         wasMiddlePressed      = false;
-        mendTimer             = 0;
         middleClickTimer      = 0;
         swingTimer            = 0;
-        autoSwapReenableTimer = 0;
     }
 
     // ═══════════════════════════════════════════════════════════════════════════
@@ -201,14 +147,6 @@ public class ElytraAssistant extends Module {
     @EventHandler
     private void onTick(TickEvent.Pre event) {
         if (mc.player == null || mc.world == null) return;
-
-        if (autoSwapReenableTimer > 0) {
-            autoSwapReenableTimer--;
-            if (autoSwapReenableTimer == 0 && durabilityMode.get() == DurabilityMode.None) {
-                durabilityMode.set(DurabilityMode.AutoSwap);
-                info("Auto-mend finished. Re-enabling auto-swap.");
-            }
-        }
 
         if (middleClickTimer > 0) middleClickTimer--;
 
@@ -235,12 +173,10 @@ public class ElytraAssistant extends Module {
             }
         }
 
-        if (durabilityMode.get() == DurabilityMode.AutoMend) {
-            handleAutoMend();
-            return;
-        }
+        // Pause swapping if Mendbot is active to prevent conflicts
+        if (Modules.get().get(Mendbot.class).isActive()) return;
 
-        if (durabilityMode.get() == DurabilityMode.AutoSwap) {
+        if (enableAutoSwap.get()) {
             handleChestplateElytraSwitch();
         }
     }
@@ -297,185 +233,6 @@ public class ElytraAssistant extends Module {
 
     private int getSlotId(int slot) {
         return (slot >= 0 && slot < 9) ? 36 + slot : slot;
-    }
-
-    // ═══════════════════════════════════════════════════════════════════════════
-    // Auto Mend Logic
-    // ═══════════════════════════════════════════════════════════════════════════
-
-    private void handleAutoMend() {
-        if (mendTimer > 0) {
-            mendTimer--;
-            return;
-        }
-
-        if (!InvUtils.find(Items.EXPERIENCE_BOTTLE).found()) {
-            info("No more XP bottles — disabling auto-mend.");
-            durabilityMode.set(DurabilityMode.None);
-            autoSwapReenableTimer = 30;
-            return;
-        }
-
-        MendTarget currentTarget = mendTarget.get();
-
-        switch (currentTarget) {
-            case Elytra:
-                if (!handleElytraMending()) {
-                    info("All Elytras mended!");
-                    durabilityMode.set(DurabilityMode.None);
-                    autoSwapReenableTimer = 30;
-                }
-                break;
-            case Tools:
-                if (!handleToolMending()) {
-                    info("All tools mended!");
-                    durabilityMode.set(DurabilityMode.None);
-                    autoSwapReenableTimer = 30;
-                }
-                break;
-            case Armour:
-                if (!handleArmourMending()) {
-                    info("All armour mended!");
-                    durabilityMode.set(DurabilityMode.None);
-                    autoSwapReenableTimer = 30;
-                }
-                break;
-            case All:
-                if (!handleElytraMending() && !handleToolMending() && !handleArmourMending()) {
-                    info("All items mended!");
-                    durabilityMode.set(DurabilityMode.None);
-                    autoSwapReenableTimer = 30;
-                }
-                break;
-        }
-    }
-
-    private boolean handleElytraMending() {
-        ItemStack chest = mc.player.getEquippedStack(EquipmentSlot.CHEST);
-        if (!chest.isOf(Items.ELYTRA) || !chest.isDamaged()) {
-            FindItemResult damaged = InvUtils.find(stack -> stack.isOf(Items.ELYTRA) && stack.isDamaged());
-            if (damaged.found()) {
-                InvUtils.move().from(damaged.slot()).toArmor(2);
-                return true;
-            } else {
-                return false;
-            }
-        }
-
-        throwXpBottles();
-        return true;
-    }
-
-    private boolean handleToolMending() {
-        ItemStack mainHand = mc.player.getMainHandStack();
-        ItemStack offHand = mc.player.getOffHandStack();
-
-        boolean mainHandNeedsMend = isMendableTool(mainHand);
-        boolean offHandNeedsMend = isMendableTool(offHand);
-
-        if (!mainHandNeedsMend && !offHandNeedsMend) {
-            FindItemResult damagedTool = InvUtils.find(this::isMendableTool);
-            if (damagedTool.found()) {
-                if (offHand.isEmpty()) {
-                    InvUtils.move().from(damagedTool.slot()).toOffhand();
-                } else {
-                    InvUtils.swap(damagedTool.slot(), true);
-                }
-                return true;
-            } else {
-                return false;
-            }
-        }
-
-        throwXpBottles();
-        return true;
-    }
-
-    private boolean handleArmourMending() {
-        // Check equipped armor first.
-        for (EquipmentSlot slot : new EquipmentSlot[]{EquipmentSlot.HEAD, EquipmentSlot.CHEST, EquipmentSlot.LEGS, EquipmentSlot.FEET}) {
-            ItemStack stack = mc.player.getEquippedStack(slot);
-            // Don't try to mend elytra here, handleElytraMending does that.
-            if (isMendableArmour(stack) && !stack.isOf(Items.ELYTRA)) {
-                throwXpBottles();
-                return true;
-            }
-        }
-
-        // No damaged armor equipped, find one in inventory.
-        FindItemResult damagedArmour = InvUtils.find(s -> isMendableArmour(s) && !s.isOf(Items.ELYTRA));
-        if (damagedArmour.found()) {
-            ItemStack stack = mc.player.getInventory().getStack(damagedArmour.slot());
-            var equippable = stack.get(DataComponentTypes.EQUIPPABLE);
-            if (equippable != null) {
-                EquipmentSlot slot = equippable.slot();
-                // Check if the target slot is empty or has a fully repaired item we can swap out.
-                ItemStack equipped = mc.player.getEquippedStack(slot);
-                if (equipped.isEmpty() || !equipped.isDamaged()) {
-                     InvUtils.move().from(damagedArmour.slot()).toArmor(slot.getEntitySlotId());
-                     return true;
-                }
-            }
-        }
-
-        // No damaged armor found anywhere.
-        return false;
-    }
-
-    private boolean isMendableArmour(ItemStack stack) {
-        if (stack.isEmpty() || !stack.isDamaged()) return false;
-        return stack.getItem() instanceof ArmorItem;
-    }
-
-    private boolean isMendableTool(ItemStack stack) {
-        if (stack.isEmpty() || !stack.isDamaged()) return false;
-        Item item = stack.getItem();
-        return item instanceof net.minecraft.item.PickaxeItem ||
-               item instanceof net.minecraft.item.SwordItem ||
-               item instanceof net.minecraft.item.AxeItem ||
-               item instanceof net.minecraft.item.ShovelItem ||
-               item == Items.BOW ||
-               item == Items.FLINT_AND_STEEL ||
-               item == Items.SHIELD ||
-               item == Items.TRIDENT ||
-               item == Items.FISHING_ROD;
-    }
-
-    private void throwXpBottles() {
-        // Add small random rotation to prevent AFK kick
-        float yaw = mc.player.getYaw() + (float) (Math.random() * 0.2 - 0.1);
-        float pitch = 90 + (float) (Math.random() * 0.2 - 0.1);
-
-        Rotations.rotate(yaw, pitch, () -> {
-            FindItemResult xp = InvUtils.find(Items.EXPERIENCE_BOTTLE);
-            if (!xp.found()) return;
-
-            if (xp.isHotbar()) {
-                InvUtils.swap(xp.slot(), true);
-                for (int i = 0; i < packetsPerBurst.get(); i++) {
-                    mc.interactionManager.interactItem(mc.player, Hand.MAIN_HAND);
-                }
-                InvUtils.swapBack();
-            } else {
-                int emptySlot = InvUtils.findEmpty().slot();
-
-                if (emptySlot != -1) {
-                    // Move to empty slot, use, and move back to keep hotbar clean.
-                    InvUtils.move().from(xp.slot()).toHotbar(emptySlot);
-                    InvUtils.swap(emptySlot, true);
-                    for (int i = 0; i < packetsPerBurst.get(); i++) mc.interactionManager.interactItem(mc.player, Hand.MAIN_HAND);
-                    InvUtils.swapBack();
-                    InvUtils.move().from(emptySlot).to(xp.slot());
-                } else {
-                    // No empty slot, use original logic (swap with current slot)
-                    int prevSlot = mc.player.getInventory().selectedSlot;
-                    InvUtils.move().from(xp.slot()).toHotbar(prevSlot);
-                    for (int i = 0; i < packetsPerBurst.get(); i++) mc.interactionManager.interactItem(mc.player, Hand.MAIN_HAND);
-                    InvUtils.move().from(prevSlot).to(xp.slot());
-                }
-            }
-        });
-        mendTimer = burstDelay.get();
     }
 
     // ═══════════════════════════════════════════════════════════════════════════
@@ -544,6 +301,6 @@ public class ElytraAssistant extends Module {
     }
 
     public boolean isAutoSwapEnabled() {
-        return isActive() && durabilityMode.get() == DurabilityMode.AutoSwap;
+        return isActive() && enableAutoSwap.get();
     }
 }

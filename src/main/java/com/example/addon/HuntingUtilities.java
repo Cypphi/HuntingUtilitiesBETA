@@ -21,6 +21,7 @@ import com.example.addon.modules.ThirdSight;
 import com.example.addon.modules.Timethrottle;
 import com.example.addon.modules.Tunnelers;
 import com.example.addon.modules.Handmold;
+import com.example.addon.modules.Mendbot;
 
 import meteordevelopment.meteorclient.addons.MeteorAddon;
 import meteordevelopment.meteorclient.systems.hud.HudGroup;
@@ -56,6 +57,7 @@ public class HuntingUtilities extends MeteorAddon {
         modules.add(new Tunnelers());
         modules.add(new ThirdSight());
         modules.add(new Handmold());
+        modules.add(new Mendbot());
     }
 
     @Override
