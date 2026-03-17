@@ -1,9 +1,13 @@
 name: Publish Development Build
+
 on: push
 
 jobs:
   build:
     runs-on: ubuntu-latest
+
+    permissions:
+      contents: write
 
     steps:
       - name: Checkout Repository
@@ -17,8 +21,11 @@ jobs:
       - name: Set up Java
         uses: actions/setup-java@v4
         with:
-          distribution: 'temurin'
+          distribution: temurin
           java-version: 21
+
+      - name: Make gradlew executable
+        run: chmod +x ./gradlew
 
       - name: Build with Gradle
         run: ./gradlew build
