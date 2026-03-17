@@ -23,6 +23,7 @@ Current Modules
 - Third Sight
 - Illushine
 - Handmold
+- Mendbot
 
 More modules coming soon — 
 
