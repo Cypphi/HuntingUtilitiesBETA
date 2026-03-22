@@ -22,7 +22,6 @@ public abstract class HandmoldMixin {
 
     private static final ThreadLocal<Boolean> RENDERING_CENTERED = ThreadLocal.withInitial(() -> false);
 
-    // ── Main hand transform inject ────────────────────────────────────────────
     @Inject(
         method = "renderFirstPersonItem",
         at = @At("HEAD"),
@@ -41,6 +40,7 @@ public abstract class HandmoldMixin {
         int light,
         CallbackInfo ci
     ) {
+        // Prevent re-entry when we invoke the original ourselves
         if (RENDERING_CENTERED.get()) return;
 
         Handmold mod = Modules.get().get(Handmold.class);
@@ -48,66 +48,86 @@ public abstract class HandmoldMixin {
 
         boolean isMain = hand == Hand.MAIN_HAND;
 
-        // ── Hide main hand if empty ───────────────────────────────────────────
+        // ── Hide checks ───────────────────────────────────────────────────────
         if (isMain && mod.shouldHideEmptyMainhand() && item.isEmpty()) {
             ci.cancel();
             return;
         }
-
-        // ── Hide offhand if enabled ───────────────────────────────────────────
         if (!isMain && mod.shouldHideOffhandCompletely()) {
             ci.cancel();
             return;
         }
 
-        // ── Shared transform values ───────────────────────────────────────────
-        double x     = isMain ? mod.getMainX()     : mod.getOffX();
-        double y     = isMain ? mod.getMainY()     : mod.getOffY();
-        double z     = isMain ? mod.getMainZ()     : mod.getOffZ();
+        // ── Read the correct hand's settings ─────────────────────────────────
+        double tx    = isMain ? mod.getMainX()     : mod.getOffX();
+        double ty    = isMain ? mod.getMainY()     : mod.getOffY();
+        double tz    = isMain ? mod.getMainZ()     : mod.getOffZ();
         double scale = isMain ? mod.getMainScale() : mod.getOffScale();
         double rotX  = isMain ? mod.getMainRotX()  : mod.getOffRotX();
         double rotY  = isMain ? mod.getMainRotY()  : mod.getOffRotY();
         double rotZ  = isMain ? mod.getMainRotZ()  : mod.getOffRotZ();
 
-        // ── Center eating/drinking animation (always on when module is active) ─
+        // Only intercept if something is actually changed — otherwise let
+        // vanilla run untouched so default rendering is never affected
+        boolean hasTransform = tx != 0 || ty != 0 || tz != 0
+            || scale != 1.0
+            || rotX != 0 || rotY != 0 || rotZ != 0;
+
+        // ── Eating/drinking centering ─────────────────────────────────────────
+        boolean isCentering = false;
+        float   extraOffset = 0f;
         if (player.isUsingItem() && player.getActiveHand() == hand) {
             boolean isFood      = item.get(DataComponentTypes.FOOD) != null;
             boolean isDrinkable = item.getItem() instanceof PotionItem
                 || item.isOf(Items.MILK_BUCKET)
                 || item.isOf(Items.HONEY_BOTTLE);
-
             if (isFood || isDrinkable) {
-                ci.cancel();
-
-                // equipProgress runs 0→1 as the hand raises into position.
-                // Use it to smoothly lerp from the vanilla side offset to center.
-                float vanillaHandOffset = isMain ? -0.5f : 0.5f;
-                float smoothOffset = vanillaHandOffset * (1.0f - equipProgress);
-
-                matrices.translate(smoothOffset + x, y, z);
-                matrices.scale((float) scale, (float) scale, (float) scale);
-                matrices.multiply(RotationAxis.POSITIVE_X.rotationDegrees((float) rotX));
-                matrices.multiply(RotationAxis.POSITIVE_Y.rotationDegrees((float) rotY));
-                matrices.multiply(RotationAxis.POSITIVE_Z.rotationDegrees((float) rotZ));
-
-                RENDERING_CENTERED.set(true);
-                try {
-                    ((HeldItemRendererAccessor)(Object)this).invokeRenderFirstPersonItem(
-                        player, tickDelta, pitch, hand, 0.0f, item, equipProgress,
-                        matrices, vertexConsumers, light
-                    );
-                } finally {
-                    RENDERING_CENTERED.set(false);
+                isCentering = true;
+                switch (mod.getEatPosition()) {
+                    case Center ->
+                        // Lerp from configured X toward 0 (center) as equipProgress goes 0→1
+                        extraOffset = (float)(tx * (1.0f - equipProgress));
+                    case StayInPlace ->
+                        // No movement — stay at configured X the whole time
+                        extraOffset = (float) tx;
+                    case Custom -> {
+                        // Lerp from the custom target X toward the configured X
+                        // as equipProgress goes 0→1, so the hand always moves inward
+                        double target = mod.getEatTargetX();
+                        extraOffset = (float)(target + (tx - target) * equipProgress);
+                    }
                 }
-                return;
             }
         }
 
-        // ── Apply transforms for normal rendering ─────────────────────────────
-        matrices.translate(x, y, z);
+        if (!hasTransform && !isCentering) return;
+
+        // ── Cancel vanilla, apply our transforms, re-invoke ───────────────────
+        ci.cancel();
+
+        matrices.push();
+
+        if (isCentering) {
+            matrices.translate(extraOffset, ty, tz);
+        } else {
+            matrices.translate(tx, ty, tz);
+        }
+
         matrices.scale((float) scale, (float) scale, (float) scale);
-        matrices.multiply(RotationAxis.POSITIVE_X.rotationDegrees((float) rotX));
-        matrices.multiply(RotationAxis.POSITIVE_Y.rotationDegrees((float) rotY));
-        matrices.multiply(RotationAxis.POSITIVE_Z.rotationDegrees((float) rotZ));
+        if (rotX != 0) matrices.multiply(RotationAxis.POSITIVE_X.rotationDegrees((float) rotX));
+        if (rotY != 0) matrices.multiply(RotationAxis.POSITIVE_Y.rotationDegrees((float) rotY));
+        if (rotZ != 0) matrices.multiply(RotationAxis.POSITIVE_Z.rotationDegrees((float) rotZ));
+
+        RENDERING_CENTERED.set(true);
+        try {
+            ((HeldItemRendererAccessor)(Object)this).invokeRenderFirstPersonItem(
+                player, tickDelta, pitch, hand,
+                isCentering ? 0.0f : swingProgress,
+                item, equipProgress, matrices, vertexConsumers, light
+            );
+        } finally {
+            RENDERING_CENTERED.set(false);
+            matrices.pop();
+        }
     }
 }
