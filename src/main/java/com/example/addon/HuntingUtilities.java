@@ -5,6 +5,7 @@ import org.slf4j.LoggerFactory;
 
 import com.example.addon.hud.LootLensHud;
 import com.example.addon.hud.PortalTrackerHud;
+import com.example.addon.hud.PositionHud;
 import com.example.addon.hud.StatsHud;
 import com.example.addon.modules.DungeonAssistant;
 import com.example.addon.modules.ElytraAssistant;
@@ -67,6 +68,7 @@ public class HuntingUtilities extends MeteorAddon {
         Hud.get().register(StatsHud.INFO);
         Hud.get().register(PortalTrackerHud.INFO);
         Hud.get().register(LootLensHud.INFO);
+        Hud.get().register(PositionHud.INFO);
     }
 
     @Override
