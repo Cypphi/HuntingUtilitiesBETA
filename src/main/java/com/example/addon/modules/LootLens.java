@@ -8,6 +8,7 @@ import java.util.Map;
 import java.util.Set;
 
 import com.example.addon.HuntingUtilities;
+import com.mojang.blaze3d.systems.RenderSystem;
 
 import meteordevelopment.meteorclient.events.game.OpenScreenEvent;
 import meteordevelopment.meteorclient.events.render.Render3DEvent;
@@ -31,8 +32,15 @@ import net.minecraft.block.ChestBlock;
 import net.minecraft.block.ShulkerBoxBlock;
 import net.minecraft.block.entity.BlockEntity;
 import net.minecraft.block.enums.ChestType;
+import net.minecraft.client.gl.ShaderProgramKeys;
 import net.minecraft.client.gui.screen.ingame.HandledScreen;
 import net.minecraft.client.gui.screen.ingame.InventoryScreen;
+import net.minecraft.client.render.BufferBuilder;
+import net.minecraft.client.render.BufferRenderer;
+import net.minecraft.client.render.Tessellator;
+import net.minecraft.client.render.VertexFormat;
+import net.minecraft.client.render.VertexFormats;
+import net.minecraft.client.util.math.MatrixStack;
 import net.minecraft.entity.decoration.GlowItemFrameEntity;
 import net.minecraft.entity.decoration.ItemFrameEntity;
 import net.minecraft.entity.vehicle.ChestMinecartEntity;
@@ -57,6 +65,7 @@ public class LootLens extends Module {
     // ─────────────────────────── Enums ───────────────────────────
 
     public enum RenderMode { GLOW, SPECTRAL }
+    public enum BeamStyle { BOX, GUARDIAN }
 
     // ─────────────────────────── State ───────────────────────────
 
@@ -65,7 +74,6 @@ public class LootLens extends Module {
     private final Set<BlockPos>                   scannedByScanner           = new HashSet<>();
     private final Set<BlockPos>                   shulkerContainers          = new HashSet<>();
     private final Map<BlockPos, Integer>          shulkerCounts              = new HashMap<>();
-    private final Map<BlockPos, Integer>          stackedMinecartCounts      = new HashMap<>();
     private final Map<Vec3d, ItemFrameEntity>     itemFrameEntities          = new HashMap<>();
     private final Map<Vec3d, GlowItemFrameEntity> glowItemFrameEntities      = new HashMap<>();
     private final Set<Vec3d>                      notifiedItemFrames         = new HashSet<>();
@@ -143,9 +151,18 @@ public class LootLens extends Module {
 
     // ── Beam ──
 
+    private final Setting<BeamStyle> beamStyle = sgBeam.add(new EnumSetting.Builder<BeamStyle>()
+        .name("beam-style")
+        .description("BOX = simple axis-aligned box beam. GUARDIAN = spinning guardian-style beam.")
+        .defaultValue(BeamStyle.GUARDIAN).build()
+    );
+
+    // ── BOX beam settings ──
+
     private final Setting<Integer> beamWidth = sgBeam.add(new IntSetting.Builder()
-        .name("beam-width").description("Beam width (in hundredths of a block).")
-        .defaultValue(15).min(5).max(50).sliderMin(5).sliderMax(50).build()
+        .name("beam-width").description("Box beam width (in hundredths of a block).")
+        .defaultValue(15).min(5).max(50).sliderMin(5).sliderMax(50)
+        .visible(() -> beamStyle.get() == BeamStyle.BOX).build()
     );
 
     private final Setting<Boolean> mergeBeams = sgBeam.add(new BoolSetting.Builder()
@@ -156,6 +173,59 @@ public class LootLens extends Module {
     private final Setting<Double> mergeDistance = sgBeam.add(new DoubleSetting.Builder()
         .name("merge-distance").description("Distance within which beams are merged.")
         .defaultValue(2.0).min(0).sliderMax(10).visible(mergeBeams::get).build()
+    );
+
+    // ── GUARDIAN beam settings ──
+
+    private final Setting<Double> guardianBeamRadius = sgBeam.add(new DoubleSetting.Builder()
+        .name("guardian-radius")
+        .description("Radius of the guardian beam strands from centre (blocks). " +
+                     "Higher = thicker looking beam.")
+        .defaultValue(0.08).min(0.01).max(0.6).sliderMax(0.3)
+        .visible(() -> beamStyle.get() == BeamStyle.GUARDIAN).build()
+    );
+
+    private final Setting<Integer> guardianStrands = sgBeam.add(new IntSetting.Builder()
+        .name("guardian-strands")
+        .description("Number of spinning flat quads that make up the beam (2-8). " +
+                     "4 looks like a true guardian beam.")
+        .defaultValue(4).min(2).max(8).sliderMax(8)
+        .visible(() -> beamStyle.get() == BeamStyle.GUARDIAN).build()
+    );
+
+    private final Setting<Double> guardianSpinSpeed = sgBeam.add(new DoubleSetting.Builder()
+        .name("guardian-spin-speed")
+        .description("How fast the beam rotates. 1.0 = one full revolution every ~6 seconds.")
+        .defaultValue(1.0).min(0.1).max(5.0).sliderMax(3.0)
+        .visible(() -> beamStyle.get() == BeamStyle.GUARDIAN).build()
+    );
+
+    private final Setting<Integer> guardianCoreAlpha = sgBeam.add(new IntSetting.Builder()
+        .name("guardian-core-alpha")
+        .description("Alpha of the solid centre core of the guardian beam (0 = no core).")
+        .defaultValue(90).min(0).max(255).sliderMax(200)
+        .visible(() -> beamStyle.get() == BeamStyle.GUARDIAN).build()
+    );
+
+    private final Setting<Integer> guardianStrandAlpha = sgBeam.add(new IntSetting.Builder()
+        .name("guardian-strand-alpha")
+        .description("Alpha of the outer spinning strands.")
+        .defaultValue(160).min(10).max(255).sliderMax(255)
+        .visible(() -> beamStyle.get() == BeamStyle.GUARDIAN).build()
+    );
+
+    private final Setting<Boolean> guardianGlow = sgBeam.add(new BoolSetting.Builder()
+        .name("guardian-glow")
+        .description("Add a soft bloom halo around the guardian beam.")
+        .defaultValue(true)
+        .visible(() -> beamStyle.get() == BeamStyle.GUARDIAN).build()
+    );
+
+    private final Setting<Double> guardianGlowRadius = sgBeam.add(new DoubleSetting.Builder()
+        .name("guardian-glow-radius")
+        .description("Radius of the bloom halo around the guardian beam.")
+        .defaultValue(0.18).min(0.02).max(1.0).sliderMax(0.5)
+        .visible(() -> beamStyle.get() == BeamStyle.GUARDIAN && guardianGlow.get()).build()
     );
 
     // ── Storage ──
@@ -212,16 +282,6 @@ public class LootLens extends Module {
     private final Setting<SettingColor> chestMinecartColor = sgStorage.add(new ColorSetting.Builder()
         .name("chest-minecart-color").defaultValue(new SettingColor(255, 180, 0, 200))
         .visible(scanChestMinecarts::get).build()
-    );
-
-    private final Setting<Boolean> highlightStacked = sgStorage.add(new BoolSetting.Builder()
-        .name("highlight-stacked-minecarts")
-        .description("Use different color for stacked chest minecarts (2+).")
-        .defaultValue(true).visible(scanChestMinecarts::get).build()
-    );
-    private final Setting<SettingColor> stackedMinecartColor = sgStorage.add(new ColorSetting.Builder()
-        .name("stacked-minecart-color").defaultValue(new SettingColor(255, 0, 255, 220))
-        .visible(() -> scanChestMinecarts.get() && highlightStacked.get()).build()
     );
 
     private final Setting<SettingColor> shulkerFoundColor = sgStorage.add(new ColorSetting.Builder()
@@ -325,7 +385,7 @@ public class LootLens extends Module {
 
     private void clearAllState() {
         containers.clear(); inventoryCheckedContainers.clear(); scannedByScanner.clear();
-        shulkerContainers.clear(); shulkerCounts.clear(); stackedMinecartCounts.clear();
+        shulkerContainers.clear(); shulkerCounts.clear();
         itemFrameEntities.clear(); glowItemFrameEntities.clear(); notifiedItemFrames.clear();
         lastOpenedContainer = null; screenInventoryChecked = false; cleanupTimer = 0;
     }
@@ -387,8 +447,6 @@ public class LootLens extends Module {
 
     private void checkScreenInventoryForShulkers(HandledScreen<?> screen) {
         if (lastOpenedContainer == null) return;
-
-        // Ender chests show the player's own inventory — never flag them for shulker detection
         if (mc.world != null && mc.world.getBlockState(lastOpenedContainer).getBlock() == Blocks.ENDER_CHEST) return;
         ScreenHandler handler    = screen.getScreenHandler();
         int playerInventoryStart = handler.slots.size() - 36;
@@ -471,19 +529,18 @@ public class LootLens extends Module {
             playerPos.getX() - scanRange, playerPos.getY() - scanRange, playerPos.getZ() - scanRange,
             playerPos.getX() + scanRange, playerPos.getY() + scanRange, playerPos.getZ() + scanRange
         );
-        Map<BlockPos, Integer> minecartCountMap = new HashMap<>();
+        Set<BlockPos> currentMinecartPositions = new HashSet<>();
         for (ChestMinecartEntity minecart : mc.world.getEntitiesByClass(ChestMinecartEntity.class, searchBox, entity -> true)) {
             BlockPos pos = minecart.getBlockPos();
-            minecartCountMap.put(pos, minecartCountMap.getOrDefault(pos, 0) + 1);
+            currentMinecartPositions.add(pos);
             containers.putIfAbsent(pos, StorageType.CHEST_MINECART);
         }
-        stackedMinecartCounts.clear(); stackedMinecartCounts.putAll(minecartCountMap);
         containers.entrySet().removeIf(entry -> {
             if (entry.getValue() != StorageType.CHEST_MINECART) return false;
             BlockPos pos = entry.getKey();
-            if (minecartCountMap.containsKey(pos)) return false;
+            if (currentMinecartPositions.contains(pos)) return false;
             inventoryCheckedContainers.remove(pos); scannedByScanner.remove(pos);
-            shulkerContainers.remove(pos); shulkerCounts.remove(pos); stackedMinecartCounts.remove(pos);
+            shulkerContainers.remove(pos); shulkerCounts.remove(pos);
             return true;
         });
     }
@@ -548,7 +605,6 @@ public class LootLens extends Module {
             BlockPos pos = entry.getKey();
             inventoryCheckedContainers.remove(pos); scannedByScanner.remove(pos);
             shulkerContainers.remove(pos); shulkerCounts.remove(pos);
-            if (type == StorageType.CHEST_MINECART) stackedMinecartCounts.remove(pos);
             return true;
         });
     }
@@ -583,7 +639,8 @@ public class LootLens extends Module {
             if (renderedDoubleChests.contains(pos)) continue;
             Box renderBox;
             if (type == StorageType.CHEST_MINECART) {
-                List<ChestMinecartEntity> minecarts = mc.world.getEntitiesByClass(ChestMinecartEntity.class, new Box(pos), entity -> true);
+                List<ChestMinecartEntity> minecarts = mc.world.getEntitiesByClass(
+                    ChestMinecartEntity.class, new Box(pos), entity -> true);
                 if (minecarts.isEmpty()) { toRemove.add(pos); continue; }
                 renderBox = getMinecartChestBox(minecarts.get(0));
             } else {
@@ -600,14 +657,7 @@ public class LootLens extends Module {
                 }
             }
             boolean isShulkerConfirmed = shulkerContainers.contains(pos);
-            SettingColor baseColor;
-            if (isShulkerConfirmed) {
-                baseColor = shulkerFoundColor.get();
-            } else {
-                boolean isStacked = type == StorageType.CHEST_MINECART
-                    && highlightStacked.get() && stackedMinecartCounts.getOrDefault(pos, 0) >= 2;
-                baseColor = isStacked ? stackedMinecartColor.get() : getColor(type);
-            }
+            SettingColor baseColor = isShulkerConfirmed ? shulkerFoundColor.get() : getColor(type);
             if (baseColor == null) continue;
             if (isSpectral) {
                 int fillAlpha = (type == StorageType.CHEST_MINECART) ? 0 : spectralFillAlpha.get();
@@ -624,7 +674,8 @@ public class LootLens extends Module {
         if (!toRemove.isEmpty()) {
             for (BlockPos removePos : toRemove) {
                 containers.remove(removePos); inventoryCheckedContainers.remove(removePos);
-                scannedByScanner.remove(removePos); shulkerContainers.remove(removePos); shulkerCounts.remove(removePos);
+                scannedByScanner.remove(removePos); shulkerContainers.remove(removePos);
+                shulkerCounts.remove(removePos);
             }
         }
     }
@@ -634,55 +685,239 @@ public class LootLens extends Module {
         for (int i = layers; i >= 1; i--) {
             double expansion = spread * i; double t = (double)(i - 1) / layers;
             int layerAlpha = Math.max(4, (int)(baseAlpha * (1.0 - t * t)));
-            event.renderer.box(box.expand(expansion), withAlpha(color, layerAlpha), withAlpha(color, 0), ShapeMode.Sides, 0);
+            event.renderer.box(box.expand(expansion), withAlpha(color, layerAlpha),
+                withAlpha(color, 0), ShapeMode.Sides, 0);
         }
     }
 
+    // ─────────────────────────── Beam Dispatch ───────────────────────────
+
     private void renderBeams(Render3DEvent event, List<BeamData> beams) {
         if (beams.isEmpty()) return;
+
+        // Optionally merge nearby beams regardless of style
         if (mergeBeams.get()) {
             List<BeamData> merged = new ArrayList<>();
             double distSq = Math.pow(mergeDistance.get(), 2);
             for (BeamData beam : beams) {
                 boolean skip = false;
-                double bx = (beam.box.minX + beam.box.maxX) / 2.0, bz = (beam.box.minZ + beam.box.maxZ) / 2.0;
+                double bx = (beam.box.minX + beam.box.maxX) / 2.0;
+                double bz = (beam.box.minZ + beam.box.maxZ) / 2.0;
                 for (BeamData m : merged) {
-                    double mx = (m.box.minX + m.box.maxX) / 2.0, mz = (m.box.minZ + m.box.maxZ) / 2.0;
+                    double mx = (m.box.minX + m.box.maxX) / 2.0;
+                    double mz = (m.box.minZ + m.box.maxZ) / 2.0;
                     if (Math.pow(bx - mx, 2) + Math.pow(bz - mz, 2) <= distSq) { skip = true; break; }
                 }
                 if (!skip) merged.add(beam);
             }
             beams = merged;
         }
-        for (BeamData beam : beams) renderBeam(event, beam.box, beam.color);
+
+        for (BeamData beam : beams) {
+            if (beamStyle.get() == BeamStyle.GUARDIAN) {
+                renderGuardianBeam(event, beam.box, beam.color);
+            } else {
+                renderBoxBeam(event, beam.box, beam.color);
+            }
+        }
     }
 
-    private void renderBeam(Render3DEvent event, Box anchorBox, SettingColor color) {
+    // ─────────────────────────── Box Beam (original) ───────────────────────────
+
+    private void renderBoxBeam(Render3DEvent event, Box anchorBox, SettingColor color) {
         double beamSize = beamWidth.get() / 100.0;
         double centerX  = (anchorBox.minX + anchorBox.maxX) / 2.0;
         double centerZ  = (anchorBox.minZ + anchorBox.maxZ) / 2.0;
-        int    worldBot = mc.world.getBottomY(), worldTop = worldBot + mc.world.getHeight();
-        Box beamBox = new Box(centerX-beamSize, worldBot, centerZ-beamSize, centerX+beamSize, worldTop, centerZ+beamSize);
+        int    worldBot = mc.world.getBottomY();
+        int    worldTop = worldBot + mc.world.getHeight();
+        Box beamBox = new Box(
+            centerX - beamSize, worldBot, centerZ - beamSize,
+            centerX + beamSize, worldTop, centerZ + beamSize);
         event.renderer.box(beamBox, withAlpha(color, 80), color, ShapeMode.Both, 0);
         for (int i = 1; i <= 2; i++) {
-            double exp = beamSize * i * 1.5; int alpha = Math.max(4, 30 / i);
-            Box bloom = new Box(centerX-beamSize-exp, worldBot, centerZ-beamSize-exp, centerX+beamSize+exp, worldTop, centerZ+beamSize+exp);
+            double exp   = beamSize * i * 1.5;
+            int    alpha = Math.max(4, 30 / i);
+            Box bloom = new Box(
+                centerX - beamSize - exp, worldBot, centerZ - beamSize - exp,
+                centerX + beamSize + exp, worldTop, centerZ + beamSize + exp);
             event.renderer.box(bloom, withAlpha(color, alpha), withAlpha(color, 0), ShapeMode.Sides, 0);
         }
     }
 
+    // ─────────────────────────── Guardian Beam ───────────────────────────
+    //
+    //  How it works
+    //  ─────────────
+    //  A guardian beam is N flat quads (default 4) that share the same central
+    //  vertical axis but are each rotated around that axis by (360 / N) degrees
+    //  relative to each other.  Every frame they all spin together at a
+    //  configurable speed driven by System.currentTimeMillis() so the animation
+    //  is smooth regardless of the game tick rate.
+    //
+    //  Each quad is drawn as two triangles (6 vertices) with:
+    //    • a left edge  at  (cx − radius, y, cz)  rotated by `angle`
+    //    • a right edge at  (cx + radius, y, cz)  rotated by `angle`
+    //  running the full height of the world.
+    //
+    //  We use raw Tessellator / BufferBuilder with the POSITION_COLOR vertex
+    //  format and the POSITION_COLOR_SHADER so we get true rotated geometry
+    //  rather than axis-aligned boxes.
+    //
+    //  The camera offset (cameraX/Y/Z) is subtracted from every vertex so the
+    //  geometry lines up with Meteor's render-space coordinate system.
+    //
+    //  After the strands a slim solid core box is drawn with event.renderer
+    //  for the bright centre highlight, and then optional bloom rings are
+    //  added on top with event.renderer as well.
+
+    private void renderGuardianBeam(Render3DEvent event, Box anchorBox, SettingColor color) {
+        if (mc.world == null) return;
+
+        double cx = (anchorBox.minX + anchorBox.maxX) / 2.0;
+        double cz = (anchorBox.minZ + anchorBox.maxZ) / 2.0;
+        int worldBot = mc.world.getBottomY();
+        int worldTop = worldBot + mc.world.getHeight();
+
+        double radius   = guardianBeamRadius.get();
+        int    strands  = guardianStrands.get();
+        double speed    = guardianSpinSpeed.get();
+
+        // Smooth time-based rotation (millis → radians)
+        // One full revolution = 6000 ms at speed 1.0
+        double rotationRad = (System.currentTimeMillis() % (long)(6000.0 / speed))
+                             / (6000.0 / speed) * Math.PI * 2.0;
+
+        // ── Camera position (1.21.4 API) ──────────────────────────────────
+        Vec3d camPos = mc.gameRenderer.getCamera().getPos();
+        double camX  = camPos.x;
+        double camY  = camPos.y;
+        double camZ  = camPos.z;
+
+        float r      = color.r / 255f;
+        float g      = color.g / 255f;
+        float b      = color.b / 255f;
+        float strandA = guardianStrandAlpha.get() / 255f;
+
+        // ── GL state ──────────────────────────────────────────────────────
+        RenderSystem.enableBlend();
+        RenderSystem.defaultBlendFunc();
+        RenderSystem.disableDepthTest();
+        RenderSystem.disableCull();
+
+        // 1.21.4: shader is set by key, not by lambda/instance
+        RenderSystem.setShader(ShaderProgramKeys.POSITION_COLOR);
+
+        // Build a fresh identity MatrixStack for camera-relative geometry
+        MatrixStack matrices = new MatrixStack();
+        matrices.push();
+
+        Tessellator tessellator = Tessellator.getInstance();
+        BufferBuilder buf = tessellator.begin(
+            VertexFormat.DrawMode.TRIANGLES, VertexFormats.POSITION_COLOR);
+
+        org.joml.Matrix4f matrix = matrices.peek().getPositionMatrix();
+
+        // All coordinates are relative to the camera
+        double relCx  = cx      - camX;
+        double relCz  = cz      - camZ;
+        double relBot = worldBot - camY;
+        double relTop = worldTop - camY;
+
+        // Draw each spinning strand (flat quad = 2 triangles = 6 vertices)
+        for (int i = 0; i < strands; i++) {
+            double angle = rotationRad + (Math.PI * 2.0 / strands) * i;
+            double cos   = Math.cos(angle);
+            double sin   = Math.sin(angle);
+
+            // Left and right edges of this quad in the rotated frame
+            double lx = relCx + cos * radius;
+            double lz = relCz + sin * radius;
+            double rx = relCx - cos * radius;
+            double rz = relCz - sin * radius;
+
+            float lxf = (float) lx, lzf = (float) lz;
+            float rxf = (float) rx, rzf = (float) rz;
+            float botF = (float) relBot, topF = (float) relTop;
+
+            // Triangle 1: bottom-left → bottom-right → top-left
+            buf.vertex(matrix, lxf, botF, lzf).color(r, g, b, strandA);
+            buf.vertex(matrix, rxf, botF, rzf).color(r, g, b, strandA);
+            buf.vertex(matrix, lxf, topF, lzf).color(r, g, b, strandA);
+
+            // Triangle 2: bottom-right → top-right → top-left
+            buf.vertex(matrix, rxf, botF, rzf).color(r, g, b, strandA);
+            buf.vertex(matrix, rxf, topF, rzf).color(r, g, b, strandA);
+            buf.vertex(matrix, lxf, topF, lzf).color(r, g, b, strandA);
+        }
+
+        BufferRenderer.drawWithGlobalProgram(buf.end());
+
+        matrices.pop();
+
+        // ── Restore GL state ──────────────────────────────────────────────
+        RenderSystem.enableDepthTest();
+        RenderSystem.enableCull();
+        RenderSystem.disableBlend();
+
+        // ── Solid core ─────────────────────────────────────────────────────
+        // A slim AABB at the centre drawn via event.renderer (no matrix needed)
+        int coreAlpha = guardianCoreAlpha.get();
+        if (coreAlpha > 0) {
+            double coreR = radius * 0.25; // core is 1/4 the strand radius
+            Box coreBox = new Box(
+                cx - coreR, worldBot, cz - coreR,
+                cx + coreR, worldTop, cz + coreR);
+            event.renderer.box(coreBox,
+                withAlpha(color, coreAlpha),
+                withAlpha(color, Math.min(255, coreAlpha + 40)),
+                ShapeMode.Both, 0);
+        }
+
+        // ── Bloom halo ─────────────────────────────────────────────────────
+        if (guardianGlow.get()) {
+            double glowR = guardianGlowRadius.get();
+            // Two nested bloom rings fade outward
+            for (int ring = 1; ring <= 2; ring++) {
+                double expansion = glowR * ring;
+                int    alpha     = Math.max(4, 22 / ring);
+                Box bloomBox = new Box(
+                    cx - radius - expansion, worldBot, cz - radius - expansion,
+                    cx + radius + expansion, worldTop, cz + radius + expansion);
+                event.renderer.box(bloomBox,
+                    withAlpha(color, alpha),
+                    withAlpha(color, 0),
+                    ShapeMode.Sides, 0);
+            }
+        }
+    }
+
+    // ─────────────────────────── Item Frame Rendering ───────────────────────────
+
     private void renderItemFrames(Render3DEvent event, List<BeamData> beams) {
         if (!scanItemFramesSetting.get()) return;
-        SettingColor color = itemFrameColor.get(); boolean isSpectral = renderMode.get() == RenderMode.SPECTRAL;
+        SettingColor color = itemFrameColor.get();
+        boolean isSpectral = renderMode.get() == RenderMode.SPECTRAL;
         for (ItemFrameEntity frame : itemFrameEntities.values()) {
             if (frame == null || frame.isRemoved()) continue;
-            if (isSpectral) event.renderer.box(frame.getBoundingBox(), withAlpha(color, spectralFillAlpha.get()), withAlpha(color, spectralOutline.get() ? color.a : 0), spectralOutline.get() ? ShapeMode.Both : ShapeMode.Sides, 0);
-            else { renderGlowLayers(event, frame.getBoundingBox(), color); event.renderer.box(frame.getBoundingBox(), withAlpha(color, 0), color, ShapeMode.Lines, 0); }
+            if (isSpectral) event.renderer.box(frame.getBoundingBox(),
+                withAlpha(color, spectralFillAlpha.get()),
+                withAlpha(color, spectralOutline.get() ? color.a : 0),
+                spectralOutline.get() ? ShapeMode.Both : ShapeMode.Sides, 0);
+            else {
+                renderGlowLayers(event, frame.getBoundingBox(), color);
+                event.renderer.box(frame.getBoundingBox(), withAlpha(color, 0), color, ShapeMode.Lines, 0);
+            }
         }
         for (GlowItemFrameEntity frame : glowItemFrameEntities.values()) {
             if (frame == null || frame.isRemoved()) continue;
-            if (isSpectral) event.renderer.box(frame.getBoundingBox(), withAlpha(color, spectralFillAlpha.get()), withAlpha(color, spectralOutline.get() ? color.a : 0), spectralOutline.get() ? ShapeMode.Both : ShapeMode.Sides, 0);
-            else { renderGlowLayers(event, frame.getBoundingBox(), color); event.renderer.box(frame.getBoundingBox(), withAlpha(color, 0), color, ShapeMode.Lines, 0); }
+            if (isSpectral) event.renderer.box(frame.getBoundingBox(),
+                withAlpha(color, spectralFillAlpha.get()),
+                withAlpha(color, spectralOutline.get() ? color.a : 0),
+                spectralOutline.get() ? ShapeMode.Both : ShapeMode.Sides, 0);
+            else {
+                renderGlowLayers(event, frame.getBoundingBox(), color);
+                event.renderer.box(frame.getBoundingBox(), withAlpha(color, 0), color, ShapeMode.Lines, 0);
+            }
         }
     }
 
@@ -696,12 +931,14 @@ public class LootLens extends Module {
         Box entityBox = minecart.getBoundingBox(); double chestSz = 14.0 / 16.0;
         double xPad = (entityBox.getLengthX() - chestSz) / 2.0, zPad = (entityBox.getLengthZ() - chestSz) / 2.0;
         double minY = entityBox.maxY - (10.0 / 16.0);
-        return new Box(entityBox.minX + xPad, minY, entityBox.minZ + zPad, entityBox.maxX - xPad, entityBox.maxY, entityBox.maxZ - zPad);
+        return new Box(entityBox.minX + xPad, minY, entityBox.minZ + zPad,
+                       entityBox.maxX - xPad, entityBox.maxY, entityBox.maxZ - zPad);
     }
 
     private Box createPaddedBox(BlockPos pos) {
         double p = 0.0625;
-        return new Box(pos.getX()+p, pos.getY()+p, pos.getZ()+p, pos.getX()+1-p, pos.getY()+1-p, pos.getZ()+1-p);
+        return new Box(pos.getX()+p, pos.getY()+p, pos.getZ()+p,
+                       pos.getX()+1-p, pos.getY()+1-p, pos.getZ()+1-p);
     }
 
     private Box createShulkerBox(BlockPos pos, BlockState state) {
@@ -714,8 +951,10 @@ public class LootLens extends Module {
 
     private Box createPaddedDoubleChestBox(BlockPos pos1, BlockPos pos2) {
         double p = 0.0625;
-        double minX = Math.min(pos1.getX(), pos2.getX()), minY = Math.min(pos1.getY(), pos2.getY()), minZ = Math.min(pos1.getZ(), pos2.getZ());
-        double maxX = Math.max(pos1.getX(), pos2.getX())+1, maxY = Math.max(pos1.getY(), pos2.getY())+1, maxZ = Math.max(pos1.getZ(), pos2.getZ())+1;
+        double minX = Math.min(pos1.getX(), pos2.getX()), minY = Math.min(pos1.getY(), pos2.getY()),
+               minZ = Math.min(pos1.getZ(), pos2.getZ());
+        double maxX = Math.max(pos1.getX(), pos2.getX())+1, maxY = Math.max(pos1.getY(), pos2.getY())+1,
+               maxZ = Math.max(pos1.getZ(), pos2.getZ())+1;
         return new Box(minX+p, minY+p, minZ+p, maxX-p, maxY-p, maxZ-p);
     }
 
@@ -728,7 +967,8 @@ public class LootLens extends Module {
             case BARREL         -> block == Blocks.BARREL;
             case SHULKER_BOX    -> block instanceof ShulkerBoxBlock;
             case ENDER_CHEST    -> block == Blocks.ENDER_CHEST;
-            case FURNACE        -> block == Blocks.FURNACE || block == Blocks.BLAST_FURNACE || block == Blocks.SMOKER;
+            case FURNACE        -> block == Blocks.FURNACE || block == Blocks.BLAST_FURNACE
+                                                           || block == Blocks.SMOKER;
             case DISPENSER      -> block == Blocks.DISPENSER;
             case DROPPER        -> block == Blocks.DROPPER;
             case HOPPER         -> block == Blocks.HOPPER;
@@ -775,7 +1015,6 @@ public class LootLens extends Module {
             try {
                 ChestType chestType = state.get(ChestBlock.CHEST_TYPE);
                 if (chestType == ChestType.SINGLE) continue;
-                // Use false so we don't require the neighbour to be in containers yet
                 BlockPos adjacent = findAdjacentChest(pos, false);
                 if (adjacent == null) continue;
                 counted.add(pos); counted.add(adjacent);

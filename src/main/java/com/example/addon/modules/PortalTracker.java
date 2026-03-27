@@ -12,9 +12,9 @@ import java.util.concurrent.CopyOnWriteArrayList;
 
 import com.example.addon.HuntingUtilities;
 import com.example.addon.utils.XaeroPortalBridge;
+import com.example.addon.utils.XaerosPlusPortalDB;
 import com.example.addon.utils.XaerosWaypointHelper;
 import com.example.addon.utils.XaerosWaypointHelper.WaypointEntry;
-import com.example.addon.utils.XaerosPlusPortalDB;
 
 import meteordevelopment.meteorclient.events.render.Render3DEvent;
 import meteordevelopment.meteorclient.events.world.BlockUpdateEvent;
@@ -25,15 +25,14 @@ import meteordevelopment.meteorclient.settings.ColorSetting;
 import meteordevelopment.meteorclient.settings.DoubleSetting;
 import meteordevelopment.meteorclient.settings.EnumSetting;
 import meteordevelopment.meteorclient.settings.IntSetting;
+import meteordevelopment.meteorclient.settings.KeybindSetting;
 import meteordevelopment.meteorclient.settings.Setting;
 import meteordevelopment.meteorclient.settings.SettingGroup;
-import meteordevelopment.meteorclient.settings.KeybindSetting;
+import meteordevelopment.meteorclient.systems.modules.Module;
 import meteordevelopment.meteorclient.utils.misc.Keybind;
 import meteordevelopment.meteorclient.utils.player.FindItemResult;
 import meteordevelopment.meteorclient.utils.player.InvUtils;
 import meteordevelopment.meteorclient.utils.player.Rotations;
-import meteordevelopment.meteorclient.systems.modules.Module;
-import meteordevelopment.meteorclient.utils.render.color.Color;
 import meteordevelopment.meteorclient.utils.render.color.SettingColor;
 import meteordevelopment.orbit.EventHandler;
 import net.minecraft.block.Block;
@@ -77,6 +76,17 @@ public class PortalTracker extends Module {
         @Override public String toString() { return displayName; }
     }
 
+    // ── Beam Style ────────────────────────────────────────────────
+    public enum BeamStyle {
+        BOX("Box"),
+        GUARDIAN("Guardian");
+
+        private final String displayName;
+        BeamStyle(String name) { this.displayName = name; }
+
+        @Override public String toString() { return displayName; }
+    }
+
     // ── Setting Groups ─────────────────────────────────────────────
     private final SettingGroup sgGeneral       = settings.getDefaultGroup();
     private final SettingGroup sgNetherPortals = settings.createGroup("Nether Portals");
@@ -84,6 +94,7 @@ public class PortalTracker extends Module {
     private final SettingGroup sgRender        = settings.createGroup("Render");
     private final SettingGroup sgGlow          = settings.createGroup("Glow");
     private final SettingGroup sgSpectral      = settings.createGroup("Spectral");
+    private final SettingGroup sgBeam          = settings.createGroup("Beam");
     private final SettingGroup sgPlatform      = settings.createGroup("Platform 9\u00BE");
 
     // ── General ────────────────────────────────────────────────────
@@ -106,18 +117,6 @@ public class PortalTracker extends Module {
     private final Setting<Boolean> onlyShowCreated = sgGeneral.add(new BoolSetting.Builder()
         .name("only-show-created").description("Only highlight portals you've created.")
         .defaultValue(false).build());
-
-    private final Setting<Boolean> showBeam = sgGeneral.add(new BoolSetting.Builder()
-        .name("show-beam").description("Show a vertical beam above each tracked portal.")
-        .defaultValue(true).build());
-
-    private final Setting<Boolean> onlyNearestBeam = sgGeneral.add(new BoolSetting.Builder()
-        .name("only-nearest-beam").description("Only render the beam for the portal closest to the player.")
-        .defaultValue(false).visible(showBeam::get).build());
-
-    private final Setting<Integer> beamWidth = sgGeneral.add(new IntSetting.Builder()
-        .name("beam-width").description("Beam width in hundredths of a block.")
-        .defaultValue(15).min(5).max(50).sliderMin(5).sliderMax(50).visible(showBeam::get).build());
 
     private final Setting<Boolean> dynamicColors = sgGeneral.add(new BoolSetting.Builder()
         .name("dynamic-colors").description("Animate portal colors. Each type uses a distinct hue offset so types stay visually distinguishable.")
@@ -163,7 +162,6 @@ public class PortalTracker extends Module {
         .name("shape-mode").description("Render style for portal highlights.")
         .defaultValue(ShapeMode.Both).build());
 
-    /** Selects between GLOW (layered bloom) and SPECTRAL (crisp outline, like spectral arrow). */
     private final Setting<HighlightStyle> highlightStyle = sgRender.add(new EnumSetting.Builder<HighlightStyle>()
         .name("highlight-style")
         .description("GLOW renders layered bloom around the unified portal box. SPECTRAL renders a crisp outline only, like the spectral arrow effect.")
@@ -205,6 +203,79 @@ public class PortalTracker extends Module {
         .name("pulse").description("Pulsate the spectral outline alpha over time, like the vanilla glowing effect.")
         .defaultValue(true)
         .visible(() -> highlightStyle.get() == HighlightStyle.SPECTRAL).build());
+
+    // ── Beam ───────────────────────────────────────────────────────
+    private final Setting<Boolean> showBeam = sgBeam.add(new BoolSetting.Builder()
+        .name("show-beam").description("Show a vertical beam above each tracked portal.")
+        .defaultValue(true).build());
+
+    private final Setting<Boolean> onlyNearestBeam = sgBeam.add(new BoolSetting.Builder()
+        .name("only-nearest-beam").description("Only render the beam for the portal closest to the player.")
+        .defaultValue(false).visible(showBeam::get).build());
+
+    private final Setting<BeamStyle> beamStyle = sgBeam.add(new EnumSetting.Builder<BeamStyle>()
+        .name("beam-style")
+        .description("BOX = simple axis-aligned box beam. GUARDIAN = spinning guardian-style beam.")
+        .defaultValue(BeamStyle.GUARDIAN)
+        .visible(showBeam::get).build());
+
+    // ── BOX beam ──
+    private final Setting<Integer> beamWidth = sgBeam.add(new IntSetting.Builder()
+        .name("beam-width").description("Box beam width in hundredths of a block.")
+        .defaultValue(15).min(5).max(50).sliderMin(5).sliderMax(50)
+        .visible(() -> showBeam.get() && beamStyle.get() == BeamStyle.BOX).build());
+
+    private final Setting<Boolean> mergeBeams = sgBeam.add(new BoolSetting.Builder()
+        .name("merge-beams").description("Merge beams for nearby portals to reduce clutter.")
+        .defaultValue(false).visible(showBeam::get).build());
+
+    private final Setting<Double> mergeDistance = sgBeam.add(new DoubleSetting.Builder()
+        .name("merge-distance").description("Distance within which beams are merged.")
+        .defaultValue(3.0).min(0).sliderMax(16)
+        .visible(() -> showBeam.get() && mergeBeams.get()).build());
+
+    // ── GUARDIAN beam ──
+    private final Setting<Double> guardianRadius = sgBeam.add(new DoubleSetting.Builder()
+        .name("guardian-radius")
+        .description("Radius of the guardian beam strands from centre (blocks). Higher = thicker looking beam.")
+        .defaultValue(0.08).min(0.01).max(0.6).sliderMax(0.3)
+        .visible(() -> showBeam.get() && beamStyle.get() == BeamStyle.GUARDIAN).build());
+
+    private final Setting<Integer> guardianStrands = sgBeam.add(new IntSetting.Builder()
+        .name("guardian-strands")
+        .description("Number of spinning strands that make up the beam (2-8). 4 looks like a true guardian beam.")
+        .defaultValue(4).min(2).max(8).sliderMax(8)
+        .visible(() -> showBeam.get() && beamStyle.get() == BeamStyle.GUARDIAN).build());
+
+    private final Setting<Double> guardianSpinSpeed = sgBeam.add(new DoubleSetting.Builder()
+        .name("guardian-spin-speed")
+        .description("How fast the beam rotates. 1.0 = one full revolution every ~6 seconds.")
+        .defaultValue(1.0).min(0.1).max(5.0).sliderMax(3.0)
+        .visible(() -> showBeam.get() && beamStyle.get() == BeamStyle.GUARDIAN).build());
+
+    private final Setting<Integer> guardianCoreAlpha = sgBeam.add(new IntSetting.Builder()
+        .name("guardian-core-alpha")
+        .description("Alpha of the solid centre core of the guardian beam (0 = no core).")
+        .defaultValue(90).min(0).max(255).sliderMax(200)
+        .visible(() -> showBeam.get() && beamStyle.get() == BeamStyle.GUARDIAN).build());
+
+    private final Setting<Integer> guardianStrandAlpha = sgBeam.add(new IntSetting.Builder()
+        .name("guardian-strand-alpha")
+        .description("Alpha of the outer spinning strands.")
+        .defaultValue(160).min(10).max(255).sliderMax(255)
+        .visible(() -> showBeam.get() && beamStyle.get() == BeamStyle.GUARDIAN).build());
+
+    private final Setting<Boolean> guardianGlow = sgBeam.add(new BoolSetting.Builder()
+        .name("guardian-glow")
+        .description("Add a soft bloom halo around the guardian beam.")
+        .defaultValue(true)
+        .visible(() -> showBeam.get() && beamStyle.get() == BeamStyle.GUARDIAN).build());
+
+    private final Setting<Double> guardianGlowRadius = sgBeam.add(new DoubleSetting.Builder()
+        .name("guardian-glow-radius")
+        .description("Radius of the bloom halo around the guardian beam.")
+        .defaultValue(0.18).min(0.02).max(1.0).sliderMax(0.5)
+        .visible(() -> showBeam.get() && beamStyle.get() == BeamStyle.GUARDIAN && guardianGlow.get()).build());
 
     // ── Platform 9¾ ───────────────────────────────────────────────
     private final Setting<Keybind> platformKey = sgPlatform.add(new KeybindSetting.Builder()
@@ -607,6 +678,9 @@ public class PortalTracker extends Module {
     private void onRender(Render3DEvent event) {
         if (mc.player == null || mc.world == null) return;
 
+        // Collect beams to render (supports optional merging)
+        List<BeamData> beamsToRender = new ArrayList<>();
+
         PortalStructure nearest = null;
         if (showBeam.get() && onlyNearestBeam.get()) {
             double minSq = Double.MAX_VALUE;
@@ -625,7 +699,6 @@ public class PortalTracker extends Module {
             SettingColor color = getSettingColor(structure.type);
             if (color == null) continue;
 
-            // Every path renders the unified bounding box — never individual per-block boxes.
             if (highlightStyle.get() == HighlightStyle.SPECTRAL) {
                 renderSpectral(event, structure, color);
             } else {
@@ -638,19 +711,132 @@ public class PortalTracker extends Module {
             }
 
             if (showBeam.get() && (!onlyNearestBeam.get() || structure == nearest))
-                renderBeam(event, structure.boundingBox, color);
+                beamsToRender.add(new BeamData(structure.boundingBox, color));
+        }
+
+        if (!beamsToRender.isEmpty()) renderBeams(event, beamsToRender);
+    }
+
+    // ── Beam Dispatch ──────────────────────────────────────────────
+    private void renderBeams(Render3DEvent event, List<BeamData> beams) {
+        // Optional merging: skip beams whose XZ centre is too close to an already-queued one
+        if (mergeBeams.get()) {
+            List<BeamData> merged = new ArrayList<>();
+            double distSq = Math.pow(mergeDistance.get(), 2);
+            for (BeamData beam : beams) {
+                boolean skip = false;
+                double bx = (beam.box.minX + beam.box.maxX) / 2.0;
+                double bz = (beam.box.minZ + beam.box.maxZ) / 2.0;
+                for (BeamData m : merged) {
+                    double mx = (m.box.minX + m.box.maxX) / 2.0;
+                    double mz = (m.box.minZ + m.box.maxZ) / 2.0;
+                    if (Math.pow(bx - mx, 2) + Math.pow(bz - mz, 2) <= distSq) { skip = true; break; }
+                }
+                if (!skip) merged.add(beam);
+            }
+            beams = merged;
+        }
+
+        for (BeamData beam : beams) {
+            if (beamStyle.get() == BeamStyle.GUARDIAN)
+                renderGuardianBeam(event, beam.box, beam.color);
+            else
+                renderBoxBeam(event, beam.box, beam.color);
+        }
+    }
+
+    // ── Box Beam ───────────────────────────────────────────────────
+    private void renderBoxBeam(Render3DEvent event, Box anchorBox, SettingColor color) {
+        double beamSize = beamWidth.get() / 100.0;
+        double centerX  = (anchorBox.minX + anchorBox.maxX) / 2.0;
+        double centerZ  = (anchorBox.minZ + anchorBox.maxZ) / 2.0;
+        int worldBot = mc.world.getBottomY(), worldTop = worldBot + mc.world.getHeight();
+        Box beamBox = new Box(
+            centerX - beamSize, worldBot, centerZ - beamSize,
+            centerX + beamSize, worldTop, centerZ + beamSize);
+        renderGlowLayers(event, beamBox, color);
+        event.renderer.box(beamBox, withAlpha(color, 60), color, ShapeMode.Both, 0);
+    }
+
+    // ── Guardian Beam ──────────────────────────────────────────────
+    //
+    //  N thin AABBs (default 4 "strands") orbit around the central axis.
+    //  Each strand centre is at (cx + cos(angle)*radius, cz + sin(angle)*radius)
+    //  and the angle advances each frame via System.currentTimeMillis(), giving
+    //  smooth spin independent of tick rate.  Everything is drawn via
+    //  event.renderer.box() — no raw GL calls needed.
+
+    private void renderGuardianBeam(Render3DEvent event, Box anchorBox, SettingColor color) {
+        if (mc.world == null) return;
+
+        double cx      = (anchorBox.minX + anchorBox.maxX) / 2.0;
+        double cz      = (anchorBox.minZ + anchorBox.maxZ) / 2.0;
+        int    worldBot = mc.world.getBottomY();
+        int    worldTop = worldBot + mc.world.getHeight();
+
+        double radius  = guardianRadius.get();
+        int    strands = guardianStrands.get();
+        double speed   = guardianSpinSpeed.get();
+
+        // Smooth rotation: one full revolution = 6000 ms at speed 1.0
+        double period      = 6000.0 / speed;
+        double rotationRad = (System.currentTimeMillis() % (long) period) / period * Math.PI * 2.0;
+
+        // Each strand is a thin AABB. strandHalf = half-width of the box.
+        double strandHalf = Math.max(0.005, radius * 0.15);
+        int    strandAlpha = guardianStrandAlpha.get();
+
+        for (int i = 0; i < strands; i++) {
+            double angle = rotationRad + (Math.PI * 2.0 / strands) * i;
+            double cos   = Math.cos(angle);
+            double sin   = Math.sin(angle);
+
+            double scx = cx + cos * radius;
+            double scz = cz + sin * radius;
+
+            Box strandBox = new Box(
+                scx - strandHalf, worldBot, scz - strandHalf,
+                scx + strandHalf, worldTop, scz + strandHalf
+            );
+            event.renderer.box(strandBox,
+                withAlpha(color, strandAlpha / 2),
+                withAlpha(color, strandAlpha),
+                ShapeMode.Both, 0);
+        }
+
+        // Solid core
+        int coreAlpha = guardianCoreAlpha.get();
+        if (coreAlpha > 0) {
+            double coreHalf = strandHalf * 1.5;
+            Box coreBox = new Box(
+                cx - coreHalf, worldBot, cz - coreHalf,
+                cx + coreHalf, worldTop, cz + coreHalf
+            );
+            event.renderer.box(coreBox,
+                withAlpha(color, coreAlpha),
+                withAlpha(color, Math.min(255, coreAlpha + 60)),
+                ShapeMode.Both, 0);
+        }
+
+        // Bloom halo
+        if (guardianGlow.get()) {
+            double glowR = guardianGlowRadius.get();
+            for (int ring = 1; ring <= 3; ring++) {
+                double expansion = glowR * ring * 0.5;
+                int    alpha     = Math.max(3, 28 / (ring * ring));
+                Box bloomBox = new Box(
+                    cx - radius - expansion, worldBot, cz - radius - expansion,
+                    cx + radius + expansion, worldTop, cz + radius + expansion
+                );
+                event.renderer.box(bloomBox,
+                    withAlpha(color, alpha),
+                    withAlpha(color, 0),
+                    ShapeMode.Sides, 0);
+            }
         }
     }
 
     // ── Spectral ───────────────────────────────────────────────────
-
-    /**
-     * Spectral-arrow style highlight: one crisp outline box over the entire unified portal
-     * bounding box, with an optional faint fill and vanilla-style alpha pulse.
-     *
-     * The obsidian frame (when enabled) is also rendered as a single merged outline box —
-     * not as a loop of per-block outlines.
-     */
     private void renderSpectral(Render3DEvent event, PortalStructure structure, SettingColor color) {
         double expand    = spectralExpand.get();
         Box    renderBox = structure.boundingBox.expand(expand);
@@ -658,7 +844,6 @@ public class PortalTracker extends Module {
         int lineAlpha = spectralLineAlpha.get();
         int fillAlpha = spectralFillAlpha.get();
         if (spectralPulse.get()) {
-            // Pulse 60-100 % of configured alpha over ~1.5 s, mimicking vanilla's glowing shader.
             double pulse = 0.6 + 0.4 * (0.5 + 0.5 * Math.sin(System.currentTimeMillis() / 750.0 * Math.PI));
             lineAlpha = (int)(lineAlpha * pulse);
             fillAlpha = (int)(fillAlpha * pulse);
@@ -678,11 +863,6 @@ public class PortalTracker extends Module {
     }
 
     // ── Glow / Frame Helpers ───────────────────────────────────────
-
-    /**
-     * Glow-mode frame: computes one unified bounding box around all bordering obsidian
-     * and renders it as a single call — no per-block iteration at render time.
-     */
     private void renderNetherFrame(Render3DEvent event, PortalStructure structure, SettingColor color) {
         Box frameBox = buildFrameBox(structure);
         if (frameBox != null) {
@@ -693,10 +873,6 @@ public class PortalTracker extends Module {
         event.renderer.box(structure.boundingBox, withAlpha(color, 0), color, shapeMode.get(), 0);
     }
 
-    /**
-     * Builds one bounding box that wraps every obsidian block directly adjacent to the
-     * portal interior. Returns null if no obsidian is found in the loaded world.
-     */
     private Box buildFrameBox(PortalStructure structure) {
         Box frameBox = null;
         for (BlockPos portalPos : structure.portalBlocks) {
@@ -710,16 +886,6 @@ public class PortalTracker extends Module {
             }
         }
         return frameBox != null ? frameBox.expand(0.02) : null;
-    }
-
-    private void renderBeam(Render3DEvent event, Box anchorBox, SettingColor color) {
-        double beamSize = beamWidth.get() / 100.0;
-        double centerX  = (anchorBox.minX + anchorBox.maxX) / 2.0;
-        double centerZ  = (anchorBox.minZ + anchorBox.maxZ) / 2.0;
-        int worldBot = mc.world.getBottomY(), worldTop = worldBot + mc.world.getHeight();
-        Box beamBox = new Box(centerX-beamSize, worldBot, centerZ-beamSize, centerX+beamSize, worldTop, centerZ+beamSize);
-        renderGlowLayers(event, beamBox, color);
-        event.renderer.box(beamBox, withAlpha(color, 60), color, ShapeMode.Both, 0);
     }
 
     private void renderGlowLayers(Render3DEvent event, Box box, SettingColor color) {
@@ -810,6 +976,8 @@ public class PortalTracker extends Module {
             this.boundingBox = bb; this.portalBlocks = pb; this.isCreated = ic; this.type = t;
         }
     }
+
+    private record BeamData(Box box, SettingColor color) {}
 
     // ── Platform 9¾ ───────────────────────────────────────────────
     private void startPlatformBuild() {

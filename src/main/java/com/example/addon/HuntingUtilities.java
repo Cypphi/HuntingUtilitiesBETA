@@ -3,6 +3,7 @@ package com.example.addon;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import com.example.addon.hud.InfoAssistantHud;
 import com.example.addon.hud.LootLensHud;
 import com.example.addon.hud.PortalTrackerHud;
 import com.example.addon.hud.PositionHud;
@@ -69,6 +70,7 @@ public class HuntingUtilities extends MeteorAddon {
         Hud.get().register(PortalTrackerHud.INFO);
         Hud.get().register(LootLensHud.INFO);
         Hud.get().register(PositionHud.INFO);
+        Hud.get().register(InfoAssistantHud.INFO);
     }
 
     @Override
